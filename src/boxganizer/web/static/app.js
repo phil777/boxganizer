@@ -94,6 +94,8 @@ const api = {
 
 const typeOf = (box) => state.types.get(box.box_type);
 
+const isRootType = (box) => !!(typeOf(box) || {}).is_root;
+
 /** This type and its ancestors, nearest first — the view lookup order. */
 const lineage = (box) => [box.box_type, ...((typeOf(box) || {}).ancestors || [])];
 
@@ -152,9 +154,12 @@ async function openBox(ref, options = {}) {
     // A child opened from a view extends the path; anything else starts a new one.
     state.trail = options.trail ? [...options.trail, box] : [box];
     state.current = box;
-    // The box's own saved preference wins; otherwise keep browsing in whatever
-    // mode we are already in (a child opened from a folder stays in content).
-    state.mode = setting(box, "display", options.mode || "icon");
+    // Content first: what a box shows is its content, and its icon is the
+    // alternative. A saved preference wins, then the mode we are browsing in.
+    // The root box is always its content — it exists to hold what is inside it.
+    state.mode = isRootType(box)
+      ? "content"
+      : setting(box, "display", options.mode || "content");
     renderMain();
     renderBreadcrumb();
     markSelected();
@@ -206,15 +211,37 @@ function renderMain() {
     canvas.append(emptyMessage("Nothing selected. Pick a box on the left."));
     return;
   }
+  const forced = isRootType(box);
   document.querySelectorAll("#mode-toggle button").forEach((button) => {
     button.setAttribute("aria-pressed", String(button.dataset.mode === state.mode));
+    button.disabled = forced && button.dataset.mode === "icon";
+    button.title =
+      forced && button.dataset.mode === "icon"
+        ? "The root box always shows what is inside it"
+        : `Show the box as its ${button.dataset.mode}`;
   });
   const view = viewFor(box);
   if (!view) {
     canvas.append(emptyMessage(`No view for type ${box.box_type}.`));
     return;
   }
-  view.render(canvas, box, context, state.mode);
+  view.render(canvas, box, context, state.mode, { embedded: false, depth: 0 });
+}
+
+/**
+ * How deep content is rendered inside content. A grid inside a grid inside a
+ * grid would otherwise fetch the library to pieces; past this depth a child is
+ * shown as its icon instead.
+ */
+const MAX_EMBED_DEPTH = 2;
+
+/**
+ * Draw one box's content into `container`, as used by grid cells and by the root
+ * view. The caller owns the container; this only fills it.
+ */
+async function renderContent(container, box, { depth, embedded = true }) {
+  const view = viewFor(box) || views.get("*");
+  await view.render(container, box, context, "content", { embedded, depth });
 }
 
 function emptyMessage(text) {
@@ -682,18 +709,19 @@ function iconPane(box, note = "") {
 
 /* A plain box: its icon, or everything the row knows. */
 registerView("box", {
-  render(canvas, box, ctx, mode) {
+  render(canvas, box, ctx, mode, opts = {}) {
     if (mode !== "content") {
       canvas.append(iconPane(box));
       return;
     }
-    canvas.append(detailPanel(box, ctx));
+    // A cell or a root block is too small for the whole detail panel.
+    canvas.append(opts.embedded ? iconPane(box) : detailPanel(box, ctx));
   },
 });
 
 /* An image: scaled into whatever space the screen has left, ratio untouched. */
 registerView("image", {
-  render(canvas, box, ctx, mode) {
+  render(canvas, box, ctx, mode, opts = {}) {
     if (mode !== "content") {
       canvas.append(iconPane(box));
       return;
@@ -729,7 +757,7 @@ function gridOptions(box) {
  * Drag to move, onto an occupied cell to swap, double-click to open.
  */
 registerView("grid", {
-  async render(canvas, box, ctx) {
+  async render(canvas, box, ctx, mode, opts = {}) {
     if (ctx.mode() !== "content") {
       canvas.append(iconPane(box));
       return;
@@ -747,7 +775,7 @@ registerView("grid", {
       Object.entries(options.cells || {}).map(([where, uuid]) => [where, uuid])
     );
 
-    canvas.append(gridToolbar(box, options, ctx));
+    if (!opts.embedded) canvas.append(gridToolbar(box, options, ctx));
 
     const board = document.createElement("div");
     board.className = "grid-board";
@@ -758,7 +786,7 @@ registerView("grid", {
     for (let row = 0; row < options.rows; row += 1) {
       for (let column = 0; column < options.columns; column += 1) {
         board.append(
-          gridCell(box, ctx, row, column, cells.get(`${row},${column}`), byUuid)
+          gridCell(box, ctx, row, column, byUuid.get(cells.get(`${row},${column}`)), opts.depth || 0)
         );
       }
     }
@@ -863,30 +891,38 @@ function gridToolbar(box, options, ctx) {
   return bar;
 }
 
-function gridCell(box, ctx, row, column, uuid, byUuid) {
+/**
+ * One cell. The child's *content* is drawn inside it — the picture, the text,
+ * the nested listing — with a small caption for identity. Beyond
+ * MAX_EMBED_DEPTH a child falls back to its icon so a grid of grids cannot
+ * fetch the whole library at once.
+ */
+function gridCell(box, ctx, row, column, child, depth) {
   const cell = document.createElement("div");
   cell.className = "grid-cell";
   cell.dataset.row = String(row);
   cell.dataset.column = String(column);
-  const child = uuid ? byUuid.get(uuid) : null;
+
   if (child) {
     cell.classList.add("occupied");
     cell.dataset.uuid = child.uuid;
-    const tile = document.createElement("div");
-    tile.className = "child";
-    tile.draggable = true;
-    const glyph = document.createElement("span");
-    glyph.className = "child-icon";
-    glyph.textContent = child.icon;
-    const name = document.createElement("span");
-    name.className = "child-name";
-    name.textContent = child.name;
-    tile.append(glyph, name);
-    tile.addEventListener("dragstart", (event) => {
-      event.dataTransfer.setData("text/plain", child.uuid);
-      event.dataTransfer.effectAllowed = "move";
-    });
-    cell.append(tile);
+    cell.draggable = true;
+    const content = document.createElement("div");
+    content.className = "cell-content";
+    cell.append(content);
+    const childDepth = depth + 1;
+    if (childDepth <= MAX_EMBED_DEPTH) {
+      renderContent(content, child, { depth: childDepth }).catch((error) => {
+        content.replaceChildren(emptyMessage(error.message));
+      });
+    } else {
+      content.append(iconPane(child));
+    }
+    const caption = document.createElement("span");
+    caption.className = "cell-caption muted";
+    caption.textContent = `${child.icon} ${child.name}`;
+    cell.append(caption);
+    cell.title = `Drag to move · double-click to open ${child.name}`;
   } else {
     const mark = document.createElement("span");
     mark.className = "cell-coords muted";
@@ -894,6 +930,11 @@ function gridCell(box, ctx, row, column, uuid, byUuid) {
     cell.append(mark);
   }
 
+  cell.addEventListener("dragstart", (event) => {
+    if (!child) return;
+    event.dataTransfer.setData("text/plain", child.uuid);
+    event.dataTransfer.effectAllowed = "move";
+  });
   cell.addEventListener("dragover", (event) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
@@ -921,7 +962,6 @@ function gridCell(box, ctx, row, column, uuid, byUuid) {
     const here = [row, column];
     ctx.showMenu(event.clientX, event.clientY, [
       child && { label: `Open ${child.name}`, run: () => ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() }) },
-      child && { label: "Show as icon", run: () => ctx.open(child.uuid, { mode: "icon" }) },
       child && {
         label: "Empty this cell",
         run: async () => {
@@ -935,6 +975,52 @@ function gridCell(box, ctx, row, column, uuid, byUuid) {
   });
   return cell;
 }
+
+/* ----------------------------------------------------------------- root ---- */
+
+/**
+ * The root box: never an icon, and it shows what is inside each of its children
+ * rather than a row of icons. Each block is a window on one child's content;
+ * click its heading to go there.
+ */
+registerView("root", {
+  async render(canvas, box, ctx) {
+    let children = [];
+    try {
+      children = await api.children(box.uuid);
+    } catch (error) {
+      canvas.append(emptyMessage(`Cannot list the children: ${error.message}`));
+      return;
+    }
+    const stack = document.createElement("div");
+    stack.className = "root-view";
+    canvas.append(stack);
+    if (!children.length) {
+      stack.append(emptyMessage("The root is empty. Create a box from the panel on the left."));
+      return;
+    }
+    children.forEach((child) => {
+      const block = document.createElement("section");
+      block.className = "root-child";
+      block.dataset.uuid = child.uuid;
+      const heading = document.createElement("button");
+      heading.type = "button";
+      heading.className = "root-child-head";
+      heading.textContent = `${child.icon} ${child.name}`;
+      heading.title = `Open ${child.name}`;
+      heading.addEventListener("click", () =>
+        ctx.open(child.uuid, { trail: ctx.trail(), mode: "content" })
+      );
+      const body = document.createElement("div");
+      body.className = "root-child-body";
+      block.append(heading, body);
+      stack.append(block);
+      renderContent(body, child, { depth: 1 }).catch((error) => {
+        body.replaceChildren(emptyMessage(error.message));
+      });
+    });
+  },
+});
 
 /* -------------------------------------------------------------- folders ---- */
 
@@ -950,7 +1036,7 @@ function folderOptions(box) {
  * contained it.
  */
 const folderView = {
-  async render(canvas, box, ctx) {
+  async render(canvas, box, ctx, mode, opts = {}) {
     if (ctx.mode() !== "content") {
       canvas.append(iconPane(box));
       return;
@@ -963,6 +1049,7 @@ const folderView = {
 
     const toolbar = document.createElement("div");
     toolbar.className = "children-toolbar";
+    if (opts.embedded) toolbar.classList.add("compact");
     const title = document.createElement("strong");
     title.textContent = `${box.icon} ${box.name}`;
     const count = document.createElement("span");
@@ -979,7 +1066,9 @@ const folderView = {
     add.type = "button";
     add.textContent = "＋ New box here";
     add.addEventListener("click", () => ctx.newBox(box.uuid));
-    toolbar.append(title, count, toggle, add);
+    // Inside a cell or a root block there is no room, and no reason, to change
+    // what the contained folder is showing.
+    toolbar.append(title, count, ...(opts.embedded ? [] : [toggle, add]));
 
     const holder = document.createElement("div");
     holder.className = "children";
@@ -1053,7 +1142,7 @@ function textOptions(box) {
 }
 
 registerView("text", {
-  async render(canvas, box, ctx) {
+  async render(canvas, box, ctx, mode, opts = {}) {
     if (ctx.mode() !== "content") {
       canvas.append(iconPane(box));
       return;
@@ -1107,10 +1196,12 @@ registerView("text", {
 
 /* The fallback for every type that has nothing better yet. */
 registerView("*", {
-  render(canvas, box, ctx, mode) {
-    canvas.append(
-      iconPane(box, mode === "content" ? `No content view for type ${box.box_type}; showing its icon.` : "")
-    );
+  render(canvas, box, ctx, mode, opts = {}) {
+    const note =
+      mode === "content" && !opts.embedded
+        ? `No content view for type ${box.box_type}; showing its icon.`
+        : "";
+    canvas.append(iconPane(box, note));
   },
 });
 

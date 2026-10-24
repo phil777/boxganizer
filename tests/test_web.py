@@ -415,10 +415,41 @@ def test_a_child_opens_over_its_parent(client: TestClient) -> None:
     assert "ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() })" in script
 
 
-def test_a_saved_display_setting_beats_the_inherited_mode(client: TestClient) -> None:
-    """The box's own preference wins; otherwise the mode you browse in carries."""
+def test_content_is_the_default_and_a_saved_setting_still_wins(client: TestClient) -> None:
+    """A box shows its content first; a saved preference beats the browsing mode."""
     script = client.get("/static/app.js").text
-    assert 'setting(box, "display", options.mode || "icon")' in script
+    assert 'setting(box, "display", options.mode || "content")' in script
+    assert '|| "icon"' not in script
+
+
+def test_the_root_box_is_always_its_content(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "const isRootType = (box) =>" in script
+    assert "state.mode = isRootType(box)" in script
+    assert 'button.disabled = forced && button.dataset.mode === "icon"' in script
+
+
+def test_the_root_view_shows_each_child_content(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'registerView("root", {' in script
+    assert 'block.className = "root-child"' in script
+    assert "renderContent(body, child, { depth: 1 })" in script
+    assert ".root-child-body" in client.get("/static/app.css").text
+
+
+def test_grid_cells_render_child_content_to_a_bounded_depth(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "MAX_EMBED_DEPTH" in script
+    assert "class" in script and 'cell.classList.add("occupied")' in script
+    assert "renderContent(content, child, { depth: childDepth })" in script
+    assert ".cell-content" in client.get("/static/app.css").text
+
+
+def test_embedded_views_drop_their_toolbars(client: TestClient) -> None:
+    """A folder in a cell has no room to change its own layout controls."""
+    script = client.get("/static/app.js").text
+    assert "opts.embedded ? [] : [toggle, add]" in script
+    assert "if (!opts.embedded) canvas.append(gridToolbar(box, options, ctx));" in script
 
 
 def test_the_modal_can_be_opened_with_a_parent(client: TestClient) -> None:
