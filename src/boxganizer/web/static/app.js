@@ -766,7 +766,8 @@ function iconElement(box, className = "") {
   const usesThumb = (box.config || {}).icon_source === "thumbnail";
   if (usesThumb && box.uuid) {
     const img = document.createElement("img");
-    img.className = `box-icon box-icon--thumb ${className}`.trim();
+    const pageIcon = (state.types.get(box.box_type) || {}).thumbnail_kind === "pdf-page";
+    img.className = `box-icon box-icon--thumb ${pageIcon ? "box-icon--page" : ""} ${className}`.trim();
     img.src = api.thumbnailUrl(box.uuid);
     img.alt = box.name;
     img.draggable = false;
@@ -1342,6 +1343,45 @@ registerView("text", {
         { label: "Reload", run: ctx.reload },
       ]);
     });
+  },
+});
+
+/* ----------------------------------------------------------------- pdf ---- */
+
+/** A PDF is shown in the browser's own viewer, opened on the file. */
+registerView("pdf", {
+  render(canvas, box, ctx, mode, opts = {}) {
+    if (mode !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    if (!box.resource_uri) {
+      canvas.append(emptyMessage("This PDF box has no resource to open."));
+      return;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "pdf-view";
+    const frame = document.createElement("iframe");
+    frame.className = "pdf-frame";
+    frame.src = `${api.rawUrl(box.uuid)}#view=FitH`;
+    frame.title = box.name;
+    frame.addEventListener("error", () => {
+      wrap.replaceChildren(emptyMessage(`The viewer could not load ${box.resource_uri}.`));
+    });
+    const bar = document.createElement("div");
+    bar.className = "pdf-bar muted";
+    const open = document.createElement("a");
+    open.href = api.rawUrl(box.uuid);
+    open.target = "_blank";
+    open.rel = "noreferrer";
+    open.textContent = box.resource_uri;
+    bar.append(document.createTextNode("PDF · "), open);
+    wrap.append(frame, bar);
+    canvas.append(wrap);
+    if (opts.embedded) {
+      // A cell is small: give the frame a fair shot at being usable.
+      frame.setAttribute("scrolling", "auto");
+    }
   },
 });
 

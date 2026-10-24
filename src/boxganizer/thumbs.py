@@ -108,15 +108,23 @@ def _pdf_first_page(source_path: Path, *, edge: int) -> bytes:  # pragma: no cov
         import pypdfium2 as pdfium
     except ModuleNotFoundError as exc:
         raise ValueError("pypdfium2 is not installed") from exc
-    pdf = pdfium.PdfDocument(str(source_path))
     try:
-        page = pdf[0]
-        bitmap = page.render(scale=1.0)
-        pil = bitmap.to_pil()
-        pil.thumbnail((edge, edge))
+        pdf = pdfium.PdfDocument(str(source_path))
+    except Exception as exc:  # pdfium raises its own error type
+        raise ValueError(f"cannot open {source_path} as a PDF: {exc}") from exc
+    try:
+        if len(pdf) < 1:
+            raise ValueError(f"{source_path} has no pages")
+        bitmap = pdf[0].render(scale=1.0)
+        image = bitmap.to_pil()
+        image.thumbnail((edge, edge))
         buffer = io.BytesIO()
-        pil.save(buffer, format="PNG", optimize=True)
+        image.save(buffer, format="PNG", optimize=True)
         return buffer.getvalue()
+    except ValueError:
+        raise
+    except Exception as exc:  # a damaged page is a missing thumbnail, nothing more
+        raise ValueError(f"cannot render the first page of {source_path}: {exc}") from exc
     finally:
         pdf.close()
 

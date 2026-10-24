@@ -150,3 +150,39 @@ def test_current_source_is_none_when_the_file_moved(tmp_path: Path) -> None:
 
 def test_current_source_is_none_without_a_record() -> None:
     assert thumbs.current_source(Box(name="Plain")) is None
+
+
+# -- the first page of a PDF ------------------------------------------------
+
+
+@pytest.fixture
+def pdf(tmp_path: Path) -> Path:
+    document = tmp_path / "report.pdf"
+    Image.new("RGB", (600, 800), "white").save(document, "PDF", resolution=80.0)
+    return document
+
+
+def test_a_pdf_box_is_iconed_with_its_first_page(pdf: Path) -> None:
+    from boxganizer import boxtypes
+
+    assert boxtypes.PDFResource.thumbnail_kind == "pdf-page"
+    box = Box(name="Report", box_type="pdf", resource_uri=str(pdf))
+    made = thumbs.icon_from_resource(box)
+    assert made.config["icon_source"] == "thumbnail"
+    data = thumbs.thumb_bytes(made)
+    assert data is not None and data[:4] == b"\x89PNG"
+
+
+def test_the_page_keeps_its_shape_in_the_miniature(pdf: Path) -> None:
+    import io
+
+    made = thumbs.make_miniature(pdf, kind="pdf-page")
+    with Image.open(io.BytesIO(made)) as image:
+        assert image.height > image.width  # a portrait page, not a square
+
+
+def test_a_text_file_cannot_be_read_as_a_pdf_page(tmp_path: Path) -> None:
+    not_a_pdf = tmp_path / "notes.pdf"
+    not_a_pdf.write_text("this is not a pdf")
+    with pytest.raises(ValueError):
+        thumbs.make_miniature(not_a_pdf, kind="pdf-page")

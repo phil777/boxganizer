@@ -486,3 +486,31 @@ pre.text {
   border-width: 1px;
   padding: 2px;
 }
+
+/* ---------- PDF: a page-shaped icon and the browser's viewer ---------- */
+
+/* "a thin document outline": a white page with a hairline edge. */
+.box-icon--page {
+  background: #fff;
+  border-color: color-mix(in srgb, currentColor 45%, transparent);
+  border-radius: 0.1rem;
+}
+
+.pdf-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-height: 0;
+}
+
+.pdf-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: #525659;
+}
+
+.pdf-bar { padding: 0 0.1rem; overflow-wrap: anywhere; }

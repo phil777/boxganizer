@@ -13,6 +13,7 @@ keywords = ["knowledge-management", "graph", "cli", "tui", "web"]
 dynamic = ["version"]
 dependencies = [
     "pillow>=10.0",
+    "pypdfium2>=4.30",
     "pyyaml>=6.0",
     "typer>=0.12",
 ]

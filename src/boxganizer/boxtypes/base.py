@@ -132,6 +132,7 @@ class BoxType:
             "summary": cls.summary,
             "abstract": registry.is_abstract(cls),
             "allows_children": cls.allows_children,
+            "thumbnail_kind": cls.thumbnail_kind,
             "is_root": cls.is_root,
             "parent": parent.key if parent is not None else None,
             "ancestors": [ancestor.key for ancestor in registry.ancestors_of(cls)],

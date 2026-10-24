@@ -771,3 +771,53 @@ def test_an_explicit_icon_is_not_replaced_by_a_miniature(client: TestClient, pic
     ).json()
     assert created["icon"] == "🐧"
     assert "icon_source" not in created["config"]
+
+
+# -- PDF boxes ---------------------------------------------------------------
+
+
+@pytest.fixture
+def document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from PIL import Image
+
+    from boxganizer import config
+
+    monkeypatch.setattr(config, "data_dir", lambda: tmp_path / "data")
+    doc = tmp_path / "report.pdf"
+    Image.new("RGB", (600, 800), "white").save(doc, "PDF", resolution=80.0)
+    return doc
+
+
+def test_a_pdf_box_gets_a_page_miniature_icon(client: TestClient, document: Path) -> None:
+    created = client.post(
+        "/api/boxes", json={"name": "Report", "box_type": "pdf", "resource_uri": str(document)}
+    ).json()
+    assert created["config"]["icon_source"] == "thumbnail"
+    thumb = client.get(f"/api/boxes/{created['uuid']}/thumbnail")
+    assert thumb.status_code == 200
+    assert thumb.content[:4] == b"\x89PNG"
+
+
+def test_the_pdf_itself_is_served_as_a_pdf(client: TestClient, document: Path) -> None:
+    created = client.post(
+        "/api/boxes", json={"name": "Report", "box_type": "pdf", "resource_uri": str(document)}
+    ).json()
+    raw = client.get(f"/api/boxes/{created['uuid']}/raw")
+    assert raw.status_code == 200
+    assert raw.headers["content-type"] == "application/pdf"
+    assert raw.content[:5] == b"%PDF-"
+
+
+def test_the_types_endpoint_says_what_a_box_is_iconed_from(client: TestClient) -> None:
+    types = {entry["key"]: entry for entry in client.get("/api/types").json()}
+    assert types["pdf"]["thumbnail_kind"] == "pdf-page"
+    assert types["image"]["thumbnail_kind"] == "image"
+    assert types["folder"]["thumbnail_kind"] is None
+
+
+def test_the_pdf_view_embeds_the_browser_viewer(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'registerView("pdf"' in script
+    assert "#view=FitH" in script
+    assert "pdf-frame" in script
+    assert "box-icon--page" in client.get("/static/app.css").text

@@ -88,14 +88,16 @@ class ImageResource(FileResource):
 
 
 class PDFResource(FileResource):
-    """A PDF document."""
+    """A PDF document, shown as a viewer and iconed with its first page."""
 
     key: ClassVar[str] = "pdf"
     label: ClassVar[str] = "PDF"
     icon: ClassVar[str] = "\U0001f4d5"  # 📕
     summary: ClassVar[str] = "One PDF file."
     extensions: ClassVar[frozenset[str] | None] = frozenset({".pdf"})
-    planned: ClassVar[str] = "Page count and a first-page thumbnail; open in the system viewer."
+    #: The icon is a miniature of the first page.
+    thumbnail_kind: ClassVar[str | None] = "pdf-page"
+    planned: ClassVar[str] = "Page count in the detail panel; an outside-click opens it elsewhere."
 
 
 class ArchiveResource(FileResource):
