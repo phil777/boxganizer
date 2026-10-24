@@ -474,38 +474,164 @@ async function init() {
   if (start) await openBox(start.uuid);
 }
 
-/* The icon view is the fallback for every type that has nothing better yet. */
-registerView("*", {
+/**
+ * Everything the row knows about a box: description, resource, metadata, config,
+ * and the boxes around it. This is what "content" means for a plain box.
+ */
+function detailPanel(box, ctx) {
+  const panel = document.createElement("div");
+  panel.className = "detail-view";
+
+  const title = document.createElement("h2");
+  title.className = "detail-title";
+  title.textContent = `${box.icon} ${box.name}`;
+  panel.append(title);
+
+  const type = state.types.get(box.box_type);
+  const list = document.createElement("dl");
+  list.className = "detail-fields";
+  const add = (label, value) => {
+    if (value === null || value === undefined || value === "") return;
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    if (typeof value === "object" && value.node) {
+      detail.append(value.node);
+    } else {
+      detail.textContent = String(value);
+    }
+    list.append(term, detail);
+  };
+
+  add("type", type ? `${type.label} (${type.key})` : `${box.box_type} (unknown)`);
+  if (box.description) add("description", box.description);
+  if (box.resource_uri) add("resource", resourceNode(box));
+  add("uuid", box.uuid);
+  panel.append(list);
+
+  if (box.metadata && Object.keys(box.metadata).length) {
+    panel.append(section("metadata", () => keyValueList(box.metadata)));
+  }
+  if (box.config && Object.keys(box.config).length) {
+    panel.append(section("config", () => jsonBlock(box.config)));
+  }
+  for (const [label, items] of [
+    ["in", box.parents || []],
+    ["contains", box.children || []],
+  ]) {
+    if (items.length) panel.append(section(label, () => chipList(items, ctx)));
+  }
+  return panel;
+}
+
+/** A resource shown as a link when it is a URL, as text when it is a path. */
+function resourceNode(box) {
+  const value = box.resource_uri;
+  if (/^https?:\/\//i.test(value)) {
+    const link = document.createElement("a");
+    link.href = value;
+    link.textContent = value;
+    link.target = "_blank";
+    link.rel = "noreferrer noopener";
+    return { node: link };
+  }
+  const code = document.createElement("code");
+  code.textContent = value;
+  return { node: code };
+}
+
+function section(label, build) {
+  const wrapper = document.createElement("section");
+  wrapper.className = "detail-section";
+  const heading = document.createElement("h3");
+  heading.textContent = label;
+  wrapper.append(heading, build());
+  return wrapper;
+}
+
+function keyValueList(entries) {
+  const list = document.createElement("ul");
+  list.className = "key-values";
+  Object.entries(entries)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .forEach(([key, value]) => {
+      const item = document.createElement("li");
+      const name = document.createElement("strong");
+      name.textContent = key;
+      item.append(name, document.createTextNode(` ${value}`));
+      list.append(item);
+    });
+  return list;
+}
+
+function jsonBlock(value) {
+  const pre = document.createElement("pre");
+  pre.className = "json";
+  pre.textContent = JSON.stringify(value, null, 2);
+  return pre;
+}
+
+/** Boxes you can jump to, drawn from a `{uuid, name, icon}` list. */
+function chipList(boxes, ctx) {
+  const holder = document.createElement("div");
+  holder.className = "chips";
+  boxes.forEach((brief) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.dataset.uuid = brief.uuid;
+    chip.textContent = `${brief.icon} ${brief.name}`;
+    chip.addEventListener("click", () => ctx.open(brief.uuid));
+    holder.append(chip);
+  });
+  return holder;
+}
+
+/** The big glyph, with the name and description: what every type falls back to. */
+function iconPane(box, note = "") {
+  const wrap = document.createElement("div");
+  wrap.className = "icon-view";
+  wrap.dataset.boxType = box.box_type;
+  const glyph = document.createElement("div");
+  glyph.className = "glyph";
+  glyph.textContent = box.icon;
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = box.name;
+  wrap.append(glyph, name);
+  if (box.description) {
+    const caption = document.createElement("p");
+    caption.className = "caption muted";
+    caption.textContent = box.description;
+    wrap.append(caption);
+  }
+  if (note) {
+    const line = document.createElement("p");
+    line.className = "caption muted";
+    line.textContent = note;
+    wrap.append(line);
+  }
+  return wrap;
+}
+
+/* A plain box: its icon, or everything the row knows. */
+registerView("box", {
   render(canvas, box, ctx, mode) {
-    const wrap = document.createElement("div");
-    wrap.className = "icon-view";
-    wrap.dataset.boxType = box.box_type;
-    const glyph = document.createElement("div");
-    glyph.className = "glyph";
-    glyph.textContent = box.icon;
-    const name = document.createElement("div");
-    name.className = "name";
-    name.textContent = box.name;
-    wrap.append(glyph, name);
-    if (box.description) {
-      const caption = document.createElement("p");
-      caption.className = "caption muted";
-      caption.textContent = box.description;
-      wrap.append(caption);
+    if (mode !== "content") {
+      canvas.append(iconPane(box));
+      return;
     }
-    if (mode === "content") {
-      // A type without a content view still says which box you are looking at.
-      const note = document.createElement("p");
-      note.className = "caption muted";
-      note.textContent = `No content view for type ${box.box_type}; showing its icon.`;
-      wrap.append(note);
-    }
-    canvas.append(wrap);
+    canvas.append(detailPanel(box, ctx));
   },
 });
 
-/* Extension points, reachable from the console and from tests. */
-const boxganizer = { api, state, registerView, registerConfigForm, addStyle, openBox, goUp, status };
-window.boxganizer = boxganizer;
+/* The fallback for every type that has nothing better yet. */
+registerView("*", {
+  render(canvas, box, ctx, mode) {
+    canvas.append(
+      iconPane(box, mode === "content" ? `No content view for type ${box.box_type}; showing its icon.` : "")
+    );
+  },
+});
 
 init();

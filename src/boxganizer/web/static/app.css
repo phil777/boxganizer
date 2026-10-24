@@ -191,3 +191,34 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 /* Views added by later commits hang their styles off these names. */
 .child-grid { display: grid; gap: var(--gap); }
 .text-view pre { margin: 0; }
+
+/* ---------- detail panel (plain box content) ---------- */
+
+.detail-view { max-width: 46rem; }
+.detail-title { font-size: 1.15rem; margin: 0 0 0.6rem; }
+.detail-fields { display: grid; grid-template-columns: 7rem 1fr; gap: 0.25rem 0.8rem; margin: 0; }
+.detail-fields dt { opacity: 0.6; font-size: 0.82rem; }
+.detail-fields dd { margin: 0; overflow-wrap: anywhere; }
+.detail-section { margin-top: 1rem; }
+.detail-section h3 {
+  margin: 0 0 0.3rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+}
+.key-values { list-style: none; margin: 0; padding: 0; }
+.key-values li { padding: 0.1rem 0; }
+pre.json,
+pre.text {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: var(--panel);
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  overflow: auto;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.chip { padding: 0.2rem 0.45rem; font-size: 0.85rem; }
