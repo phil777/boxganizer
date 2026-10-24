@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Boxganizer</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font: 16px/1.5 system-ui, sans-serif; margin: 3rem auto; max-width: 46rem; padding: 0 1rem; }
+      h1 { font-size: 1.6rem; letter-spacing: -0.01em; }
+      form { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
+      input { flex: 1; padding: .5rem .6rem; border: 1px solid currentColor; border-radius: .3rem; background: transparent; color: inherit; }
+      ul { list-style: none; padding: 0; margin: 0; }
+      li { padding: .5rem 0; border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+      .name { font-weight: 600; }
+      .desc { opacity: .75; }
+      .muted { opacity: .6; font-size: .8rem; }
+    </style>
+  </head>
+  <body>
+    <h1>📦 Boxganizer</h1>
+    <form method="get" action="/">
+      <input name="q" value="{{ query }}" placeholder="search boxes" autofocus />
+    </form>
+    {% if boxes %}
+    <ul>
+      {% for box in boxes %}
+      <li>
+        <span class="name">{{ box.icon }} {{ box.name }}</span>
+        {% if box.description %}<div class="desc">{{ box.description }}</div>{% endif %}
+        {% if box.resource_uri %}<div class="muted">{{ box.resource_uri }}</div>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p>Nothing here yet. Add one with <code>boxganizer box add "Kitchen"</code>.</p>
+    {% endif %}
+    <p class="muted">boxganizer {{ version }} · API at <a href="/docs">/docs</a></p>
+  </body>
+</html>
