@@ -2,6 +2,10 @@
 
 A box holds one resource and any number of other boxes. Boxes are identified
 by name, case-insensitively, and the name is the only mandatory field.
+
+Two JSON fields travel with a box: `metadata`, a flat map of strings the user
+labels freely, and `config`, arbitrary nested settings belonging to the box
+type.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from boxganizer.errors import InvalidBoxName
 
@@ -45,6 +50,8 @@ class Box:
     box_type: str = "box"
     resource_uri: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    #: Type-specific settings. Arbitrary JSON, unlike the flat string metadata.
+    config: dict[str, Any] = field(default_factory=dict)
     id: int | None = None
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
@@ -54,6 +61,7 @@ class Box:
         if self.resource_uri is not None:
             self.resource_uri = self.resource_uri.strip() or None
         self.metadata = dict(self.metadata)
+        self.config = dict(self.config)
 
     @staticmethod
     def _validate_name(name: str) -> str:
@@ -87,6 +95,7 @@ class Box:
             "box_type": self.box_type,
             "resource_uri": self.resource_uri,
             "metadata": dict(self.metadata),
+            "config": dict(self.config),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
@@ -97,6 +106,9 @@ class Box:
         raw_meta = data.get("metadata") or {}
         if not isinstance(raw_meta, Mapping):
             raise InvalidBoxName(str(data.get("name", "")), "metadata must be an object")
+        raw_config = data.get("config") or {}
+        if not isinstance(raw_config, Mapping):
+            raise InvalidBoxName(str(data.get("name", "")), "config must be an object")
         return cls(
             name=str(data["name"]),
             description=str(data.get("description", "")),
@@ -104,4 +116,5 @@ class Box:
             box_type=str(data.get("box_type") or "box"),
             resource_uri=(None if data.get("resource_uri") is None else str(data["resource_uri"])),
             metadata={str(k): str(v) for k, v in raw_meta.items()},
+            config=dict(raw_config),
         )

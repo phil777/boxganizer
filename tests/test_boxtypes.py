@@ -61,12 +61,19 @@ DOCUMENTED: dict[str, str | None] = {
 
 GROUPING_LEVELS = {"content", "resource", "dynamic", "organizer", "viewport"}
 
+#: Types this project added on top of the source document, with their parents.
+#: `root` exists because a database needs one place for the graph to start.
+ADDITIONS: dict[str, str] = {"root": "folder"}
+
+ALL_KEYS = set(DOCUMENTED) | set(ADDITIONS)
+PARENTS = {**DOCUMENTED, **ADDITIONS}
+
 
 def test_registry_holds_exactly_the_documented_types() -> None:
-    assert {cls.key for cls in boxtypes.all_types()} == set(DOCUMENTED)
+    assert {cls.key for cls in boxtypes.all_types()} == ALL_KEYS
 
 
-@pytest.mark.parametrize(("key", "parent"), sorted(DOCUMENTED.items()))
+@pytest.mark.parametrize(("key", "parent"), sorted(PARENTS.items()))
 def test_every_type_sits_where_the_document_puts_it(key: str, parent: str | None) -> None:
     cls = boxtypes.get(key)
     actual = boxtypes.parent_of(cls)
@@ -79,7 +86,7 @@ def test_every_type_sits_where_the_document_puts_it(key: str, parent: str | None
 
 def test_only_the_grouping_levels_are_unselectable() -> None:
     assert {cls.key for cls in boxtypes.all_types() if cls.is_grouping()} == GROUPING_LEVELS
-    assert set(boxtypes.selectable_keys()) == set(DOCUMENTED) - GROUPING_LEVELS
+    assert set(boxtypes.selectable_keys()) == ALL_KEYS - GROUPING_LEVELS
 
 
 def test_grouping_flag_does_not_leak_to_subclasses() -> None:
@@ -92,7 +99,7 @@ def test_tree_is_indented_from_the_root() -> None:
     assert rows[0][0] == 0
     assert rows[0][1].key == "box"
     depths = {cls.key: depth for depth, cls in rows}
-    for key, parent in DOCUMENTED.items():
+    for key, parent in PARENTS.items():
         expected = 0 if parent is None else depths[parent] + 1
         assert depths[key] == expected, key
 
@@ -231,10 +238,14 @@ def test_describe_exposes_the_rules() -> None:
 
 
 def test_describe_all_covers_the_whole_tree() -> None:
-    assert len(boxtypes.describe_all()) == len(DOCUMENTED)
-    assert len(boxtypes.describe_all(include_abstract=False)) == len(DOCUMENTED) - len(
+    assert len(boxtypes.describe_all()) == len(ALL_KEYS)
+    assert len(boxtypes.describe_all(include_abstract=False)) == len(ALL_KEYS) - len(
         GROUPING_LEVELS
     )
+
+
+def test_root_is_the_one_type_that_may_exist_only_once() -> None:
+    assert {cls.key for cls in boxtypes.all_types() if cls.singleton} == {"root"}
 
 
 def test_try_get_returns_none_instead_of_raising() -> None:

@@ -11,6 +11,11 @@ the CLI works when the optional extra is not installed.
 from __future__ import annotations
 
 import json
+import os
+import re
+import shlex
+import subprocess
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated
@@ -20,8 +25,9 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from boxganizer import __version__, boxtypes, config
-from boxganizer.errors import BoxganizerError, MissingDependency
+from boxganizer import __version__, bootstrap, boxtypes, config, editing
+from boxganizer.boxtypes.root import ROOT_BOX_NAME
+from boxganizer.errors import BoxganizerError, EditError, MissingDependency
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
@@ -55,6 +61,55 @@ def _open(ctx: typer.Context, db: Path | None) -> BoxStore:
     store = BoxStore(db)
     ctx.call_on_close(store.close)
     return store
+
+
+def _editor_command(explicit: str | None) -> list[str]:
+    """The command that will be handed the file."""
+    raw = explicit or os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    if not raw or not raw.strip():
+        raise EditError('no editor configured: set $EDITOR, or pass --editor "nano"')
+    return shlex.split(raw)
+
+
+def _edit_in_editor(text: str, name: str, editor: str | None) -> str:
+    """Write *text* to a temporary YAML file, edit it, return the file contents."""
+    command = _editor_command(editor)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")[:40] or "box"
+    handle, filename = tempfile.mkstemp(prefix=f"box-{stem}-", suffix=".yaml")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        result = subprocess.run([*command, filename], check=False)
+        if result.returncode != 0:
+            raise EditError(
+                f"{command[0]} exited with status {result.returncode}; the box was not touched"
+            )
+        with open(filename, encoding="utf-8") as stream:
+            return stream.read()
+    finally:
+        os.unlink(filename)
+
+
+def _resolve_parent(
+    store: BoxStore, box: Box, *, parent: str | None, no_parent: bool
+) -> str | None:
+    """Which box the new box goes into: an explicit one, `root`, or none.
+
+    Checked before the insert, so a bad `--parent` never leaves a stray box
+    behind.
+    """
+    if no_parent:
+        if parent:
+            raise typer.BadParameter("--parent and --no-parent cannot be combined")
+        return None
+    chosen = parent if parent else (ROOT_BOX_NAME if store.exists(ROOT_BOX_NAME) else None)
+    if chosen is None:
+        return None
+    if store.get(chosen).key == box.key:
+        raise typer.BadParameter(f"a box cannot be its own parent ({chosen!r})")
+    if not store.exists(chosen):
+        raise typer.BadParameter(f"no box named {chosen!r} to put it in")
+    return chosen
 
 
 def _parse_metadata(items: Sequence[str]) -> dict[str, str]:
@@ -111,11 +166,16 @@ def status(ctx: typer.Context, db: DbOption = None) -> None:
 
 @app.command()
 def init(ctx: typer.Context, db: DbOption = None) -> None:
-    """Create the database file and its schema."""
+    """Create the database, its schema, and the two boxes every library starts with."""
     path = db or _db_of(ctx) or config.default_db_path()
-    with _open(ctx, path):
-        pass
-    say("initialised", str(path))
+    with _open(ctx, path) as store:
+        created = bootstrap.bootstrap(store)
+    if created:
+        say("initialised", str(path))
+        for name in created:
+            lit(f"  created {name}")
+    else:
+        lit(f"already initialised: {path} (nothing added)")
 
 
 @boxes_app.command("add")
@@ -131,6 +191,13 @@ def box_add(
     meta: Annotated[
         list[str] | None, typer.Option("--meta", "-m", help="key=value, repeatable.")
     ] = None,
+    parent: Annotated[
+        str | None,
+        typer.Option("--parent", help="Box to put the new box in. Defaults to 'root'."),
+    ] = None,
+    no_parent: Annotated[
+        bool, typer.Option("--no-parent", help="Create the box at the top level.")
+    ] = False,
 ) -> None:
     """Create a box."""
     box = Box(
@@ -145,8 +212,12 @@ def box_add(
     else:
         boxtypes.adopt_type_icon(box)
     with _open(ctx, _db_of(ctx)) as store:
+        container = _resolve_parent(store, box, parent=parent, no_parent=no_parent)
         saved = store.add(box)
-    say("added", f"{saved.icon} {saved.name} (#{saved.id})")
+        if container is not None:
+            store.link(container, saved.name)
+    note = f" in {container}" if container else ""
+    say("added", f"{saved.icon} {saved.name} (#{saved.id}){note}")
 
 
 @boxes_app.command("list")
@@ -199,8 +270,42 @@ def box_show(
         lit(f"  resource : {box.resource_uri}")
     for key, value in sorted(box.metadata.items()):
         lit(f"  {key} = {value}")
+    if box.config:
+        lit(f"  config   : {json.dumps(box.config, sort_keys=True)}")
     lit(f"  parents  : {', '.join(p.name for p in folks) or '-'}")
     lit(f"  children : {', '.join(c.name for c in kids) or '-'}")
+
+
+@boxes_app.command("edit")
+def box_edit(
+    ctx: typer.Context,
+    name: str,
+    editor: Annotated[
+        str | None,
+        typer.Option(
+            "--editor",
+            help="Command to edit with. Defaults to $EDITOR, then $VISUAL.",
+        ),
+    ] = None,
+) -> None:
+    """Edit a box in a text editor: the row becomes YAML, the file becomes the row.
+
+    metadata and config are shown as YAML and written back as JSON. Links are not
+    edited here — use `box link`. Quit the editor without saving to change nothing.
+    """
+    with _open(ctx, _db_of(ctx)) as store:
+        box = store.get(name)
+        start = editing.dump(box, parents=[b.name for b in store.parents(box.name)])
+        written = _edit_in_editor(start, box.name, editor)
+        if written == start:
+            console.print("left unchanged")
+            return
+        updated = store.update(editing.load(written, original=box))
+    say("saved", f"{updated.icon} {updated.name} (#{updated.id})")
+
+
+# Reachable as `box edit` as well as `box box edit`.
+app.command("edit")(box_edit)
 
 
 @boxes_app.command("search")

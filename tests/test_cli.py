@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from boxganizer import __version__
 from boxganizer.cli.main import app, main
-from boxganizer.errors import BoxNotFound, MissingDependency
+from boxganizer.errors import BoxNotFound, EditError, MissingDependency
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
@@ -303,3 +303,208 @@ def test_a_box_from_a_newer_version_is_still_readable(db_path: Path) -> None:
 
     with BoxStore(db_path) as store, pytest.raises(UnknownBoxType):
         store.update(store.get("Future thing"))
+
+
+# -- `box init` seeds root and cabinet -------------------------------------
+
+
+def test_init_creates_exactly_two_boxes(db_path: Path) -> None:
+    result = runner.invoke(app, ["--db", str(db_path), "init"])
+    assert result.exit_code == 0
+    assert "created root" in result.output
+    assert "created cabinet" in result.output
+    with BoxStore(db_path) as store:
+        assert store.count() == 2
+        assert [box.box_type for box in store.list_boxes()] == ["cabinet", "root"]
+
+
+def test_tree_shows_cabinet_under_root(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    invoke(db_path, "init")
+    tree = invoke(db_path, "tree")
+    assert "root" in tree.output
+    assert "  🗄️ cabinet" in tree.output
+
+
+def test_init_on_a_seeded_library_adds_nothing(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "300")
+    invoke(db_path, "init")
+    again = invoke(db_path, "init")
+    assert "already initialised" in again.output
+    assert "nothing added" in again.output
+    with BoxStore(db_path) as store:
+        assert store.count() == 2
+
+
+# -- --parent ---------------------------------------------------------------
+
+
+def test_a_new_box_goes_into_root_by_default(db_path: Path) -> None:
+    invoke(db_path, "init")
+    invoke(db_path, "box", "add", "Kitchen")
+    with BoxStore(db_path) as store:
+        assert [box.name for box in store.parents("Kitchen")] == ["root"]
+
+
+def test_parent_names_the_container(db_path: Path) -> None:
+    invoke(db_path, "box", "add", "House")
+    result = invoke(db_path, "box", "add", "Kitchen", "--parent", "House")
+    assert "in House" in result.output
+    with BoxStore(db_path) as store:
+        assert [box.name for box in store.children("House")] == ["Kitchen"]
+        assert [box.name for box in store.parents("Kitchen")] == ["House"]
+        # nothing was seeded, so House itself sits at the top
+        assert store.parents("House") == []
+
+
+def test_no_parent_leaves_the_box_at_the_top(db_path: Path) -> None:
+    invoke(db_path, "init")
+    invoke(db_path, "box", "add", "Loose", "--no-parent")
+    with BoxStore(db_path) as store:
+        assert store.parents("Loose") == []
+
+
+def test_an_unknown_parent_is_refused_before_anything_is_written(db_path: Path) -> None:
+    result = invoke(db_path, "box", "add", "Kitchen", "--parent", "Nowhere")
+    assert result.exit_code != 0
+    with BoxStore(db_path) as store:
+        assert store.count() == 0
+
+
+def test_parent_and_no_parent_cannot_be_combined(db_path: Path) -> None:
+    invoke(db_path, "box", "add", "House")
+    result = invoke(db_path, "box", "add", "X", "--parent", "House", "--no-parent")
+    assert result.exit_code != 0
+
+
+def test_a_box_cannot_be_its_own_parent(db_path: Path) -> None:
+    result = invoke(db_path, "box", "add", "Ouroboros", "--parent", "Ouroboros")
+    assert result.exit_code != 0
+    with BoxStore(db_path) as store:
+        assert store.count() == 0
+
+
+# -- box edit ---------------------------------------------------------------
+
+EDIT_SCRIPT = """
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("description: first", "description: second")
+text = text.replace("config: {}", "config:\\n  racks: 4\\n  label: A-B\\n")
+path.write_text(text)
+"""
+
+BROKEN_SCRIPT = """
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.write_text(path.read_text() + "\\n  dangling: [\\n")
+"""
+
+FAILING_SCRIPT = """
+import sys
+sys.exit(3)
+"""
+
+
+def _use_editor(script: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    editor = tmp_path / "editor.py"
+    editor.write_text(script.lstrip())
+    monkeypatch.setenv("EDITOR", f"{sys.executable} {editor}")
+
+
+def test_edit_rewrites_the_row_through_the_editor(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    _use_editor(EDIT_SCRIPT, tmp_path, monkeypatch)
+
+    result = invoke(db_path, "edit", "Thing")
+    assert result.exit_code == 0
+    assert "saved" in result.output
+
+    with BoxStore(db_path) as store:
+        box = store.get("Thing")
+        assert box.description == "second"
+        assert box.config == {"racks": 4, "label": "A-B"}
+
+
+def test_box_box_edit_is_the_same_command(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    _use_editor(EDIT_SCRIPT, tmp_path, monkeypatch)
+    assert invoke(db_path, "box", "edit", "Thing").exit_code == 0
+    with BoxStore(db_path) as store:
+        assert store.get("Thing").description == "second"
+
+
+def test_edit_can_be_told_which_editor_to_use(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    editor = tmp_path / "nano-ish.py"
+    editor.write_text(EDIT_SCRIPT.lstrip())
+    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    result = invoke(db_path, "edit", "Thing", "--editor", f"{sys.executable} {editor}")
+    assert result.exit_code == 0
+    with BoxStore(db_path) as store:
+        assert store.get("Thing").description == "second"
+
+
+def test_editing_nothing_changes_nothing(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    _use_editor("import sys\n", tmp_path, monkeypatch)  # the editor merely closes
+    result = invoke(db_path, "edit", "Thing")
+    assert "left unchanged" in result.output
+    with BoxStore(db_path) as store:
+        assert store.get("Thing").description == "first"
+
+
+def test_a_broken_file_leaves_the_box_alone(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    _use_editor(BROKEN_SCRIPT, tmp_path, monkeypatch)
+    result = invoke(db_path, "edit", "Thing")
+    assert isinstance(result.exception, EditError)
+    with BoxStore(db_path) as store:
+        assert store.get("Thing").description == "first"
+
+
+def test_a_failing_editor_aborts(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    _use_editor(FAILING_SCRIPT, tmp_path, monkeypatch)
+    result = invoke(db_path, "edit", "Thing")
+    assert isinstance(result.exception, EditError)
+    with BoxStore(db_path) as store:
+        assert store.get("Thing").description == "first"
+
+
+def test_no_editor_configured_is_reported_clearly(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from boxganizer.errors import EditError as _EditError
+
+    invoke(db_path, "box", "add", "Thing")
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.delenv("VISUAL", raising=False)
+    result = invoke(db_path, "edit", "Thing")
+    assert isinstance(result.exception, _EditError)
+    assert "no editor" in str(result.exception)
+
+
+def test_edit_does_not_touch_links(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invoke(db_path, "init")
+    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    _use_editor(EDIT_SCRIPT, tmp_path, monkeypatch)
+    invoke(db_path, "edit", "Thing")
+    with BoxStore(db_path) as store:
+        assert [box.name for box in store.parents("Thing")] == ["root"]

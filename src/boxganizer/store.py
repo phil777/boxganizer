@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -24,12 +24,14 @@ from boxganizer.errors import (
     ChildrenNotAllowed,
     CyclicLink,
     DuplicateBoxName,
+    InvalidBoxContent,
     StoreError,
 )
 from boxganizer.models import DEFAULT_ICON, Box, canonical_name
 
 #: 1 = boxes and links. 2 = boxes gained ``box_type`` (see ``doc/box-types.md``).
-SCHEMA_VERSION = 2
+#: 3 = boxes gained ``config``: type-specific settings as JSON.
+SCHEMA_VERSION = 3
 
 _SCHEMA = f"""
 PRAGMA user_version = {SCHEMA_VERSION};
@@ -43,6 +45,7 @@ CREATE TABLE IF NOT EXISTS boxes (
     box_type     TEXT    NOT NULL DEFAULT 'box',
     resource_uri TEXT,
     metadata     TEXT    NOT NULL DEFAULT '{{}}',
+    config       TEXT    NOT NULL DEFAULT '{{}}',
     created_at   TEXT    NOT NULL,
     updated_at   TEXT    NOT NULL
 );
@@ -61,8 +64,8 @@ CREATE INDEX IF NOT EXISTS links_child_idx ON links (child_id);
 
 _INSERT_BOX = """
 INSERT INTO boxes (name, key, description, icon, box_type, resource_uri, metadata,
-                   created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   config, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _SELECT_BY_KEY = "SELECT * FROM boxes WHERE key = ?"
@@ -92,6 +95,7 @@ SELECT * FROM boxes
     OR lower(description) LIKE ? ESCAPE '\'
     OR lower(coalesce(resource_uri, '')) LIKE ? ESCAPE '\'
     OR lower(metadata) LIKE ? ESCAPE '\'
+    OR lower(config) LIKE ? ESCAPE '\'
  ORDER BY key
  LIMIT ?
 """
@@ -99,6 +103,23 @@ SELECT * FROM boxes
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _object_field(raw: str | None) -> dict[str, object]:
+    """One JSON column decoded, tolerating null and broken text."""
+    try:
+        parsed = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _as_json(value: dict[str, object]) -> str:
+    """Serialise a JSON field, refusing what JSON cannot hold."""
+    try:
+        return json.dumps(value, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise StoreError(f"this box holds a value JSON cannot store: {exc}") from exc
 
 
 def _like_escape(term: str) -> str:
@@ -158,7 +179,9 @@ class BoxStore:
         The type named by ``box.box_type`` must exist and must accept the box:
         see :mod:`boxganizer.boxtypes`.
         """
-        boxtypes.get(box.box_type).validate(box)
+        kind = boxtypes.get(box.box_type)
+        self._check_singleton(box, kind)
+        kind.validate(box)
         now = _now()
         row_id = self._execute(
             _INSERT_BOX,
@@ -170,6 +193,7 @@ class BoxStore:
                 box.box_type,
                 box.resource_uri,
                 json.dumps(box.metadata, sort_keys=True),
+                _as_json(box.config),
                 box.created_at.isoformat(timespec="seconds"),
                 now,
             ),
@@ -178,6 +202,19 @@ class BoxStore:
         box.id = row_id
         box.updated_at = datetime.now(UTC)
         return box
+
+    def _check_singleton(self, box: Box, kind: type[boxtypes.BoxType]) -> None:
+        """Refuse a second box of a type that only allows one."""
+        if not kind.singleton:
+            return
+        rows = self._rows("SELECT id, name FROM boxes WHERE box_type = ?", (kind.key,))
+        for row in rows:
+            if int(row["id"]) != box.id:
+                raise InvalidBoxContent(
+                    kind.key,
+                    f"only one {kind.label.lower()} box is allowed, and {str(row['name'])!r} is it",
+                    box.name,
+                )
 
     def get(self, name: str) -> Box:
         """Return the box named *name*, or raise :class:`BoxNotFound`."""
@@ -198,13 +235,15 @@ class BoxStore:
         """
         if box.id is None:
             raise StoreError(f"cannot update {box.name!r}: box has no id")
-        boxtypes.get(box.box_type).validate(box)
+        kind = boxtypes.get(box.box_type)
+        self._check_singleton(box, kind)
+        kind.validate(box)
         box.touch()
         self._execute(
             """
             UPDATE boxes
                SET name = ?, key = ?, description = ?, icon = ?, box_type = ?,
-                   resource_uri = ?, metadata = ?, updated_at = ?
+                   resource_uri = ?, metadata = ?, config = ?, updated_at = ?
              WHERE id = ?
             """,
             (
@@ -215,6 +254,7 @@ class BoxStore:
                 box.box_type,
                 box.resource_uri,
                 json.dumps(box.metadata, sort_keys=True),
+                _as_json(box.config),
                 box.updated_at.isoformat(timespec="seconds"),
                 box.id,
             ),
@@ -246,7 +286,7 @@ class BoxStore:
         if not cleaned:
             return self.list_boxes(limit=limit)
         needle = f"%{_like_escape(cleaned.casefold())}%"
-        rows = self._rows(_SEARCH_SQL, (needle, needle, needle, needle, limit))
+        rows = self._rows(_SEARCH_SQL, (needle, needle, needle, needle, needle, limit))
         return [self._from_row(row) for row in rows]
 
     def count(self) -> int:
@@ -351,17 +391,18 @@ class BoxStore:
         if stored_version in (0, SCHEMA_VERSION) or stored_version > SCHEMA_VERSION:
             return
         columns = {str(row["name"]) for row in self._rows("PRAGMA table_info(boxes)")}
-        if "box_type" not in columns:
-            self._execute("ALTER TABLE boxes ADD COLUMN box_type TEXT NOT NULL DEFAULT 'box'")
+        additions: list[tuple[int, str, str]] = [
+            (2, "box_type", "TEXT NOT NULL DEFAULT 'box'"),
+            (3, "config", "TEXT NOT NULL DEFAULT '{}'"),
+        ]
+        for version, name, definition in additions:
+            if stored_version < version and name not in columns:
+                self._execute(f"ALTER TABLE boxes ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Box:
-        raw = row["metadata"] or "{}"
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = {}
-        metadata: Mapping[str, object] = parsed if isinstance(parsed, dict) else {}
+        metadata = _object_field(row["metadata"])
+        config = _object_field(row["config"])
         return Box(
             id=row["id"],
             name=row["name"],
@@ -370,6 +411,7 @@ class BoxStore:
             box_type=str(row["box_type"]),
             resource_uri=row["resource_uri"],
             metadata={str(k): str(v) for k, v in metadata.items()},
+            config=dict(config),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

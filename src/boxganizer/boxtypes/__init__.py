@@ -55,6 +55,7 @@ from boxganizer.boxtypes.resource import (
     ResourceBox,
     TextResource,
 )
+from boxganizer.boxtypes.root import ROOT_BOX_NAME, RootBox
 from boxganizer.boxtypes.viewport import (
     SimpleViewport,
     TilingViewport,
@@ -65,6 +66,7 @@ from boxganizer.models import DEFAULT_ICON, Box
 
 __all__ = [
     "DEFAULT_TYPE_KEY",
+    "ROOT_BOX_NAME",
     "ArchiveResource",
     "Blueprint",
     "BoxType",
@@ -95,6 +97,7 @@ __all__ = [
     "PDFResource",
     "ParentalGraph",
     "ResourceBox",
+    "RootBox",
     "SSHResource",
     "SensorResource",
     "SimpleViewport",

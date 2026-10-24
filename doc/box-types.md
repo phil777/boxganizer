@@ -46,6 +46,7 @@ other boxes. Rules in brackets are enforced by the store.
   - `folder` 📂 Folder
     - `dynamic-folder` 🌀 Dynamic Folder
     - `cabinet` 🗄️ Cabinet
+    - `root` 🌲 Root — ours, not the document's; singleton
   - `organizer` 🧰 Organizer — group
     - `desktop` 🖥️ Desktop
       - `blueprint` 📐 Blueprint
@@ -63,7 +64,11 @@ other boxes. Rules in brackets are enforced by the store.
     - `windowed-viewport` 🪟 Windowed Viewport
 ```
 
-40 types: 5 grouping levels and 35 you can put on a box.
+41 types: 5 grouping levels and 36 you can put on a box.
+
+One type is not in the source document: `root` 🌲, a `FolderBox` subtype, because
+a database needs one place where the graph starts. `box init` creates it, and it
+is the only type that may exist once (`singleton`): a second `root` is refused.
 
 ## What a type declares
 
@@ -79,6 +84,7 @@ other boxes. Rules in brackets are enforced by the store.
 | `resource_uri_schemes`  | Allowed URI schemes; `"file"` also accepts plain paths.     |
 | `extensions`            | Allowed filename suffixes, or `None` for any.               |
 | `required_metadata`     | Metadata keys the user must supply.                         |
+| `singleton`             | At most one box of this type per database.                        |
 | `planned`               | What the type will do once it is built. Empty means: done.  |
 | `check(box)`            | Hook for rules that need logic.                             |
 
@@ -89,12 +95,14 @@ other boxes. Rules in brackets are enforced by the store.
 2. **The box must satisfy its type** — required resource, URI scheme, file
    extension, required metadata, then the type's own `check()`. Failures raise
    `InvalidBoxContent`.
-3. **Leaves stay leaves** — linking a box into one whose type has
+3. **Singletons stay single** — a second box of a `singleton` type raises
+   `InvalidBoxContent`; editing the one that exists is fine.
+4. **Leaves stay leaves** — linking a box into one whose type has
    `allows_children = False` raises `ChildrenNotAllowed`.
-4. **The type lends the box its icon** — a box created without an explicit
+5. **The type lends the box its icon** — a box created without an explicit
    `--icon` takes the icon of its type, so a picture looks like a picture. An
    icon chosen by hand always wins (`boxtypes.adopt_type_icon`).
-5. **Reads are forgiving** — listing and showing a box uses `boxtypes.try_get()`,
+6. **Reads are forgiving** — listing and showing a box uses `boxtypes.try_get()`,
    so a database written by a newer Boxganizer still opens; it displays
    `hologram (unknown type; this Boxganizer is older than the box)`.
 
@@ -123,7 +131,8 @@ knows at creation time: `ssh` needs `host`, `mqtt` needs `topic`,
 2. Declare `key`, `label`, `icon`, `summary`, plus `allows_children` and the
    resource/metadata rules. Set `planned` to what it will eventually do.
 3. Add it to the re-exports and `__all__` in `boxtypes/__init__.py`.
-4. Add one line to `DOCUMENTED` in `tests/test_boxtypes.py` (key → parent).
+4. Add one line to `DOCUMENTED` in `tests/test_boxtypes.py` (key → parent), or to
+   `ADDITIONS` if the type is not in the source document.
    That test is the contract with the source document: forget it and the suite
    fails.
 5. Add the rule tests if the type declares anything unusual, and update the

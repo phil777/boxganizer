@@ -50,6 +50,8 @@ class BoxType:
     #: Lowercase suffixes the resource must have, or ``None`` for any.
     extensions: ClassVar[frozenset[str] | None] = None
     required_metadata: ClassVar[frozenset[str]] = frozenset()
+    #: True when at most one box of this type may exist in a database.
+    singleton: ClassVar[bool] = False
     #: What this type is meant to do once it is built. Empty means: already does all it claims.
     planned: ClassVar[str] = ""
 

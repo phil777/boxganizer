@@ -37,6 +37,8 @@ Three rules hold this together:
 | --------------- | ------------------------------------------------------------------ |
 | `models.py`     | `Box` dataclass; name validation; `key` identity; JSON view.       |
 | `boxtypes/`     | The box type hierarchy and its registry; rules per type.           |
+| `editing.py`    | A box row as YAML and back — pure text, no editor, no database.    |
+| `bootstrap.py`  | The two boxes every library starts with (`root`, `cabinet`).       |
 | `store.py`      | `BoxStore`: CRUD, search, links, cycle guard, schema, migrations.  |
 | `config.py`     | Resolves the database path (argument → env → XDG → home).          |
 | `errors.py`     | `BoxganizerError` and its subclasses.                             |
@@ -56,13 +58,18 @@ index, so `Kitchen` and `kitchen` cannot both exist, and no locale-dependent SQL
 
 ```
 boxes (id, name, key UNIQUE, description, icon, box_type, resource_uri,
-       metadata JSON, created_at, updated_at)
+       metadata JSON, config JSON, created_at, updated_at)
 links (parent_id → boxes.id, child_id → boxes.id, added_at)   PRIMARY KEY (parent_id, child_id)
 ```
 
+Two JSON columns: `metadata` is a flat map of strings the user labels freely;
+`config` holds arbitrary nested settings belonging to the box type.
+
 `box_type` is the key of a class in `boxganizer.boxtypes`; see
-`doc/box-types.md`. Schema version 2 added it, and opening an older file upgrades
-it in place.
+`doc/box-types.md`. Schema version 2 added that column and version 3 added
+`config`. Migrations are a list of `(version, column, definition)` triples
+applied when an older file is opened, so upgrading is one code path and one test
+per version.
 
 One box may sit in many boxes, so the graph is a DAG, not a tree: `links` is a
 join table, `ON DELETE CASCADE` removes the edges of a deleted box, and
@@ -71,6 +78,17 @@ join table, `ON DELETE CASCADE` removes the edges of a deleted box, and
 
 Timestamps are stored as ISO-8601 strings in UTC. Metadata is a JSON object of
 string values; unknown shapes decode to an empty object rather than raising.
+
+## Editing a box in place
+
+`box edit` is the one place a whole row is rewritten by hand. It is split so the
+risky half can be tested: `boxganizer.editing` turns a `Box` into a YAML document
+and back with no editor and no database, while the CLI owns the temporary file
+and `$EDITOR`. `metadata` and `config` are JSON in SQLite and YAML in the file —
+`load()` converts them back and refuses anything JSON cannot hold, including the
+bare dates YAML likes to invent. `id`, `created_at` and `updated_at` are shown
+and refused if edited; links stay out of the file, because `box link` owns them.
+A failing editor, unparsable text or a changed identity leaves the row untouched.
 
 ## Concurrency
 
@@ -93,6 +111,7 @@ The core raises `BoxganizerError` subclasses. Each frontend maps them once:
 | `UnknownBoxType`   | message, exit 1| 422               | (reads tolerate it)  |
 | `InvalidBoxContent`| message, exit 1| 422               | detail pane, red     |
 | `ChildrenNotAllowed`| message, exit 1| 409              | detail pane, red     |
+| `EditError`        | message, exit 1| n/a               | n/a                |
 | `MissingDependency`| install hint, exit 1 | n/a         | n/a                |
 
 `box serve` and `box tui` import their framework inside the command, so a

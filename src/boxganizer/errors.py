@@ -78,6 +78,15 @@ class ChildrenNotAllowed(BoxganizerError):
         self.child = child
 
 
+class EditError(BoxganizerError):
+    """An edited box file cannot be turned back into a box row."""
+
+    def __init__(self, reason: str, line: int | None = None) -> None:
+        where = f" at line {line}" if line else ""
+        super().__init__(f"box edit: {reason}{where}")
+        self.reason = reason
+
+
 class StoreError(BoxganizerError):
     """The database could not be opened or written."""
 

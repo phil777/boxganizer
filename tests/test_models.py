@@ -58,6 +58,7 @@ def test_to_dict_is_json_friendly() -> None:
         "box_type",
         "resource_uri",
         "metadata",
+        "config",
         "created_at",
         "updated_at",
     }
@@ -72,6 +73,19 @@ def test_box_type_defaults_to_plain_box() -> None:
 def test_box_type_survives_the_json_view() -> None:
     box = Box(name="Notes", box_type="markdown")
     assert Box.from_mapping(box.to_dict()).box_type == "markdown"
+
+
+def test_config_holds_nested_settings() -> None:
+    box = Box(name="Grid", box_type="grid", config={"columns": 3, "slots": ["a", "b"]})
+    assert box.to_dict()["config"] == {"columns": 3, "slots": ["a", "b"]}
+    assert Box.from_mapping(box.to_dict()).config == {"columns": 3, "slots": ["a", "b"]}
+
+
+def test_config_is_copied_not_aliased() -> None:
+    source = {"a": 1}
+    box = Box(name="Box", config=source)
+    source["b"] = 2
+    assert box.config == {"a": 1}
 
 
 def test_from_mapping_ignores_unknown_keys() -> None:

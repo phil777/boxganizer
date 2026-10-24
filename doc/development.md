@@ -36,6 +36,9 @@ never `src.boxganizer`.
 * Frontend tests drive the real thing: `typer.testing.CliRunner` for the CLI,
   `fastapi.testclient.TestClient` for the web app, `App.run_test()` with a pilot
   for the text UI. No mocking of `BoxStore`.
+* `box edit` is tested by pointing `$EDITOR` at a throwaway script, so the whole
+  round trip runs without a terminal. Keep it that way — no test may wait on a
+  person typing.
 * Tests never touch the developer's database. `conftest.py` gives each test a
   `tmp_path` database; keep it that way.
 * Web and text UI tests call `pytest.importorskip`, so a missing optional extra

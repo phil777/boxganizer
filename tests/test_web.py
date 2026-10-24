@@ -180,3 +180,30 @@ def test_linking_into_a_leaf_type_conflicts(client: TestClient) -> None:
 def test_html_page_names_the_type(client: TestClient) -> None:
     client.post("/api/boxes", json={"name": "Ideas", "box_type": "mindmap"})
     assert "mindmap" in client.get("/").text
+
+
+# -- config ----------------------------------------------------------------
+
+
+def test_create_a_box_with_config(client: TestClient) -> None:
+    response = client.post(
+        "/api/boxes",
+        json={
+            "name": "Cellar",
+            "box_type": "cabinet",
+            "config": {"drawers": 4, "layout": {"rows": 2, "labels": ["tools", "wine"]}},
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["config"]["drawers"] == 4
+    read = client.get("/api/boxes/Cellar").json()
+    assert read["config"]["layout"]["labels"] == ["tools", "wine"]
+
+
+def test_config_must_be_an_object(client: TestClient) -> None:
+    response = client.post("/api/boxes", json={"name": "Bad", "config": [1, 2]})
+    assert response.status_code == 422
+
+
+def test_a_box_without_config_reports_an_empty_object(client: TestClient) -> None:
+    assert client.get("/api/boxes/Kitchen").json()["config"] == {}

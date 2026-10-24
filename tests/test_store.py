@@ -269,3 +269,106 @@ def test_migrating_twice_is_not_an_error(tmp_path: Path) -> None:
         pass
     with BoxStore(path) as again:
         assert again.get("Old note").box_type == "box"
+
+
+# -- config ----------------------------------------------------------------
+
+
+def test_config_round_trips(store: BoxStore) -> None:
+    store.add(
+        Box(name="Grid", box_type="grid", config={"columns": 3, "slots": ["a", {"deep": True}]})
+    )
+    assert store.get("grid").config == {"columns": 3, "slots": ["a", {"deep": True}]}
+
+
+def test_config_defaults_to_empty(store: BoxStore) -> None:
+    store.add(Box(name="Plain"))
+    assert store.get("Plain").config == {}
+
+
+def test_update_writes_config(store: BoxStore) -> None:
+    box = store.add(Box(name="Grid", box_type="grid"))
+    box.config["columns"] = 4
+    store.update(box)
+    assert store.get("grid").config == {"columns": 4}
+
+
+def test_config_holds_what_json_can_hold(store: BoxStore) -> None:
+    from boxganizer.errors import StoreError
+
+    with pytest.raises(StoreError, match="JSON cannot store"):
+        store.add(Box(name="Bad", config={"when": object()}))
+
+
+def test_search_reaches_into_config(store: BoxStore) -> None:
+    store.add(Box(name="Cellar", box_type="cabinet", config={"contents": "old wine"}))
+    store.add(Box(name="Attic", box_type="cabinet", config={"contents": "ski boots"}))
+    assert [box.name for box in store.search("wine")] == ["Cellar"]
+
+
+def test_broken_config_text_degrades_to_empty(db_path: Path) -> None:
+    with BoxStore(db_path) as store:
+        store.add(Box(name="Thing"))
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("UPDATE boxes SET config = 'not json' WHERE name = 'Thing'")
+        connection.commit()
+    finally:
+        connection.close()
+    with BoxStore(db_path) as store:
+        assert store.get("Thing").config == {}
+
+
+# -- singletons ------------------------------------------------------------
+
+
+def test_only_one_root_box_may_exist(store: BoxStore) -> None:
+    from boxganizer.errors import InvalidBoxContent
+
+    store.add(Box(name="root", box_type="root"))
+    with pytest.raises(InvalidBoxContent, match="only one root box is allowed"):
+        store.add(Box(name="second root", box_type="root"))
+
+
+def test_a_singleton_may_be_edited_as_itself(store: BoxStore) -> None:
+    root = store.add(Box(name="root", box_type="root", description="top"))
+    root.description = "the top of everything"
+    assert store.update(root).description == "the top of everything"
+
+
+# -- schema v3 -------------------------------------------------------------
+
+
+def _write_v2_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(_V1_SCHEMA.replace("user_version = 1", "user_version = 2"))
+    connection.execute("ALTER TABLE boxes ADD COLUMN box_type TEXT NOT NULL DEFAULT 'box'")
+    connection.execute(
+        "INSERT INTO boxes (name, key, created_at, updated_at, box_type) VALUES (?, ?, ?, ?, ?)",
+        ("From v2", "from v2", "2026-02-02T00:00:00+00:00", "2026-02-02T00:00:00+00:00", "box"),
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_a_v2_database_gains_the_config_column(tmp_path: Path) -> None:
+    path = tmp_path / "v2.db"
+    _write_v2_database(path)
+
+    with BoxStore(path) as store:
+        assert store.get("From v2").config == {}
+        box = store.get("From v2")
+        box.config["note"] = "written after the upgrade"
+        store.update(box)
+
+    with BoxStore(path) as again:
+        assert again.get("from v2").config == {"note": "written after the upgrade"}
+        assert again.count() == 1
+
+
+def test_upgrading_from_v1_adds_both_columns(tmp_path: Path) -> None:
+    path = tmp_path / "v1.db"
+    _write_v1_database(path)
+    with BoxStore(path) as store:
+        box = store.get("Old note")
+        assert box.box_type == "box" and box.config == {}

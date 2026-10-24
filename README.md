@@ -30,16 +30,29 @@ Extras on their own: `pip install -e ".[web]"` or `pip install -e ".[tui]"`.
 ## Use
 
 ```bash
-box init                                     # create the database
+box init                                     # create the database: root + cabinet
 box box add "Kitchen" -d "Room for cooking" -m floor=0
-box box add "Passport" -i 🛂 -d "Expires 2031"
-box link in "Passport" "Kitchen"             # put a box inside another box
+box box add "Passport" -i 🛂 -d "Expires 2031" --parent Kitchen
+box box add "Loose" --no-parent                # keep it out of the tree
+box box edit Kitchen                           # edit the row as YAML in $EDITOR
+box link in "Passport" "Kitchen"               # put a box inside another box
 box box list
 box box show Kitchen
 box box search cooking
 box tree
 box types                                      # the box type hierarchy
 ```
+
+`box init` leaves two boxes behind: **root** (type `root`, the top of the graph)
+and **cabinet** (type `cabinet`) filed inside it. New boxes go into `root` unless
+`--parent` says otherwise or `--no-parent` opts out. Running `init` again adds
+nothing.
+
+`box edit` writes the whole row to a temporary YAML file, opens `$EDITOR` (or
+`--editor "nano"`), then reads it back and saves. `metadata` and `config` are
+stored as JSON and shown as YAML; `id` and the timestamps are shown but refused
+if changed; links are edited with `box link`, not here. Quitting without saving
+changes nothing.
 
 Every box declares a type — `box add -t markdown`, `-t mqtt`, `-t mindmap` —
 out of a hierarchy of 40 kinds documented in [doc/box-types.md](doc/box-types.md).
@@ -63,6 +76,9 @@ Point at another file anywhere with `--db path/to/boxes.db`.
 src/boxganizer/
 ├── models.py      # the Box type and its name rules
 ├── store.py       # SQLite persistence, the only module that speaks SQL
+├── boxtypes/      # the type hierarchy and its rules (see doc/box-types.md)
+├── editing.py     # a box row as YAML and back, for `box edit`
+├── bootstrap.py   # the two boxes every library starts with
 ├── config.py      # where the database lives
 ├── errors.py      # one exception hierarchy for all frontends
 ├── cli/           # the `box` command line, including serve and tui

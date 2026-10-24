@@ -28,7 +28,7 @@ try:
     from fastapi import Depends, FastAPI, HTTPException, Query, Request
     from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.templating import Jinja2Templates
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, Field, JsonValue
 except ModuleNotFoundError as exc:  # pragma: no cover - only when the extra is absent
     raise ModuleNotFoundError(
         "the web frontend needs the 'web' extra: pip install 'boxganizer[web]'"
@@ -47,6 +47,7 @@ class BoxCreate(BaseModel):
     box_type: str = boxtypes.DEFAULT_TYPE_KEY
     resource_uri: str | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
+    config: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class LinkCreate(BaseModel):
@@ -159,6 +160,7 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
             box_type=payload.box_type,
             resource_uri=payload.resource_uri,
             metadata=payload.metadata,
+            config=dict(payload.config),
         )
         if payload.icon is None:
             boxtypes.adopt_type_icon(box)
