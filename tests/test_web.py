@@ -431,12 +431,35 @@ def test_the_root_box_is_always_its_content(client: TestClient) -> None:
     assert 'button.disabled = forced && button.dataset.mode === "icon"' in script
 
 
-def test_the_root_view_shows_each_child_content(client: TestClient) -> None:
+def test_the_root_view_shows_its_one_child_content(client: TestClient) -> None:
     script = client.get("/static/app.js").text
     assert 'registerView("root", {' in script
-    assert 'block.className = "root-child"' in script
-    assert "renderContent(body, child, { depth: 1 })" in script
-    assert ".root-child-body" in client.get("/static/app.css").text
+    assert "const child = children[0] || null;" in script
+    assert "renderContent(block, child, { depth: 1 })" in script
+    assert "Drag a box here from the panel on the left" in script
+    assert ".root-empty" in client.get("/static/app.css").text
+
+
+def test_the_root_view_accepts_a_drop(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'holder.addEventListener("drop"' in script
+    assert "await api.link(box.uuid, dragged)" in script
+
+
+def test_a_link_between_two_boxes_can_be_deleted(client: TestClient, populated: BoxStore) -> None:
+    response = client.delete("/api/boxes/House/children/Passport")
+    assert response.status_code == 204 or "Passport" not in [
+        b.name for b in populated.children("House")
+    ]
+    # Kitchen holds Passport; removing House -> Kitchen leaves both boxes alive
+    assert client.delete("/api/boxes/House/children/Kitchen").status_code == 204
+    assert populated.exists("Kitchen")
+    assert populated.exists("House")
+    assert [b.name for b in populated.children("House")] == ["Garage"]
+
+
+def test_deleting_an_unknown_link_is_not_found(client: TestClient) -> None:
+    assert client.delete("/api/boxes/Ghost/children/Books").status_code == 404
 
 
 def test_grid_cells_render_child_content_to_a_bounded_depth(client: TestClient) -> None:

@@ -313,9 +313,13 @@ class BoxStore:
         """Put the box *child* inside the box *parent*. Either may be a uuid.
 
         A box may sit in several parents, and the graph may contain cycles —
-        including a box inside itself. Only the parent's type is consulted: a
-        leaf type holds a resource, not boxes. Anything that walks the graph has
-        to expect to come back where it started; see `tree()`.
+        including a box inside itself. Two type rules still apply: a leaf type
+        holds a resource rather than boxes (`ChildrenNotAllowed`), and the root
+        box cannot itself be filed (`RootCannotBeFiled`).
+
+        The root box has exactly one child slot: linking a box into the root
+        takes the slot from the previous child, which is unlinked but not
+        deleted. Use `root_child()` to read it.
         """
         parent_box = self.resolve(parent)
         parent_kind = boxtypes.get(parent_box.box_type)
@@ -326,10 +330,32 @@ class BoxStore:
             raise RootCannotBeFiled(child_box.name, parent_box.name)
         parent_id = parent_box.id or 0
         child_id = child_box.id or 0
+        if parent_kind.is_root:
+            # The root box has one slot: filing something in it takes the slot
+            # from whatever held it before. The displaced box is not deleted, and
+            # keeps any other parent it has.
+            self._execute(
+                "DELETE FROM links WHERE parent_id = ? AND child_id != ?",
+                (parent_id, child_id),
+            )
         self._execute(
             "INSERT OR IGNORE INTO links (parent_id, child_id, added_at) VALUES (?, ?, ?)",
             (parent_id, child_id, _now()),
         )
+
+    def root_child(self) -> Box | None:
+        """The single box filed under the root, or None."""
+        rows = self._rows(
+            """
+            SELECT b.* FROM boxes b
+              JOIN links l ON l.child_id = b.id
+              JOIN boxes r ON r.id = l.parent_id
+             WHERE r.box_type = 'root'
+             ORDER BY l.added_at DESC, b.key
+             LIMIT 1
+            """
+        )
+        return self._from_row(rows[0]) if rows else None
 
     def unlink(self, parent: str, child: str) -> None:
         """Take the box *child* out of the box *parent*. Either may be a uuid."""

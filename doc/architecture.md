@@ -79,7 +79,9 @@ walks the graph has to expect to come back where it started**: `BoxStore.tree`
 marks a repeated box `truncated`, and `box tree` prints `⟲ … (cycle: already
 above)`. The only link the store refuses is filing a box inside a type that
 cannot hold boxes (`ChildrenNotAllowed`) or filing the root box
-(`RootCannotBeFiled`).
+(`RootCannotBeFiled`). The root box also has a single child slot: `link` into it
+takes the slot from the previous child, which is unlinked but not deleted, and
+`BoxStore.root_child()` reads it.
 
 Timestamps are stored as ISO-8601 strings in UTC. Metadata is a JSON object of
 string values; unknown shapes decode to an empty object rather than raising.

@@ -279,6 +279,12 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         saved = store.update(box)
         return saved.to_dict() | {"unplaced": lost}
 
+    @app.delete("/api/boxes/{ref}/children/{child}", status_code=204)
+    def remove_child(ref: str, child: str, store: StoreDep) -> None:
+        """Delete the parent/child link. Both boxes stay in the library."""
+        parent = store.resolve(ref)
+        store.unlink(parent.uuid, child)
+
     @app.get("/api/boxes/{ref}/children")
     def read_children(ref: str, store: StoreDep) -> list[dict[str, object]]:
         box = store.resolve(ref)

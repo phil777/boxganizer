@@ -404,3 +404,32 @@ pre.text {
 }
 .root-child-body { height: clamp(9rem, 32vh, 22rem); overflow: hidden; }
 .root-child-body > * { height: 100%; }
+
+/* ---------- root: one slot, filled with the child's content ---------- */
+
+.root-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  height: 100%;
+  border: 1px dashed transparent;
+  border-radius: 0.4rem;
+  padding: 0.15rem;
+}
+
+.root-view.drop-target { border-color: var(--accent); background: var(--panel); }
+.root-bar { display: flex; align-items: center; gap: 0.5rem; flex: none; }
+.root-child-body { flex: 1; min-height: 0; overflow: hidden; }
+.root-child { height: 100%; border: none; padding: 0; background: none; }
+.root-child > * { height: 100%; }
+.root-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--line);
+  border-radius: 0.4rem;
+  opacity: 0.7;
+  text-align: center;
+  padding: 1rem;
+}

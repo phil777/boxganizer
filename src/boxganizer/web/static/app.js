@@ -59,6 +59,10 @@ const api = {
       body: JSON.stringify({ child }),
     }),
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
+  unlink: (ref, child) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/children/${encodeURIComponent(child)}`, {
+      method: "DELETE",
+    }),
   gridPlace: (ref, child, cell) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/grid/place`, {
       method: "POST",
@@ -979,9 +983,10 @@ function gridCell(box, ctx, row, column, child, depth) {
 /* ----------------------------------------------------------------- root ---- */
 
 /**
- * The root box: never an icon, and it shows what is inside each of its children
- * rather than a row of icons. Each block is a window on one child's content;
- * click its heading to go there.
+ * The root box: never an icon, and one child slot. What it shows is that
+ * child's content, filling the pane. Dropping a box from the left panel puts it
+ * in the slot and takes it from whatever was there; the displaced box is not
+ * deleted, it just stops being the way in.
  */
 registerView("root", {
   async render(canvas, box, ctx) {
@@ -989,35 +994,80 @@ registerView("root", {
     try {
       children = await api.children(box.uuid);
     } catch (error) {
-      canvas.append(emptyMessage(`Cannot list the children: ${error.message}`));
+      canvas.append(emptyMessage(`Cannot read the root: ${error.message}`));
       return;
     }
-    const stack = document.createElement("div");
-    stack.className = "root-view";
-    canvas.append(stack);
-    if (!children.length) {
-      stack.append(emptyMessage("The root is empty. Create a box from the panel on the left."));
-      return;
+    const child = children[0] || null;
+
+    const holder = document.createElement("div");
+    holder.className = "root-view";
+    holder.dataset.uuid = box.uuid;
+    canvas.append(holder);
+
+    const bar = document.createElement("div");
+    bar.className = "root-bar";
+    const label = document.createElement("span");
+    label.className = "muted";
+    label.textContent = child ? `root › ${child.icon} ${child.name}` : "root — nothing filed in it";
+    bar.append(label);
+    if (child) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.textContent = "Open";
+      open.addEventListener("click", () => ctx.open(child.uuid, { trail: ctx.trail(), mode: "content" }));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove from root";
+      remove.addEventListener("click", async () => {
+        try {
+          await api.unlink(box.uuid, child.uuid);
+          ctx.reload();
+        } catch (error) {
+          ctx.status(error.message, true);
+        }
+      });
+      bar.append(open, remove);
     }
-    children.forEach((child) => {
+    holder.append(bar);
+
+    const body = document.createElement("div");
+    body.className = "root-child-body";
+    holder.append(body);
+
+    if (child) {
       const block = document.createElement("section");
       block.className = "root-child";
       block.dataset.uuid = child.uuid;
-      const heading = document.createElement("button");
-      heading.type = "button";
-      heading.className = "root-child-head";
-      heading.textContent = `${child.icon} ${child.name}`;
-      heading.title = `Open ${child.name}`;
-      heading.addEventListener("click", () =>
-        ctx.open(child.uuid, { trail: ctx.trail(), mode: "content" })
-      );
-      const body = document.createElement("div");
-      body.className = "root-child-body";
-      block.append(heading, body);
-      stack.append(block);
-      renderContent(body, child, { depth: 1 }).catch((error) => {
-        body.replaceChildren(emptyMessage(error.message));
+      body.append(block);
+      renderContent(block, child, { depth: 1 }).catch((error) => {
+        block.replaceChildren(emptyMessage(error.message));
       });
+    } else {
+      const hint = document.createElement("div");
+      hint.className = "root-empty";
+      hint.textContent = "Drag a box here from the panel on the left to make it the way in.";
+      body.append(hint);
+    }
+
+    // The slot accepts a drop anywhere in the root view.
+    holder.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      holder.classList.add("drop-target");
+    });
+    holder.addEventListener("dragleave", () => holder.classList.remove("drop-target"));
+    holder.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      holder.classList.remove("drop-target");
+      const dragged = event.dataTransfer.getData("text/plain");
+      if (!dragged) return;
+      try {
+        await api.link(box.uuid, dragged);
+        ctx.status("the root now shows that box");
+        ctx.reload();
+      } catch (error) {
+        ctx.status(`cannot file it in the root: ${error.message}`, true);
+      }
     });
   },
 });

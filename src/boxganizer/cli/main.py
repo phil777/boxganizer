@@ -26,7 +26,6 @@ from rich.table import Table
 from rich.text import Text
 
 from boxganizer import __version__, bootstrap, boxtypes, config, editing
-from boxganizer.boxtypes.root import ROOT_BOX_NAME
 from boxganizer.errors import BoxganizerError, EditError, MissingDependency
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
@@ -102,7 +101,9 @@ def _resolve_parent(
         if parent:
             raise typer.BadParameter("--parent and --no-parent cannot be combined")
         return None
-    chosen = parent if parent else (ROOT_BOX_NAME if store.exists(ROOT_BOX_NAME) else None)
+    # No implicit parent. The root box has a single slot, so filing every new box
+    # there would keep evicting the previous one; say `--parent root` to mean it.
+    chosen = parent
     if chosen is None:
         return None
     if store.get(chosen).key == box.key:
@@ -193,7 +194,11 @@ def box_add(
     ] = None,
     parent: Annotated[
         str | None,
-        typer.Option("--parent", help="Box to put the new box in. Defaults to 'root'."),
+        typer.Option(
+            "--parent",
+            help="Box to put the new box in. No parent by default: the root box "
+            "holds only one child, so nothing is filed there implicitly.",
+        ),
     ] = None,
     no_parent: Annotated[
         bool, typer.Option("--no-parent", help="Create the box at the top level.")

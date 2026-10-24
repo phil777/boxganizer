@@ -502,3 +502,46 @@ def test_a_box_can_still_be_linked_under_the_root(store: BoxStore) -> None:
     store.add(Box(name="Notes", box_type="text", resource_uri="/tmp/a.txt"))
     store.link("root", "Notes")
     assert [box.name for box in store.children("root")] == ["Notes"]
+
+
+# -- the root box has one child slot ---------------------------------------
+
+
+def test_the_root_holds_one_child_and_replaces_it(store: BoxStore) -> None:
+    store.add(Box(name="root", box_type="root"))
+    store.add(Box(name="First", box_type="folder"))
+    store.add(Box(name="Second", box_type="folder"))
+    store.link("root", "First")
+    assert [box.name for box in store.children("root")] == ["First"]
+
+    store.link("root", "Second")
+
+    assert [box.name for box in store.children("root")] == ["Second"]
+    assert store.root_child() is not None
+    assert store.root_child().name == "Second"
+    # the displaced box still exists, it is just not the way in any more
+    assert store.exists("First")
+    assert store.parents("First") == []
+
+
+def test_the_root_slot_can_be_read_when_empty(store: BoxStore) -> None:
+    store.add(Box(name="root", box_type="root"))
+    assert store.root_child() is None
+
+
+def test_relinking_the_same_box_into_the_root_keeps_it(store: BoxStore) -> None:
+    store.add(Box(name="root", box_type="root"))
+    store.add(Box(name="Only", box_type="folder"))
+    store.link("root", "Only")
+    store.link("root", "Only")
+    assert [box.name for box in store.children("root")] == ["Only"]
+
+
+def test_a_box_displaced_from_the_root_keeps_its_other_parent(store: BoxStore) -> None:
+    store.add(Box(name="root", box_type="root"))
+    store.add(Box(name="Archive", box_type="folder"))
+    store.add(Box(name="Shared", box_type="folder"))
+    store.link("Archive", "Shared")
+    store.link("root", "Shared")
+    store.link("root", store.add(Box(name="Newcomer", box_type="folder")).name)
+    assert [box.name for box in store.parents("Shared")] == ["Archive"]

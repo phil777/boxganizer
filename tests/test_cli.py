@@ -341,11 +341,21 @@ def test_init_on_a_seeded_library_adds_nothing(
 # -- --parent ---------------------------------------------------------------
 
 
-def test_a_new_box_goes_into_root_by_default(db_path: Path) -> None:
+def test_a_new_box_has_no_parent_by_default(db_path: Path) -> None:
+    """The root holds one box; filing every new box there would keep evicting it."""
     invoke(db_path, "init")
     invoke(db_path, "box", "add", "Kitchen")
     with BoxStore(db_path) as store:
-        assert [box.name for box in store.parents("Kitchen")] == ["root"]
+        assert store.parents("Kitchen") == []
+        assert [box.name for box in store.children("root")] == ["cabinet"]
+
+
+def test_the_root_slot_can_be_taken_on_purpose(db_path: Path) -> None:
+    invoke(db_path, "init")
+    invoke(db_path, "box", "add", "Workshop", "--parent", "root")
+    with BoxStore(db_path) as store:
+        assert [box.name for box in store.children("root")] == ["Workshop"]
+        assert store.exists("cabinet")
 
 
 def test_parent_names_the_container(db_path: Path) -> None:
@@ -502,12 +512,13 @@ def test_no_editor_configured_is_reported_clearly(
 def test_edit_does_not_touch_links(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    invoke(db_path, "init")
-    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    invoke(db_path, "box", "add", "House")
+    invoke(db_path, "box", "add", "Thing", "-d", "first", "--parent", "House")
     _use_editor(EDIT_SCRIPT, tmp_path, monkeypatch)
     invoke(db_path, "edit", "Thing")
     with BoxStore(db_path) as store:
-        assert [box.name for box in store.parents("Thing")] == ["root"]
+        assert [box.name for box in store.parents("Thing")] == ["House"]
+        assert store.get("Thing").description == "second"
 
 
 # -- cycles in the graph ----------------------------------------------------

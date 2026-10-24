@@ -36,6 +36,7 @@ box box add "Passport" -i 🛂 -d "Expires 2031" --parent Kitchen
 box box add "Loose" --no-parent                # keep it out of the tree
 box box edit Kitchen                           # edit the row as YAML in $EDITOR
 box link in "Passport" "Kitchen"               # put a box inside another box
+box link in "Kitchen" root                     # take the root's slot from cabinet
 box box list
 box box show Kitchen
 box box search cooking
@@ -43,10 +44,11 @@ box tree
 box types                                      # the box type hierarchy
 ```
 
-`box init` leaves two boxes behind: **root** (type `root`, the top of the graph)
-and **cabinet** (type `cabinet`) filed inside it. New boxes go into `root` unless
-`--parent` says otherwise or `--no-parent` opts out. Running `init` again adds
-nothing.
+`box init` leaves two boxes behind: **root** (type `root`), the way in, and
+**cabinet** (type `cabinet`) in the root's single child slot. New boxes get **no
+parent** unless you pass `--parent NAME` — the root holds exactly one box, so
+filing every new box there would keep evicting the previous one. Running `init`
+again adds nothing.
 
 `box edit` writes the whole row to a temporary YAML file, opens `$EDITOR` (or
 `--editor "nano"`), then reads it back and saves. `metadata` and `config` are
@@ -64,8 +66,8 @@ box tui                                      # browse, filter (type), drill in (
 
 ### The web app
 
-A left pane to search and pick, a main pane to show one box — as its icon or as
-its content. **New box** opens a modal where you choose the type and configure
+A left pane to search and pick (with a **Root** button above it), a main pane to
+show one box — **its content first**, its icon as the alternative. **New box** opens a modal where you choose the type and configure
 it. What a box shows depends on what it is:
 
 | Box                | Content view                                              |

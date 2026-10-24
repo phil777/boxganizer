@@ -68,7 +68,9 @@ other boxes. Rules in brackets are enforced by the store.
 
 One type is not in the source document: `root` 🌲, a `FolderBox` subtype, because
 a database needs one place where the graph starts. `box init` creates it, and it
-is the only type that may exist once (`singleton`): a second `root` is refused.
+is the only type that may exist once (`singleton`): a second `root` is refused. It
+holds **one** child (`is_root`): the interface shows that child's content, and
+linking a box into the root takes the slot from whoever held it.
 
 ## What a type declares
 
