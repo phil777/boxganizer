@@ -267,3 +267,7 @@ def test_a_plain_box_keeps_the_generic_icon() -> None:
     from boxganizer.models import DEFAULT_ICON
 
     assert boxtypes.adopt_type_icon(Box(name="Thing")).icon == DEFAULT_ICON
+
+
+def test_exactly_one_type_is_the_graph_root() -> None:
+    assert {cls.key for cls in boxtypes.all_types() if cls.is_root} == {"root"}

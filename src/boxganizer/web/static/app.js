@@ -274,10 +274,17 @@ async function refreshSide() {
   renderSide();
 }
 
+/** Root first, then the rest as the server ordered them. */
+function orderedForSide(boxes) {
+  const roots = boxes.filter((box) => (state.types.get(box.box_type) || {}).is_root);
+  const others = boxes.filter((box) => !roots.includes(box));
+  return [...roots, ...others];
+}
+
 function renderSide() {
   const list = el("box-list");
   list.replaceChildren();
-  state.boxes.forEach((box) => {
+  orderedForSide(state.boxes).forEach((box) => {
     const item = document.createElement("li");
     item.dataset.uuid = box.uuid;
     item.draggable = true; // a box can be dragged onto a grid cell
@@ -288,7 +295,7 @@ function renderSide() {
     name.textContent = box.name;
     const kind = document.createElement("span");
     kind.className = "kind";
-    kind.textContent = box.box_type;
+    kind.textContent = (state.types.get(box.box_type) || {}).is_root ? "root of the graph" : box.box_type;
     item.append(glyph, name, kind);
     item.addEventListener("click", () => openBox(box.uuid));
     item.addEventListener("dblclick", () => openBox(box.uuid, { mode: "content" }));

@@ -22,6 +22,7 @@ from boxganizer.errors import (
     DuplicateBoxName,
     InvalidBoxContent,
     InvalidBoxName,
+    RootCannotBeFiled,
     UnknownBoxType,
 )
 from boxganizer.models import DEFAULT_ICON, Box
@@ -135,6 +136,12 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         return JSONResponse(
             status_code=409,
             content={"detail": {"error": "children_not_allowed", "parent_type": exc.parent_type}},
+        )
+
+    @app.exception_handler(RootCannotBeFiled)
+    async def _filed_root(request: Request, exc: RootCannotBeFiled) -> JSONResponse:
+        return JSONResponse(
+            status_code=409, content={"detail": {"error": "root_cannot_be_filed", "name": exc.name}}
         )
 
     @app.exception_handler(UnknownBoxType)

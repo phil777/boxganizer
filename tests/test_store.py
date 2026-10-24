@@ -438,3 +438,23 @@ def test_links_accept_uuid_references(store: BoxStore) -> None:
     assert [box.name for box in store.parents(child.name)] == ["House"]
     store.unlink(parent.uuid, child.uuid)
     assert store.children(parent.name) == []
+
+
+# -- the root stays at the top ---------------------------------------------
+
+
+def test_the_root_box_cannot_be_filed_inside_another(store: BoxStore) -> None:
+    from boxganizer.errors import RootCannotBeFiled
+
+    store.add(Box(name="root", box_type="root"))
+    store.add(Box(name="Something", box_type="folder"))
+    with pytest.raises(RootCannotBeFiled, match="cannot go inside"):
+        store.link("Something", "root")
+    assert store.children("Something") == []
+
+
+def test_a_box_can_still_be_linked_under_the_root(store: BoxStore) -> None:
+    store.add(Box(name="root", box_type="root"))
+    store.add(Box(name="Notes", box_type="text", resource_uri="/tmp/a.txt"))
+    store.link("root", "Notes")
+    assert [box.name for box in store.children("root")] == ["Notes"]

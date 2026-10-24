@@ -25,6 +25,7 @@ from boxganizer.errors import (
     CyclicLink,
     DuplicateBoxName,
     InvalidBoxContent,
+    RootCannotBeFiled,
     StoreError,
 )
 from boxganizer.models import DEFAULT_ICON, Box, canonical_name, new_uuid
@@ -328,8 +329,11 @@ class BoxStore:
         parent_kind = boxtypes.get(parent_box.box_type)
         if not parent_kind.allows_children:
             raise ChildrenNotAllowed(parent_box.name, parent_kind.key, child)
+        child_box = self.resolve(child)
+        if boxtypes.get(child_box.box_type).is_root:
+            raise RootCannotBeFiled(child_box.name, parent_box.name)
         parent_id = parent_box.id or 0
-        child_id = self._id_of(child)
+        child_id = child_box.id or 0
         if self._is_descendant(child_id, parent_id):
             raise CyclicLink(parent, child)
         self._execute(

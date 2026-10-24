@@ -52,6 +52,8 @@ class BoxType:
     required_metadata: ClassVar[frozenset[str]] = frozenset()
     #: True when at most one box of this type may exist in a database.
     singleton: ClassVar[bool] = False
+    #: True for the one box that anchors the graph: nothing contains it.
+    is_root: ClassVar[bool] = False
     #: True when `resource_uri` points at a local file the interfaces may read —
     #: which is not the same as existing: a directory or a URL is not served raw.
     serves_content: ClassVar[bool] = False
@@ -127,6 +129,7 @@ class BoxType:
             "summary": cls.summary,
             "abstract": registry.is_abstract(cls),
             "allows_children": cls.allows_children,
+            "is_root": cls.is_root,
             "parent": parent.key if parent is not None else None,
             "ancestors": [ancestor.key for ancestor in registry.ancestors_of(cls)],
             "resource_uri_required": cls.resource_uri_required,

@@ -25,4 +25,8 @@ class RootBox(FolderBox):
     allows_children: ClassVar[bool] = True
     #: Only one root per database.
     singleton: ClassVar[bool] = True
-    planned: ClassVar[str] = "Act as the default parent of new boxes."
+    #: Nothing may contain this box.
+    is_root: ClassVar[bool] = True
+    planned: ClassVar[str] = (
+        "Already the default parent of new boxes and the view the app opens on."
+    )

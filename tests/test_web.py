@@ -423,3 +423,25 @@ def test_a_saved_display_setting_beats_the_inherited_mode(client: TestClient) ->
 
 def test_the_modal_can_be_opened_with_a_parent(client: TestClient) -> None:
     assert "function openNewBoxModal(parentUuid" in client.get("/static/app.js").text
+
+
+# -- root -------------------------------------------------------------------
+
+
+def test_root_cannot_be_filed(client: TestClient, populated: BoxStore) -> None:
+    populated.add(Box(name="root", box_type="root"))
+    response = client.post("/api/boxes/House/children", json={"child": "root"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "root_cannot_be_filed"
+
+
+def test_the_types_endpoint_marks_the_root(client: TestClient) -> None:
+    types = {entry["key"]: entry for entry in client.get("/api/types").json()}
+    assert types["root"]["is_root"] is True
+    assert types["folder"]["is_root"] is False
+
+
+def test_the_side_panel_pins_the_root(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "function orderedForSide(boxes)" in script
+    assert "orderedForSide(state.boxes)" in script

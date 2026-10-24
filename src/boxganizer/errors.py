@@ -87,6 +87,15 @@ class EditError(BoxganizerError):
         self.reason = reason
 
 
+class RootCannotBeFiled(BoxganizerError):
+    """Something tried to put the root box inside another box."""
+
+    def __init__(self, name: str, parent: str) -> None:
+        super().__init__(f"{name!r} is the root of the graph; it cannot go inside {parent!r}")
+        self.name = name
+        self.parent = parent
+
+
 class StoreError(BoxganizerError):
     """The database could not be opened or written."""
 
