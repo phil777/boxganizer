@@ -397,3 +397,29 @@ def test_horizontal_scrolling_is_tied_to_wrapping(client: TestClient) -> None:
     css = client.get("/static/app.css").text
     assert '.text-view[data-wrap="off"] { overflow-x: auto; }' in css
     assert "overflow-y: auto" in css
+
+
+# -- the folder view --------------------------------------------------------
+
+
+def test_the_folder_view_is_registered_for_containers(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'registerView("folder", folderView)' in script
+    assert 'registerView("directory", folderView)' in script
+    assert "FOLDER_DEFAULTS" in script
+
+
+def test_a_child_opens_over_its_parent(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'item.addEventListener("dblclick"' in script
+    assert "ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() })" in script
+
+
+def test_a_saved_display_setting_beats_the_inherited_mode(client: TestClient) -> None:
+    """The box's own preference wins; otherwise the mode you browse in carries."""
+    script = client.get("/static/app.js").text
+    assert 'setting(box, "display", options.mode || "icon")' in script
+
+
+def test_the_modal_can_be_opened_with_a_parent(client: TestClient) -> None:
+    assert "function openNewBoxModal(parentUuid" in client.get("/static/app.js").text

@@ -276,3 +276,38 @@ pre.text {
 }
 
 .text-view.failed { display: block; }
+
+/* ---------- folder view: a list, or icons in a grid ---------- */
+
+.children-toolbar { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; }
+.children-toolbar button { margin-left: 0.25rem; }
+.children { display: flex; flex-direction: column; gap: 0.1rem; }
+
+.children-view[data-layout="grid"] .children {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(6.5rem, 1fr));
+  gap: 0.6rem;
+}
+
+.child {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 0.3rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.children-view[data-layout="grid"] .child {
+  flex-direction: column;
+  text-align: center;
+  padding: 0.6rem 0.3rem;
+}
+
+.child:hover { background: var(--line); }
+.child.selected { border-color: var(--accent); }
+.child-icon { font-size: 1.4rem; }
+.children-view[data-layout="grid"] .child-icon { font-size: 2.2rem; }
+.child-name { overflow-wrap: anywhere; font-size: 0.9rem; }

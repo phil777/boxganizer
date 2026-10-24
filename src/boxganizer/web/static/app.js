@@ -136,7 +136,9 @@ async function openBox(ref, options = {}) {
     // A child opened from a view extends the path; anything else starts a new one.
     state.trail = options.trail ? [...options.trail, box] : [box];
     state.current = box;
-    state.mode = options.mode || setting(box, "display", "icon");
+    // The box's own saved preference wins; otherwise keep browsing in whatever
+    // mode we are already in (a child opened from a folder stays in content).
+    state.mode = setting(box, "display", options.mode || "icon");
     renderMain();
     renderBreadcrumb();
     markSelected();
@@ -173,6 +175,8 @@ const context = {
   status,
   saveSetting,
   saveSection,
+  newBox: openNewBoxModal,
+  trail: () => state.trail,
   mode: () => state.mode,
   reload: () => openBox(state.current.uuid, { mode: state.mode }),
   showMenu,
@@ -382,6 +386,15 @@ function fillParentChoices() {
 }
 
 /** Type-specific fields. Views add theirs with `registerConfigForm`. */
+/** Open the create-box modal; `parentUuid` presets where the new box goes. */
+function openNewBoxModal(parentUuid = null) {
+  fillParentChoices();
+  if (parentUuid) el("nb-parent").value = parentUuid;
+  renderConfigFields();
+  el("new-box-modal").showModal();
+  el("nb-name").focus();
+}
+
 function registerConfigForm(typeKey, form) {
   configForms.set(typeKey, form);
 }
@@ -486,12 +499,7 @@ async function init() {
     if (button && state.current) setMode(button.dataset.mode);
   });
   el("up").addEventListener("click", goUp);
-  el("new-box").addEventListener("click", () => {
-    fillParentChoices();
-    renderConfigFields();
-    el("new-box-modal").showModal();
-    el("nb-name").focus();
-  });
+  el("new-box").addEventListener("click", () => openNewBoxModal());
   el("nb-cancel").addEventListener("click", () => el("new-box-modal").close());
   el("nb-type").addEventListener("change", renderConfigFields);
   el("new-box-form").addEventListener("submit", submitNewBox);
@@ -680,6 +688,113 @@ registerView("image", {
   },
 });
 
+/* -------------------------------------------------------------- folders ---- */
+
+const FOLDER_DEFAULTS = { layout: "list" };
+
+function folderOptions(box) {
+  return { ...FOLDER_DEFAULTS, ...((box.config || {}).folder || {}) };
+}
+
+/**
+ * A container: its children as a list or as icons in a grid, like a file
+ * explorer. Double-click opens a child in this pane, replacing the box that
+ * contained it.
+ */
+const folderView = {
+  async render(canvas, box, ctx) {
+    if (ctx.mode() !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    const options = folderOptions(box);
+    const wrap = document.createElement("div");
+    wrap.className = "children-view";
+    wrap.dataset.layout = options.layout;
+    canvas.append(wrap);
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "children-toolbar";
+    const title = document.createElement("strong");
+    title.textContent = `${box.icon} ${box.name}`;
+    const count = document.createElement("span");
+    count.className = "muted";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.dataset.action = "toggle-layout";
+    toggle.textContent = options.layout === "list" ? "▦ Icons" : "☰ List";
+    toggle.addEventListener("click", () => {
+      const next = options.layout === "list" ? "grid" : "list";
+      ctx.saveSection("folder", { layout: next });
+    });
+    const add = document.createElement("button");
+    add.type = "button";
+    add.textContent = "＋ New box here";
+    add.addEventListener("click", () => ctx.newBox(box.uuid));
+    toolbar.append(title, count, toggle, add);
+
+    const holder = document.createElement("div");
+    holder.className = "children";
+    wrap.append(toolbar, holder);
+
+    let children = [];
+    try {
+      children = await api.children(box.uuid);
+    } catch (error) {
+      holder.append(emptyMessage(`Cannot list the children: ${error.message}`));
+      return;
+    }
+    count.textContent = ` ${children.length} inside`;
+    if (!children.length) {
+      holder.append(emptyMessage("Nothing in here yet."));
+      return;
+    }
+    children.forEach((child) => holder.append(childTile(child, box, ctx)));
+  },
+};
+
+function childTile(child, parent, ctx) {
+  const item = document.createElement("div");
+  item.className = "child";
+  item.dataset.uuid = child.uuid;
+  item.draggable = true;
+  const glyph = document.createElement("span");
+  glyph.className = "child-icon";
+  glyph.textContent = child.icon;
+  const name = document.createElement("span");
+  name.className = "child-name";
+  name.textContent = child.name;
+  item.append(glyph, name);
+  // One click selects, a double click replaces this pane's box with the child.
+  item.addEventListener("click", () => {
+    ctx.status(`${child.name} selected — double-click to open it`);
+    document
+      .querySelectorAll(".child")
+      .forEach((other) => other.classList.toggle("selected", other === item));
+  });
+  item.addEventListener("dblclick", () =>
+    ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() })
+  );
+  item.addEventListener("dragstart", (event) => {
+    event.dataTransfer.setData("text/plain", child.uuid);
+    event.dataTransfer.effectAllowed = "move";
+  });
+  item.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    ctx.showMenu(event.clientX, event.clientY, [
+      { label: "Open", run: () => ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() }) },
+      { label: "Show as icon", run: () => ctx.open(child.uuid, { mode: "icon" }) },
+      { separator: true },
+      { label: "New box in " + parent.name, run: () => ctx.newBox(parent.uuid) },
+    ]);
+  });
+  return item;
+}
+
+registerView("folder", folderView);
+registerView("directory", folderView); // a directory on disk is explored the same way
+
 /* ---------------------------------------------------------------- text ---- */
 
 const TEXT_DEFAULTS = { wrap: true, crop: false, font_size: 14 };
@@ -750,5 +865,25 @@ registerView("*", {
     );
   },
 });
+
+/* Extension points, reachable from the console and from tests. */
+const boxganizer = {
+  api,
+  state,
+  registerView,
+  registerConfigForm,
+  addStyle,
+  openBox,
+  goUp,
+  status,
+  iconPane,
+  detailPanel,
+  setting,
+  saveSection,
+  textOptions,
+  folderOptions,
+  viewFor,
+};
+window.boxganizer = boxganizer;
 
 init();
