@@ -4,38 +4,64 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Boxganizer</title>
-    <style>
-      :root { color-scheme: light dark; }
-      body { font: 16px/1.5 system-ui, sans-serif; margin: 3rem auto; max-width: 46rem; padding: 0 1rem; }
-      h1 { font-size: 1.6rem; letter-spacing: -0.01em; }
-      form { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
-      input { flex: 1; padding: .5rem .6rem; border: 1px solid currentColor; border-radius: .3rem; background: transparent; color: inherit; }
-      ul { list-style: none; padding: 0; margin: 0; }
-      li { padding: .5rem 0; border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
-      .name { font-weight: 600; }
-      .desc { opacity: .75; }
-      .muted { opacity: .6; font-size: .8rem; }
-    </style>
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><text y=%2214%22 font-size=%2214%22>📦</text></svg>" />
   </head>
   <body>
-    <h1>📦 Boxganizer</h1>
-    <form method="get" action="/">
-      <input name="q" value="{{ query }}" placeholder="search boxes" autofocus />
-    </form>
-    {% if boxes %}
-    <ul>
-      {% for box in boxes %}
-      <li>
-        <span class="name">{{ box.icon }} {{ box.name }}</span>
-        <span class="muted">{{ box.box_type }}</span>
-        {% if box.description %}<div class="desc">{{ box.description }}</div>{% endif %}
-        {% if box.resource_uri %}<div class="muted">{{ box.resource_uri }}</div>{% endif %}
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p>Nothing here yet. Add one with <code>boxganizer box add "Kitchen"</code>.</p>
-    {% endif %}
-    <p class="muted">boxganizer {{ version }} · API at <a href="/docs">/docs</a></p>
+    <div class="app">
+      <!-- Left pane: search, the box list, and the way in to create one. -->
+      <aside id="side" aria-label="Boxes">
+        <div class="side-head">
+          <span class="brand">📦 Boxganizer</span>
+          <button id="new-box" type="button" title="Create a new box">＋ New box</button>
+        </div>
+        <form id="search-form" autocomplete="off">
+          <input id="search" type="search" placeholder="search boxes" />
+        </form>
+        <ul id="box-list" role="listbox" aria-label="Boxes"></ul>
+        <p id="side-status" class="muted"></p>
+      </aside>
+
+      <!-- Main pane: the selected box, as its icon or as its content. -->
+      <main id="main">
+        <header class="main-head">
+          <button id="up" type="button" title="Go to the parent box">↑</button>
+          <nav id="breadcrumb" aria-label="Path"></nav>
+          <div id="mode-toggle" role="group" aria-label="Display mode">
+            <button type="button" data-mode="icon" title="Show the box as its icon">Icon</button>
+            <button type="button" data-mode="content" title="Show the content of the box">Content</button>
+          </div>
+          <span id="status" class="muted"></span>
+        </header>
+        <section id="canvas" tabindex="-1"></section>
+      </main>
+    </div>
+
+    <!-- Creating a box: pick a type, configure it, create it. -->
+    <dialog id="new-box-modal" aria-label="New box">
+      <form id="new-box-form" method="dialog">
+        <h2>New box</h2>
+        <label>Name <input id="nb-name" name="name" required /></label>
+        <label>Type
+          <select id="nb-type" name="box_type"></select>
+        </label>
+        <p id="nb-summary" class="muted"></p>
+        <label>Description <input id="nb-description" name="description" /></label>
+        <label>Resource <input id="nb-resource" name="resource_uri" placeholder="/path or https://…" /></label>
+        <label>Put it in
+          <select id="nb-parent" name="parent"></select>
+        </label>
+        <div id="nb-config" class="config-fields"></div>
+        <footer>
+          <button type="button" id="nb-cancel">Cancel</button>
+          <button type="submit" id="nb-create" class="primary">Create</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <!-- One context menu, filled in by the view that was clicked. -->
+    <ul id="context-menu" role="menu" hidden></ul>
+
+    <script src="/static/app.js"></script>
   </body>
 </html>

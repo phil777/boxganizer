@@ -27,6 +27,7 @@ from boxganizer.store import BoxStore
 try:
     from fastapi import Depends, FastAPI, HTTPException, Query, Request
     from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
     from pydantic import BaseModel, Field, JsonValue
 except ModuleNotFoundError as exc:  # pragma: no cover - only when the extra is absent
@@ -35,6 +36,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - only when the extra is 
     ) from exc
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
+_STATIC_DIR = Path(__file__).parent / "static"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
 
@@ -48,6 +50,13 @@ class BoxCreate(BaseModel):
     resource_uri: str | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
     config: dict[str, JsonValue] = Field(default_factory=dict)
+    parent: str | None = Field(default=None, description="Name or uuid of the box to create it in.")
+
+
+class ConfigUpdate(BaseModel):
+    """Request body for replacing a box's config."""
+
+    config: dict[str, JsonValue]
 
 
 class LinkCreate(BaseModel):
@@ -84,6 +93,7 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         description="Everything is a box.",
         lifespan=_lifespan,
     )
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.state.store = store if store is not None else BoxStore()
     app.state.owns_store = store is None
 
@@ -151,6 +161,26 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
     ) -> list[dict[str, object]]:
         return _dump(store.list_boxes(limit=limit))
 
+    @app.get("/api/boxes/{ref}")
+    def read_box(ref: str, store: StoreDep) -> dict[str, object]:
+        box = store.resolve(ref)
+        return box.to_dict() | {
+            "children": [_brief(b) for b in store.children(box.uuid)],
+            "parents": [_brief(b) for b in store.parents(box.uuid)],
+        }
+
+    @app.get("/api/boxes/{ref}/children")
+    def read_children(ref: str, store: StoreDep) -> list[dict[str, object]]:
+        box = store.resolve(ref)
+        return _dump(store.children(box.uuid))
+
+    @app.put("/api/boxes/{ref}/config")
+    def write_config(ref: str, payload: ConfigUpdate, store: StoreDep) -> dict[str, object]:
+        """Replace `config`. This is where view settings and cell layouts live."""
+        box = store.resolve(ref)
+        box.config = dict(payload.config)
+        return store.update(box).to_dict()
+
     @app.post("/api/boxes", status_code=201)
     def create_box(payload: BoxCreate, store: StoreDep) -> dict[str, object]:
         box = Box(
@@ -164,24 +194,20 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         )
         if payload.icon is None:
             boxtypes.adopt_type_icon(box)
-        return store.add(box).to_dict()
+        saved = store.add(box)
+        if payload.parent:
+            store.link(payload.parent, saved.uuid)
+        return saved.to_dict()
 
-    @app.get("/api/boxes/{name}")
-    def read_box(name: str, store: StoreDep) -> dict[str, object]:
-        box = store.get(name)
-        return box.to_dict() | {
-            "children": [b.name for b in store.children(name)],
-            "parents": [b.name for b in store.parents(name)],
-        }
+    @app.delete("/api/boxes/{ref}", status_code=204)
+    def delete_box(ref: str, store: StoreDep) -> None:
+        store.remove(store.resolve(ref).name)
 
-    @app.delete("/api/boxes/{name}", status_code=204)
-    def delete_box(name: str, store: StoreDep) -> None:
-        store.remove(name)
-
-    @app.post("/api/boxes/{parent}/children", status_code=201)
-    def add_child(parent: str, payload: LinkCreate, store: StoreDep) -> dict[str, list[str]]:
-        store.link(parent, payload.child)
-        return {"children": [b.name for b in store.children(parent)]}
+    @app.post("/api/boxes/{ref}/children", status_code=201)
+    def add_child(ref: str, payload: LinkCreate, store: StoreDep) -> dict[str, object]:
+        parent = store.resolve(ref)
+        store.link(parent.uuid, payload.child)
+        return {"children": [_brief(b) for b in store.children(parent.uuid)]}
 
     @app.get("/api/search")
     def search(
@@ -192,12 +218,12 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         return _dump(store.search(q, limit=limit))
 
     @app.get("/", response_class=HTMLResponse)
-    def index(request: Request, store: StoreDep, q: str | None = None) -> HTMLResponse:
-        boxes = store.search(q, limit=500) if q else store.list_boxes(limit=500)
+    def index(request: Request) -> HTMLResponse:
+        """The application shell; everything inside it comes from the API."""
         return templates.TemplateResponse(
             request=request,
             name="index.html",
-            context={"boxes": boxes, "query": q or "", "version": __version__},
+            context={"version": __version__},
         )
 
     return app
@@ -205,3 +231,8 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
 
 def _dump(boxes: Sequence[Box]) -> list[dict[str, object]]:
     return [box.to_dict() for box in boxes]
+
+
+def _brief(box: Box) -> dict[str, object]:
+    """Just enough of a box to draw it in a list and select it later."""
+    return {"uuid": box.uuid, "name": box.name, "icon": box.icon, "box_type": box.box_type}

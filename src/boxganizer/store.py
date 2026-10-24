@@ -324,10 +324,10 @@ class BoxStore:
         Refused when the parent's type holds a resource rather than boxes, or
         when the link would make a box reach itself.
         """
-        parent_box = self.get(parent)
+        parent_box = self.resolve(parent)
         parent_kind = boxtypes.get(parent_box.box_type)
         if not parent_kind.allows_children:
-            raise ChildrenNotAllowed(parent, parent_kind.key, child)
+            raise ChildrenNotAllowed(parent_box.name, parent_kind.key, child)
         parent_id = parent_box.id or 0
         child_id = self._id_of(child)
         if self._is_descendant(child_id, parent_id):
@@ -338,23 +338,22 @@ class BoxStore:
         )
 
     def unlink(self, parent: str, child: str) -> None:
-        """Take the box *child* out of the box *parent*."""
+        """Take the box *child* out of the box *parent*. Either may be a uuid."""
         self._execute(
             "DELETE FROM links WHERE parent_id = ? AND child_id = ?",
             (self._id_of(parent), self._id_of(child)),
         )
 
-    def children(self, name: str) -> list[Box]:
-        """Boxes directly inside *name*."""
+    def children(self, ref: str) -> list[Box]:
+        """Boxes directly inside the box named or identified by *ref*."""
         return [
-            self._from_row(row)
-            for row in self._rows(_SELECT_RELATED_CHILDREN, (self._id_of(name),))
+            self._from_row(row) for row in self._rows(_SELECT_RELATED_CHILDREN, (self._id_of(ref),))
         ]
 
-    def parents(self, name: str) -> list[Box]:
-        """Boxes directly containing *name*."""
+    def parents(self, ref: str) -> list[Box]:
+        """Boxes directly containing the box named or identified by *ref*."""
         return [
-            self._from_row(row) for row in self._rows(_SELECT_RELATED_PARENTS, (self._id_of(name),))
+            self._from_row(row) for row in self._rows(_SELECT_RELATED_PARENTS, (self._id_of(ref),))
         ]
 
     def tree(self, name: str, *, max_depth: int = 10) -> dict[str, object]:
@@ -383,8 +382,9 @@ class BoxStore:
             self._conn.commit()
             return int(cursor.lastrowid or 0)
 
-    def _id_of(self, name: str) -> int:
-        return self.get(name).id or 0
+    def _id_of(self, ref: str) -> int:
+        """Row id of a box named or identified by *ref*."""
+        return self.resolve(ref).id or 0
 
     def _is_descendant(self, start_id: int, target_id: int) -> bool:
         """True when *target_id* is *start_id* or reachable from it downwards."""

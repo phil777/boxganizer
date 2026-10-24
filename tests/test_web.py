@@ -58,8 +58,9 @@ def test_create_box_without_name_is_unprocessable(client: TestClient) -> None:
 
 def test_read_box_includes_relations(client: TestClient) -> None:
     body = client.get("/api/boxes/Kitchen").json()
-    assert body["parents"] == ["House"]
-    assert body["children"] == ["Passport"]
+    assert [parent["name"] for parent in body["parents"]] == ["House"]
+    assert [child["name"] for child in body["children"]] == ["Passport"]
+    assert body["parents"][0]["uuid"]
 
 
 def test_read_unknown_box_is_not_found(client: TestClient) -> None:
@@ -76,7 +77,7 @@ def test_delete_box(client: TestClient) -> None:
 def test_link_boxes(client: TestClient) -> None:
     response = client.post("/api/boxes/House/children", json={"child": "Books"})
     assert response.status_code == 201
-    assert "Books" in response.json()["children"]
+    assert "Books" in [child["name"] for child in response.json()["children"]]
 
 
 def test_linking_a_box_into_its_own_child_conflicts(client: TestClient) -> None:
@@ -89,11 +90,22 @@ def test_search_endpoint(client: TestClient) -> None:
     assert names == ["Kitchen"]
 
 
-def test_html_page_lists_boxes(client: TestClient) -> None:
+def test_the_page_is_an_application_shell(client: TestClient) -> None:
     page = client.get("/")
     assert page.headers["content-type"].startswith("text/html")
-    assert "Kitchen" in page.text
     assert "Boxganizer" in page.text
+    for landmark in (
+        'id="side"',
+        'id="new-box"',
+        'id="search"',
+        'id="box-list"',
+        'id="canvas"',
+        'id="breadcrumb"',
+        'id="mode-toggle"',
+        'id="new-box-modal"',
+        'id="context-menu"',
+    ):
+        assert landmark in page.text, landmark
 
 
 def test_serve_function_runs_uvicorn_with_a_real_app(
@@ -123,10 +135,19 @@ def test_serve_function_runs_uvicorn_with_a_real_app(
     assert db_path.exists()
 
 
-def test_html_page_filters(client: TestClient) -> None:
-    page = client.get("/", params={"q": "passport"})
-    assert "Passport" in page.text
-    assert "Garage" not in page.text
+def test_the_shell_assets_are_served(client: TestClient) -> None:
+    script = client.get("/static/app.js")
+    assert script.status_code == 200
+    assert "javascript" in script.headers["content-type"]
+    stylesheet = client.get("/static/app.css")
+    assert stylesheet.status_code == 200
+    assert "css" in stylesheet.headers["content-type"]
+
+
+def test_the_shell_fetches_its_data_from_the_api(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    for endpoint in ("/api/boxes", "/api/types", "/api/search"):
+        assert endpoint in script, endpoint
 
 
 # -- box types through the API ---------------------------------------------
@@ -177,9 +198,13 @@ def test_linking_into_a_leaf_type_conflicts(client: TestClient) -> None:
     assert response.json()["detail"]["error"] == "children_not_allowed"
 
 
-def test_html_page_names_the_type(client: TestClient) -> None:
-    client.post("/api/boxes", json={"name": "Ideas", "box_type": "mindmap"})
-    assert "mindmap" in client.get("/").text
+def test_the_types_endpoint_carries_what_the_modal_needs(client: TestClient) -> None:
+    types = {
+        entry["key"]: entry
+        for entry in client.get("/api/types", params={"selectable_only": True}).json()
+    }
+    assert types["grid"]["summary"]
+    assert "folder" in types["cabinet"]["ancestors"]
 
 
 # -- config ----------------------------------------------------------------
@@ -207,3 +232,66 @@ def test_config_must_be_an_object(client: TestClient) -> None:
 
 def test_a_box_without_config_reports_an_empty_object(client: TestClient) -> None:
     assert client.get("/api/boxes/Kitchen").json()["config"] == {}
+
+
+# -- references, children and config ---------------------------------------
+
+
+def test_a_box_can_be_read_by_uuid(client: TestClient, populated: BoxStore) -> None:
+    uuid = populated.get("Kitchen").uuid
+    body = client.get(f"/api/boxes/{uuid}").json()
+    assert body["name"] == "Kitchen"
+
+
+def test_children_are_listed_for_a_container(client: TestClient) -> None:
+    names = [box["name"] for box in client.get("/api/boxes/House/children").json()]
+    assert names == ["Garage", "Kitchen"]
+
+
+def test_children_of_an_unknown_box_are_not_found(client: TestClient) -> None:
+    assert client.get("/api/boxes/Ghost/children").status_code == 404
+
+
+def test_config_is_replaced_and_persisted(client: TestClient, populated: BoxStore) -> None:
+    response = client.put(
+        "/api/boxes/Kitchen/config",
+        json={"config": {"view": "grid", "rows": 3, "cells": {"0,0": "abc"}}},
+    )
+    assert response.status_code == 200
+    assert response.json()["config"]["rows"] == 3
+    assert populated.get("Kitchen").config["view"] == "grid"
+
+
+def test_config_must_be_an_object(client: TestClient) -> None:
+    assert client.put("/api/boxes/Kitchen/config", json={"config": [1]}).status_code == 422
+
+
+def test_config_of_an_unknown_box_is_not_found(client: TestClient) -> None:
+    assert client.put("/api/boxes/Ghost/config", json={"config": {}}).status_code == 404
+
+
+def test_a_box_can_be_created_inside_another(client: TestClient) -> None:
+    response = client.post(
+        "/api/boxes", json={"name": "Drawer", "box_type": "cabinet", "parent": "House"}
+    )
+    assert response.status_code == 201
+    assert "Drawer" in [box["name"] for box in client.get("/api/boxes/House/children").json()]
+
+
+def test_creating_inside_a_parent_by_uuid(client: TestClient, populated: BoxStore) -> None:
+    parent = populated.get("Kitchen").uuid
+    response = client.post("/api/boxes", json={"name": "Spoon", "parent": parent})
+    assert response.status_code == 201
+    children = client.get(f"/api/boxes/{parent}/children").json()
+    assert [box["name"] for box in children] == ["Passport", "Spoon"]
+
+
+def test_creating_inside_an_unknown_parent_is_reported(client: TestClient) -> None:
+    response = client.post("/api/boxes", json={"name": "Orphan", "parent": "Ghost"})
+    assert response.status_code == 404
+
+
+def test_a_box_can_be_deleted_by_uuid(client: TestClient, populated: BoxStore) -> None:
+    uuid = populated.get("Books").uuid
+    assert client.delete(f"/api/boxes/{uuid}").status_code == 204
+    assert client.get(f"/api/boxes/{uuid}").status_code == 404

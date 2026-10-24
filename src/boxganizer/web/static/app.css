@@ -1,0 +1,193 @@
+/* Boxganizer web UI. Two panes, one context menu, one modal. */
+
+:root {
+  color-scheme: light dark;
+  --gap: 0.75rem;
+  --line: color-mix(in srgb, currentColor 18%, transparent);
+  --accent: #d0021b;
+  --panel: color-mix(in srgb, currentColor 4%, transparent);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 15px/1.45 system-ui, sans-serif;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 17rem 1fr;
+  height: 100vh;
+}
+
+.muted { opacity: 0.62; font-size: 0.82rem; }
+
+/* ---------- left pane ---------- */
+
+#side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: var(--gap);
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  min-height: 0;
+}
+
+.side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+}
+
+.brand { font-weight: 600; }
+
+#search-form { display: flex; }
+
+#search {
+  flex: 1;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+}
+
+#box-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+#box-list li {
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+  padding: 0.3rem 0.45rem;
+  border-radius: 0.3rem;
+  cursor: pointer;
+}
+
+#box-list li:hover { background: var(--line); }
+#box-list li[aria-selected="true"] { outline: 1px solid var(--accent); }
+#box-list li .kind { font-size: 0.72rem; opacity: 0.55; margin-left: auto; }
+
+/* ---------- main pane ---------- */
+
+#main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.main-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: var(--gap);
+  border-bottom: 1px solid var(--line);
+}
+
+#breadcrumb { display: flex; gap: 0.35rem; flex-wrap: wrap; font-size: 0.9rem; }
+#breadcrumb button { border: none; background: none; color: inherit; cursor: pointer; padding: 0.1rem 0.2rem; }
+#breadcrumb button[aria-current="true"] { font-weight: 600; }
+
+#mode-toggle { margin-left: auto; display: flex; gap: 0.25rem; }
+#mode-toggle button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+#canvas {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--gap);
+  position: relative;
+}
+
+button {
+  font: inherit;
+  padding: 0.32rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* The icon view: the box drawn large, centred in what's left of the screen. */
+.icon-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  text-align: center;
+}
+
+.icon-view .glyph { font-size: clamp(3rem, 18vh, 9rem); line-height: 1; }
+.icon-view .caption { opacity: 0.7; max-width: 34rem; }
+
+/* ---------- modal ---------- */
+
+#new-box-modal {
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  padding: 1.1rem;
+  width: min(30rem, 92vw);
+  background: Canvas;
+  color: CanvasText;
+}
+
+#new-box-modal form { display: flex; flex-direction: column; gap: 0.6rem; }
+#new-box-modal h2 { margin: 0 0 0.2rem; font-size: 1.1rem; }
+#new-box-modal label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.86rem; }
+#new-box-modal input,
+#new-box-modal select {
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+#new-box-modal footer { display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.3rem; }
+.config-fields { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.config-fields label { flex: 1 1 8rem; }
+.config-fields textarea {
+  flex: 1 1 100%;
+  min-height: 4rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+}
+
+/* ---------- context menu ---------- */
+
+#context-menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 12rem;
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: Canvas;
+  color: CanvasText;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 25%);
+}
+
+#context-menu li { padding: 0.3rem 0.5rem; border-radius: 0.2rem; cursor: pointer; }
+#context-menu li:hover { background: var(--accent); color: #fff; }
+#context-menu li[role="separator"] { height: 1px; padding: 0; background: var(--line); cursor: default; }
+
+/* Views added by later commits hang their styles off these names. */
+.child-grid { display: grid; gap: var(--gap); }
+.text-view pre { margin: 0; }

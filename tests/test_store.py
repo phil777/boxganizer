@@ -428,3 +428,13 @@ def test_an_older_database_backfills_uuids(tmp_path: Path) -> None:
     # and the upgrade is a one-time event
     with BoxStore(path) as again:
         assert again.get("From v2").uuid == box.uuid
+
+
+def test_links_accept_uuid_references(store: BoxStore) -> None:
+    parent = store.add(Box(name="House"))
+    child = store.add(Box(name="Kitchen"))
+    store.link(parent.uuid, child.uuid)
+    assert [box.name for box in store.children(parent.uuid)] == ["Kitchen"]
+    assert [box.name for box in store.parents(child.name)] == ["House"]
+    store.unlink(parent.uuid, child.uuid)
+    assert store.children(parent.name) == []
