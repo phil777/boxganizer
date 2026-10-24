@@ -1,6 +1,6 @@
 """Terminal UI: browse, filter and create boxes without leaving the shell.
 
-Run it with ``boxganizer-tui``. It reads and writes the same database as the
+Run it with ``box tui``. It reads and writes the same database as the
 CLI and the web app, through :class:`boxganizer.store.BoxStore`.
 
 Keys: type to filter, up/down to move, enter to drill into a box, ``n`` to
@@ -10,9 +10,9 @@ create a box, ``r`` to reload, escape to show every box, ``q`` to quit.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
-import typer
+from rich.markup import escape
 
 try:
     from textual.app import App, ComposeResult
@@ -184,7 +184,7 @@ class BoxganizerApp(App[None]):
         listing = self.query_one(ListView)
         listing.remove_children()
         self._shown = [box.name for box in boxes]
-        listing.extend(ListItem(Label(f"{box.icon}  {box.name}")) for box in boxes)
+        listing.extend(ListItem(Label(f"{box.icon}  {escape(box.name)}")) for box in boxes)
         if not boxes:
             listing.index = None
             self._detail(_DETAIL_EMPTY)
@@ -204,15 +204,15 @@ class BoxganizerApp(App[None]):
         parents = ", ".join(p.name for p in self.store.parents(name)) or "—"
         children = ", ".join(c.name for c in self.store.children(name)) or "—"
         lines = [
-            f"[b]{box.icon} {box.name}[/]  #{box.id}",
-            box.description or "[dim]no description[/]",
+            f"[b]{box.icon} {escape(box.name)}[/]  #{box.id}",
+            escape(box.description) if box.description else "[dim]no description[/]",
         ]
         if box.resource_uri:
-            lines.append(f"resource : {box.resource_uri}")
-        lines.append(f"parents  : {parents}")
-        lines.append(f"children : {children}")
+            lines.append(f"resource : {escape(box.resource_uri)}")
+        lines.append(f"parents  : {escape(parents)}")
+        lines.append(f"children : {escape(children)}")
         for key, value in sorted(box.metadata.items()):
-            lines.append(f"{key} = {value}")
+            lines.append(f"{escape(key)} = {escape(value)}")
         self._detail("\n".join(lines))
 
     def _detail(self, markup: str) -> None:
@@ -220,8 +220,8 @@ class BoxganizerApp(App[None]):
         self.query_one(f"#{DETAIL_ID}", Static).update(markup)
 
     def _show_error(self, message: str) -> None:
-        self._detail(f"[red]{message}[/]")
-        self.notify(message, severity="error")
+        self._detail(f"[red]{escape(message)}[/]")
+        self.notify(escape(message), severity="error")
 
     def _add_box(self, name: str | None) -> None:
         if not name:
@@ -236,18 +236,3 @@ class BoxganizerApp(App[None]):
 
     def on_unmount(self) -> None:
         self.store.close()
-
-
-cli = typer.Typer(help="Open the Boxganizer text UI.", add_completion=False)
-
-
-@cli.command()
-def main(
-    db: Annotated[Path | None, typer.Option("--db", help="Database file.")] = None,
-) -> None:
-    """Launch the terminal interface."""
-    BoxganizerApp(db).run()
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()

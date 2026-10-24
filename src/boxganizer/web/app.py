@@ -1,7 +1,7 @@
 """FastAPI application: JSON API plus a minimal HTML browser.
 
-Create it with :func:`create_app` and hand it to uvicorn (see
-``boxganizer.web.server``). The app owns one :class:`BoxStore`.
+Create it with :func:`create_app` and hand it to uvicorn (``box serve`` does
+both, through :func:`boxganizer.web.server.run`). The app owns one :class:`BoxStore`.
 """
 
 from __future__ import annotations

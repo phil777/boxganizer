@@ -1,7 +1,11 @@
-"""``boxganizer`` command line interface.
+"""``box`` command line interface.
 
 Thin shell over :class:`boxganizer.store.BoxStore`: parse arguments, call the
 core, print the result. No business logic lives here.
+
+``box`` is also how the other two interfaces start: ``box serve`` runs the web
+app and ``box tui`` opens the text UI. Both import their framework lazily, so
+the CLI works when the optional extra is not installed.
 """
 
 from __future__ import annotations
@@ -14,14 +18,15 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from boxganizer import __version__, config
-from boxganizer.errors import BoxganizerError
+from boxganizer.errors import BoxganizerError, MissingDependency
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
 app = typer.Typer(
-    name="boxganizer",
+    name="box",
     help="Organise everything as boxes.",
     no_args_is_help=True,
     pretty_exceptions_show_locals=False,
@@ -63,7 +68,18 @@ def _parse_metadata(items: Sequence[str]) -> dict[str, str]:
 
 
 def _fail(message: str) -> None:
-    err_console.print(f"[red]error:[/red] {message}")
+    """Report an error. The message is literal: brackets in it stay visible."""
+    err_console.print(Text.assemble(("error: ", "red"), message))
+
+
+def say(prefix: str, body: str, *, style: str = "green") -> None:
+    """Print a styled word, then *body* exactly as stored — never as markup."""
+    console.print(Text.assemble((f"{prefix} ", style), body))
+
+
+def lit(body: str) -> None:
+    """Print *body* exactly as stored — never as markup."""
+    console.print(Text(body))
 
 
 @app.callback()
@@ -88,9 +104,9 @@ def status(ctx: typer.Context, db: DbOption = None) -> None:
     exists = path.exists()
     with _open(ctx, path) as store:
         count = store.count()
-    console.print(f"database : {path}")
-    console.print(f"created  : {'yes' if exists else 'not yet'}")
-    console.print(f"boxes    : {count}")
+    lit(f"database : {path}")
+    lit(f"created  : {'yes' if exists else 'not yet'}")
+    lit(f"boxes    : {count}")
 
 
 @app.command()
@@ -99,7 +115,7 @@ def init(ctx: typer.Context, db: DbOption = None) -> None:
     path = db or _db_of(ctx) or config.default_db_path()
     with _open(ctx, path):
         pass
-    console.print(f"[green]initialised[/green] {path}")
+    say("initialised", str(path))
 
 
 @boxes_app.command("add")
@@ -124,7 +140,7 @@ def box_add(
         box.icon = icon
     with _open(ctx, _db_of(ctx)) as store:
         saved = store.add(box)
-    console.print(f"[green]added[/green] {saved.icon} {saved.name} (#{saved.id})")
+    say("added", f"{saved.icon} {saved.name} (#{saved.id})")
 
 
 @boxes_app.command("list")
@@ -140,14 +156,14 @@ def box_list(
         console.print_json(json.dumps([b.to_dict() for b in found]))
         return
     if not found:
-        console.print("no boxes yet — try [bold]boxganizer box add[/] ")
+        console.print(Text.assemble("no boxes yet — try ", ("box box add", "bold"), ""))
         return
     table = Table(title=f"boxes ({len(found)})")
     table.add_column("icon", justify="center")
     table.add_column("name", style="bold")
     table.add_column("description")
     for box in found:
-        table.add_row(box.icon, box.name, box.description)
+        table.add_row(box.icon, Text(box.name), Text(box.description))
     console.print(table)
 
 
@@ -169,15 +185,15 @@ def box_show(
         }
         console.print_json(json.dumps(payload))
         return
-    console.print(f"{box.icon} [bold]{box.name}[/]  #{box.id}")
+    console.print(Text.assemble(f"{box.icon} ", (box.name, "bold"), f"  #{box.id}"))
     if box.description:
-        console.print(f"  {box.description}")
+        lit(f"  {box.description}")
     if box.resource_uri:
-        console.print(f"  resource : {box.resource_uri}")
+        lit(f"  resource : {box.resource_uri}")
     for key, value in sorted(box.metadata.items()):
-        console.print(f"  {key} = {value}")
-    console.print(f"  parents  : {', '.join(p.name for p in folks) or '-'}")
-    console.print(f"  children : {', '.join(c.name for c in kids) or '-'}")
+        lit(f"  {key} = {value}")
+    lit(f"  parents  : {', '.join(p.name for p in folks) or '-'}")
+    lit(f"  children : {', '.join(c.name for c in kids) or '-'}")
 
 
 @boxes_app.command("search")
@@ -190,9 +206,9 @@ def box_search(
     with _open(ctx, _db_of(ctx)) as store:
         found = store.search(term, limit=limit)
     for box in found:
-        console.print(f"{box.icon} {box.name}")
+        lit(f"{box.icon} {box.name}")
     if not found:
-        console.print(f"nothing matches {term!r}")
+        lit(f"nothing matches {term!r}")
 
 
 @boxes_app.command("rm")
@@ -206,7 +222,7 @@ def box_remove(
         if not yes and not typer.confirm(f"delete box {name!r}?"):
             raise typer.Abort
         removed = store.remove(name)
-    console.print(f"[red]deleted[/red] {removed.name}")
+    say("deleted", removed.name, style="red")
 
 
 @links_app.command("in")
@@ -218,7 +234,7 @@ def link_in(
     """Put *child* inside *parent*."""
     with _open(ctx, _db_of(ctx)) as store:
         store.link(parent, child)
-    console.print(f"[green]linked[/green] {child} → {parent}")
+    say("linked", f"{child} → {parent}")
 
 
 @links_app.command("out")
@@ -230,7 +246,7 @@ def link_out(
     """Take *child* out of *parent*."""
     with _open(ctx, _db_of(ctx)) as store:
         store.unlink(parent, child)
-    console.print(f"unlinked {child} from {parent}")
+    lit(f"unlinked {child} from {parent}")
 
 
 @app.command()
@@ -253,16 +269,58 @@ def _find_roots(store: BoxStore) -> list[Box]:
 
 
 def _print_tree(store: BoxStore, box: Box, *, level: int, max_depth: int) -> None:
-    console.print("  " * level + f"{box.icon} {box.name}")
+    lit("  " * level + f"{box.icon} {box.name}")
     if level + 1 >= max_depth:
         return
     for kid in store.children(box.name):
         _print_tree(store, kid, level=level + 1, max_depth=max_depth)
 
 
-def main() -> None:  # pragma: no cover - console-script wrapper
+@app.command()
+def serve(
+    ctx: typer.Context,
+    host: Annotated[str, typer.Option("--host", help="Bind address.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-p", min=1, max=65535)] = 8000,
+    reload: Annotated[bool, typer.Option("--reload", help="Restart on code changes.")] = False,
+    db: DbOption = None,
+) -> None:
+    """Start the web app: page on /, JSON API on /api, docs on /docs."""
+    path = db or _db_of(ctx) or config.default_db_path()
+    try:
+        from boxganizer.web.server import run
+    except ModuleNotFoundError as exc:  # pragma: no cover - only without the extra
+        raise MissingDependency("web") from exc
+
+    def announce(bound_host: str, bound_port: int) -> None:
+        console.print(
+            Text.assemble(
+                "serving ",
+                (str(path), "bold"),
+                f" on http://{bound_host}:{bound_port} — Ctrl-C to stop",
+            )
+        )
+
+    try:
+        run(host=host, port=port, db=path, reload=reload, on_start=announce)
+    except ModuleNotFoundError as exc:  # pragma: no cover - only without the extra
+        raise MissingDependency("web") from exc
+
+
+@app.command()
+def tui(ctx: typer.Context, db: DbOption = None) -> None:
+    """Open the text UI in this terminal."""
+    try:
+        from boxganizer.tui.app import BoxganizerApp
+    except ModuleNotFoundError as exc:  # pragma: no cover - only without the extra
+        raise MissingDependency("tui") from exc
+
+    BoxganizerApp(db or _db_of(ctx)).run()
+
+
+def main() -> None:
+    """Console-script entry point: turn core errors into a message and exit 1."""
     try:
         app()
     except BoxganizerError as exc:
         _fail(str(exc))
-        raise typer.Exit(code=1) from exc
+        raise SystemExit(1) from exc

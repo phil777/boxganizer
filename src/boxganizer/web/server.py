@@ -1,41 +1,42 @@
-"""Run the web app: ``boxganizer-web --port 8000``."""
+"""Start the web app.
+
+The command lives in the CLI (``box serve``); this module only knows how to
+hand the FastAPI app to uvicorn. Both uvicorn and FastAPI are optional, so the
+imports stay inside :func:`run`.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING
 
-import typer
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from boxganizer.store import BoxStore
 
-app = typer.Typer(help="Serve the Boxganizer web UI.", add_completion=False)
 
-
-@app.command()
-def serve(
-    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", "-p", min=1, max=65535)] = 8000,
-    db: Annotated[Path | None, typer.Option("--db", help="Database file.")] = None,
-    reload: Annotated[bool, typer.Option("--reload", help="Restart on code changes.")] = False,
+def run(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    db: Path | None = None,
+    reload: bool = False,
+    on_start: Callable[[str, int], None] | None = None,
 ) -> None:
-    """Start uvicorn."""
-    try:
-        import uvicorn
-    except ModuleNotFoundError as exc:  # pragma: no cover - only when the extra is absent
-        typer.echo(
-            "the web frontend needs the 'web' extra: pip install 'boxganizer[web]'", err=True
-        )
-        raise typer.Exit(code=1) from exc
+    """Serve the web app until interrupted.
+
+    *on_start* runs once the app exists and immediately before uvicorn takes
+    over, so a caller can announce the address without lying when the ``web``
+    extra is missing. :class:`ModuleNotFoundError` propagates in that case and
+    the caller turns it into an install hint.
+    """
+    import uvicorn
 
     from boxganizer.store import BoxStore
     from boxganizer.web.app import create_app
 
-    store = BoxStore(db) if db is not None else BoxStore()
-    uvicorn.run(create_app(store), host=host, port=port, reload=reload)
-
-
-def main() -> None:
-    app()
-
-
-if __name__ == "__main__":  # pragma: no cover
-    main()
+    store: BoxStore = BoxStore(db)
+    asgi = create_app(store)
+    if on_start is not None:
+        on_start(host, port)
+    uvicorn.run(asgi, host=host, port=port, reload=reload)

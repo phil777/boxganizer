@@ -35,10 +35,9 @@ dev = [
     "mypy>=1.10",
 ]
 
+# One console script: `box serve` and `box tui` start the other two interfaces.
 [project.scripts]
-boxganizer = "boxganizer.cli.main:main"
-boxganizer-web = "boxganizer.web.server:main"
-boxganizer-tui = "boxganizer.tui.app:main"
+box = "boxganizer.cli.main:main"
 
 [project.urls]
 Homepage = "https://example.invalid/boxganizer"

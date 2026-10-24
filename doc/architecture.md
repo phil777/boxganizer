@@ -4,8 +4,8 @@
 
 ```
                      ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-   user ────────────►│  boxganizer │  │ boxganizer- │  │ boxganizer- │
-                     │     cli     │  │     web     │  │     tui     │
+   user ────────────►│     box     │  │  box serve  │  │   box tui   │
+                     │    (cli)    │  │    (web)    │  │    (tui)    │
                      └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
                             │                │                │
                             └────────┬───────┴────────────────┘
@@ -39,9 +39,9 @@ Three rules hold this together:
 | `store.py`      | `BoxStore`: CRUD, search, links, cycle guard, schema, migrations.  |
 | `config.py`     | Resolves the database path (argument → env → XDG → home).          |
 | `errors.py`     | `BoxganizerError` and its subclasses.                             |
-| `cli/main.py`   | Typer app: `init`, `status`, `box add/list/show/search/rm`, `link`, `tree`. |
+| `cli/main.py`   | Typer app `box`: `init`, `status`, `version`, `box add/list/show/search/rm`, `link`, `tree`, `serve`, `tui`. |
 | `web/app.py`    | FastAPI factory `create_app()`: JSON API + HTML page.              |
-| `web/server.py` | uvicorn entry point.                                               |
+| `web/server.py` | `run()`: builds the app and hands it to uvicorn.                    |
 | `tui/app.py`    | Textual `BoxganizerApp` and the `NewBoxScreen` modal.              |
 
 ## Identity and names
@@ -85,6 +85,11 @@ The core raises `BoxganizerError` subclasses. Each frontend maps them once:
 | `DuplicateBoxName` | message, exit 1| 409               | detail pane, red     |
 | `InvalidBoxName`   | message, exit 1| 422               | detail pane, red     |
 | `CyclicLink`       | message, exit 1| 409               | detail pane, red     |
+| `MissingDependency`| install hint, exit 1 | n/a         | n/a                |
+
+`box serve` and `box tui` import their framework inside the command, so a
+missing extra reaches the user as `MissingDependency` instead of an import
+traceback.
 
 A frontend never translates an error into another frontend's vocabulary, and
 never swallows one silently.

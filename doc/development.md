@@ -24,9 +24,9 @@ never `src.boxganizer`.
 | One test file         | `.venv/bin/pytest tests/test_store.py -q`                |
 | One test              | `.venv/bin/pytest tests/test_store.py::test_add_then_get -q` |
 | Everything at once    | `make check`                                             |
-| CLI smoke             | `make run-cli ARGS="box list"`                           |
-| Web app               | `make run-web` (then open http://127.0.0.1:8000)         |
-| Text UI               | `make run-tui`                                           |
+| CLI smoke             | `make run-cli ARGS="box list"` or `box --help`                           |
+| Web app               | `box serve` — `make run-web` (open http://127.0.0.1:8000) |
+| Text UI               | `box tui` — `make run-tui`                                 |
 
 ## Testing rules
 
@@ -73,7 +73,7 @@ use a scratch file:
 
 ```bash
 export BOXGANIZER_DB=$PWD/data/scratch.db   # data/ is git-ignored
-boxganizer init
+box init
 ```
 
 ## Committing

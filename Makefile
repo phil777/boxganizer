@@ -42,13 +42,13 @@ typecheck:
 check: lint typecheck test
 
 run-cli:
-	$(VENV)/bin/boxganizer $(ARGS)
+	$(VENV)/bin/box $(ARGS)
 
 run-web:
-	$(VENV)/bin/boxganizer-web
+	$(VENV)/bin/box serve
 
 run-tui:
-	$(VENV)/bin/boxganizer-tui
+	$(VENV)/bin/box tui
 
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache htmlcov .coverage coverage.xml

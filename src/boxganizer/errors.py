@@ -46,3 +46,13 @@ class CyclicLink(BoxganizerError):
 
 class StoreError(BoxganizerError):
     """The database could not be opened or written."""
+
+
+class MissingDependency(BoxganizerError):
+    """The command needs an optional extra that is not installed."""
+
+    def __init__(self, extra: str) -> None:
+        super().__init__(
+            f"this command needs the {extra!r} extra: pip install 'boxganizer[{extra}]'"
+        )
+        self.extra = extra

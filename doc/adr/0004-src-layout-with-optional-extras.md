@@ -1,7 +1,7 @@
 # 4. src layout with optional extras
 
 Date: 2026-10-24
-Status: accepted
+Status: accepted — the console-script part is superseded by 0005
 
 ## Context
 

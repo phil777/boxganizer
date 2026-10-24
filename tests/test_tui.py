@@ -131,6 +131,21 @@ def test_cancelling_the_modal_creates_nothing(db_path: Path, populated: BoxStore
     _run(app, scenario)
 
 
+def test_brackets_in_box_data_are_shown_as_text(db_path: Path) -> None:
+    from textual.widgets import Static
+
+    with BoxStore(db_path) as store:
+        store.add(Box(name="Note", description="cost [red]100[/] euros", metadata={"tag": "[x]"}))
+    app = BoxganizerApp(db_path)
+
+    async def scenario(app: BoxganizerApp, pilot: Any) -> None:
+        rendered = str(app.query_one("#detail", Static).render())
+        assert "cost [red]100[/] euros" in rendered
+        assert "tag = [x]" in rendered
+
+    _run(app, scenario)
+
+
 def test_labels_carry_the_box_icon(db_path: Path, populated: BoxStore) -> None:
     app = BoxganizerApp(db_path)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -93,6 +94,33 @@ def test_html_page_lists_boxes(client: TestClient) -> None:
     assert page.headers["content-type"].startswith("text/html")
     assert "Kitchen" in page.text
     assert "Boxganizer" in page.text
+
+
+def test_serve_function_runs_uvicorn_with_a_real_app(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import uvicorn
+
+    from boxganizer.web import server as web_server
+
+    seen: dict[str, object] = {}
+
+    def fake_run(asgi: object, **kwargs: object) -> None:
+        seen["asgi"] = asgi
+        seen.update(kwargs)
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    announced: list[tuple[str, int]] = []
+
+    def announce(bound_host: str, bound_port: int) -> None:
+        announced.append((bound_host, bound_port))
+
+    web_server.run(host="0.0.0.0", port=1234, db=db_path, on_start=announce)
+    assert announced == [("0.0.0.0", 1234)]
+    assert seen["host"] == "0.0.0.0"
+    assert seen["port"] == 1234
+    assert getattr(seen["asgi"], "title", None) == "Boxganizer"
+    assert db_path.exists()
 
 
 def test_html_page_filters(client: TestClient) -> None:

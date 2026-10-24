@@ -6,11 +6,13 @@ A box holds one thing — a file, a note, a photo, a passport — and any number
 other boxes. Boxes inside boxes give you a graph you can navigate, search and
 reshape. One store, three ways in:
 
-| Interface   | Command            | Package                      |
-| ----------- | ------------------ | ---------------------------- |
-| CLI         | `boxganizer`       | `boxganizer.cli`             |
-| Web app     | `boxganizer-web`   | `boxganizer.web`             |
-| Text UI     | `boxganizer-tui`   | `boxganizer.tui`             |
+Everything runs through one command, `box`:
+
+| Interface   | Command        | Package          |
+| ----------- | -------------- | ---------------- |
+| CLI         | `box`          | `boxganizer.cli` |
+| Web app     | `box serve`    | `boxganizer.web` |
+| Text UI     | `box tui`      | `boxganizer.tui` |
 
 All three read and write the **same** SQLite database through the same core
 library, so anything you add in one shows up in the others.
@@ -28,20 +30,24 @@ Extras on their own: `pip install -e ".[web]"` or `pip install -e ".[tui]"`.
 ## Use
 
 ```bash
-boxganizer init                              # create the database
-boxganizer box add "Kitchen" -d "Room for cooking" -m floor=0
-boxganizer box add "Passport" -i 🛂 -d "Expires 2031"
-boxganizer link in "Passport" "Kitchen"      # put a box inside another box
-boxganizer box list
-boxganizer box show Kitchen
-boxganizer box search cooking
-boxganizer tree
+box init                                     # create the database
+box box add "Kitchen" -d "Room for cooking" -m floor=0
+box box add "Passport" -i 🛂 -d "Expires 2031"
+box link in "Passport" "Kitchen"             # put a box inside another box
+box box list
+box box show Kitchen
+box box search cooking
+box tree
 ```
 
 ```bash
-boxganizer-web --port 8000                   # API on /api, docs on /docs, page on /
-boxganizer-tui                               # browse, filter (type), drill in (enter), new (n)
+box serve --port 8000                        # API on /api, docs on /docs, page on /
+box tui                                      # browse, filter (type), drill in (enter), new (n)
 ```
+
+`box serve` and `box tui` import their own framework, so `box --help` works
+even when only the core is installed; asking for one without its extra prints
+the `pip install` line for it.
 
 The database lives at `$BOXGANIZER_DB`, else
 `$XDG_DATA_HOME/boxganizer/boxes.db`, else `~/.local/share/boxganizer/boxes.db`.
@@ -55,8 +61,8 @@ src/boxganizer/
 ├── store.py       # SQLite persistence, the only module that speaks SQL
 ├── config.py      # where the database lives
 ├── errors.py      # one exception hierarchy for all frontends
-├── cli/           # typer command line
-├── web/           # FastAPI app, JSON API + HTML page
+├── cli/           # the `box` command line, including serve and tui
+├── web/           # FastAPI app, JSON API + HTML page, uvicorn runner
 └── tui/           # Textual terminal browser
 tests/             # pytest suites, one per layer
 doc/               # architecture, development guide, ADRs
@@ -74,7 +80,9 @@ make lint         # ruff check
 make format       # ruff format
 make typecheck    # mypy
 make check        # lint + typecheck + test
-make run-cli / run-web / run-tui
+make run-cli          # box <args>, e.g. make run-cli ARGS="box list"
+make run-web          # box serve
+make run-tui          # box tui
 ```
 
 ## Status
