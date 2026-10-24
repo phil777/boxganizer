@@ -264,6 +264,7 @@ def box_show(
         return
     console.print(Text.assemble(f"{box.icon} ", (box.name, "bold"), f"  #{box.id}"))
     lit(f"  type     : {_type_note(box.box_type)}")
+    lit(f"  uuid     : {box.uuid}")
     if box.description:
         lit(f"  {box.description}")
     if box.resource_uri:

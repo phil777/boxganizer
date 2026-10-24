@@ -23,7 +23,7 @@ from boxganizer.models import Box
 EDITABLE_FIELDS = ("name", "description", "icon", "box_type", "resource_uri", "metadata", "config")
 
 #: Fields that are shown but belong to the database.
-READ_ONLY_FIELDS = ("id", "created_at", "updated_at")
+READ_ONLY_FIELDS = ("id", "uuid", "created_at", "updated_at")
 
 _JSON_SCALARS = (str, int, float, bool)
 
@@ -32,6 +32,7 @@ def dump(box: Box, *, parents: Sequence[str] = ()) -> str:
     """The box as a YAML document, with a short header of guidance."""
     document = {
         "id": box.id,
+        "uuid": box.uuid,
         "name": box.name,
         "box_type": box.box_type,
         "icon": box.icon,
@@ -67,6 +68,7 @@ def load(text: str, *, original: Box) -> Box:
     icon = data.get("icon")
     return Box(
         id=original.id,
+        uuid=original.uuid,
         name=name,
         description=str(data.get("description") or ""),
         icon=str(icon) if icon else kind.icon,
@@ -114,6 +116,7 @@ def _check_keys(data: Mapping[str, Any]) -> None:
 def _check_read_only(data: Mapping[str, Any], original: Box) -> None:
     current = {
         "id": original.id,
+        "uuid": original.uuid,
         "created_at": original.created_at.isoformat(timespec="seconds"),
         "updated_at": original.updated_at.isoformat(timespec="seconds"),
     }

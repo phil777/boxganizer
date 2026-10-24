@@ -69,7 +69,15 @@ def test_keys_keep_a_readable_order(box: Box) -> None:
         for line in document.splitlines()
         if ":" in line and not line.startswith((" ", "#"))
     ]
-    assert order[:6] == ["id", "name", "box_type", "icon", "description", "resource_uri"]
+    assert order[:7] == [
+        "id",
+        "uuid",
+        "name",
+        "box_type",
+        "icon",
+        "description",
+        "resource_uri",
+    ]
 
 
 # -- reading ---------------------------------------------------------------
@@ -156,6 +164,17 @@ def test_the_id_must_stay_the_same(box: Box) -> None:
     edited = editing.dump(box).replace(f"id: {box.id}", "id: 999")
     with pytest.raises(EditError, match="id is set by Boxganizer"):
         editing.load(edited, original=box)
+
+
+def test_the_uuid_must_stay_the_same(box: Box) -> None:
+    edited = editing.dump(box).replace(f"uuid: {box.uuid}", f"uuid: {'0' * 36}")
+    with pytest.raises(EditError, match="uuid is set by Boxganizer"):
+        editing.load(edited, original=box)
+
+
+def test_the_uuid_survives_an_edit(box: Box) -> None:
+    rebuilt = editing.load(editing.dump(box).replace("name: Cellar", "name: Loft"), original=box)
+    assert rebuilt.uuid == box.uuid
 
 
 def test_an_unknown_type_is_named(box: Box) -> None:

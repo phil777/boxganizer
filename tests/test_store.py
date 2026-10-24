@@ -372,3 +372,59 @@ def test_upgrading_from_v1_adds_both_columns(tmp_path: Path) -> None:
     with BoxStore(path) as store:
         box = store.get("Old note")
         assert box.box_type == "box" and box.config == {}
+
+
+# -- uuid ------------------------------------------------------------------
+
+
+def test_every_box_gets_a_uuid(store: BoxStore) -> None:
+    saved = store.add(Box(name="Thing"))
+    assert len(saved.uuid) == 36
+    assert store.get("Thing").uuid == saved.uuid
+
+
+def test_uuids_are_unique(store: BoxStore) -> None:
+    uuids = {store.add(Box(name=f"B{i}")).uuid for i in range(25)}
+    assert len(uuids) == 25
+
+
+def test_a_uuid_survives_a_rename(store: BoxStore) -> None:
+    saved = store.add(Box(name="Before"))
+    box = store.get("Before")
+    box.name = "After"
+    store.update(box)
+    assert store.get("After").uuid == saved.uuid
+
+
+def test_a_box_is_found_by_name_or_uuid(store: BoxStore) -> None:
+    saved = store.add(Box(name="Kitchen"))
+    assert store.resolve("Kitchen").uuid == saved.uuid
+    assert store.resolve("kitchen").uuid == saved.uuid
+    assert store.resolve(saved.uuid).name == "Kitchen"
+    assert store.resolve(f"  {saved.uuid.upper()}  ").name == "Kitchen"
+
+
+def test_resolving_an_unknown_reference_raises(store: BoxStore) -> None:
+    with pytest.raises(BoxNotFound):
+        store.resolve("nope")
+
+
+def test_uuid_is_kept_when_supplied() -> None:
+    box = Box(name="Fixed", uuid="0" * 36)
+    assert box.uuid == "0" * 36
+
+
+def test_an_older_database_backfills_uuids(tmp_path: Path) -> None:
+    path = tmp_path / "v2.db"
+    _write_v2_database(path)
+
+    with BoxStore(path) as store:
+        box = store.get("From v2")
+        assert len(box.uuid) == 36
+        assert store.resolve(box.uuid).name == "From v2"
+        added = store.add(Box(name="Written after"))
+        assert added.uuid != box.uuid
+
+    # and the upgrade is a one-time event
+    with BoxStore(path) as again:
+        assert again.get("From v2").uuid == box.uuid

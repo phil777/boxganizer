@@ -27,17 +27,19 @@ from boxganizer.errors import (
     InvalidBoxContent,
     StoreError,
 )
-from boxganizer.models import DEFAULT_ICON, Box, canonical_name
+from boxganizer.models import DEFAULT_ICON, Box, canonical_name, new_uuid
 
 #: 1 = boxes and links. 2 = boxes gained ``box_type`` (see ``doc/box-types.md``).
 #: 3 = boxes gained ``config``: type-specific settings as JSON.
-SCHEMA_VERSION = 3
+#: 4 = boxes gained ``uuid``: a permanent identifier for links and layouts.
+SCHEMA_VERSION = 4
 
 _SCHEMA = f"""
 PRAGMA user_version = {SCHEMA_VERSION};
 
 CREATE TABLE IF NOT EXISTS boxes (
     id           INTEGER PRIMARY KEY,
+    uuid         TEXT,
     name         TEXT    NOT NULL,
     key          TEXT    NOT NULL,
     description  TEXT    NOT NULL DEFAULT '',
@@ -51,6 +53,8 @@ CREATE TABLE IF NOT EXISTS boxes (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS boxes_key_idx ON boxes (key);
+-- boxes_uuid_idx is created after the migration, once the column is certain to exist.
+
 
 CREATE TABLE IF NOT EXISTS links (
     parent_id INTEGER NOT NULL REFERENCES boxes (id) ON DELETE CASCADE,
@@ -63,12 +67,14 @@ CREATE INDEX IF NOT EXISTS links_child_idx ON links (child_id);
 """
 
 _INSERT_BOX = """
-INSERT INTO boxes (name, key, description, icon, box_type, resource_uri, metadata,
+INSERT INTO boxes (uuid, name, key, description, icon, box_type, resource_uri, metadata,
                    config, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _SELECT_BY_KEY = "SELECT * FROM boxes WHERE key = ?"
+
+_SELECT_BY_REF = "SELECT * FROM boxes WHERE key = ? OR uuid = ?"
 
 _SELECT_RELATED_CHILDREN = """
 SELECT b.* FROM boxes b JOIN links l ON l.child_id = b.id
@@ -153,6 +159,9 @@ class BoxStore:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
         self._migrate(stored_version)
+        with self._lock:
+            self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS boxes_uuid_idx ON boxes (uuid)")
+            self._conn.commit()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -186,6 +195,7 @@ class BoxStore:
         row_id = self._execute(
             _INSERT_BOX,
             (
+                box.uuid,
                 box.name,
                 box.key,
                 box.description,
@@ -221,6 +231,18 @@ class BoxStore:
         rows = self._rows(_SELECT_BY_KEY, (canonical_name(name),))
         if not rows:
             raise BoxNotFound(name)
+        return self._from_row(rows[0])
+
+    def resolve(self, ref: str) -> Box:
+        """Find a box by name, or by its uuid.
+
+        Anything that faces a URL or a saved layout uses this: a uuid survives a
+        rename, a name does not.
+        """
+        cleaned = ref.strip()
+        rows = self._rows(_SELECT_BY_REF, (canonical_name(cleaned), cleaned.lower()))
+        if not rows:
+            raise BoxNotFound(ref)
         return self._from_row(rows[0])
 
     def exists(self, name: str) -> bool:
@@ -394,10 +416,19 @@ class BoxStore:
         additions: list[tuple[int, str, str]] = [
             (2, "box_type", "TEXT NOT NULL DEFAULT 'box'"),
             (3, "config", "TEXT NOT NULL DEFAULT '{}'"),
+            (4, "uuid", "TEXT"),
         ]
         for version, name, definition in additions:
             if stored_version < version and name not in columns:
                 self._execute(f"ALTER TABLE boxes ADD COLUMN {name} {definition}")
+        if stored_version < 4:
+            self._backfill_uuids()
+
+    def _backfill_uuids(self) -> None:
+        """Give every row that lacks one a permanent identifier."""
+        rows = self._rows("SELECT id FROM boxes WHERE uuid IS NULL OR uuid = ''")
+        for row in rows:
+            self._execute("UPDATE boxes SET uuid = ? WHERE id = ?", (new_uuid(), int(row["id"])))
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Box:
@@ -405,6 +436,7 @@ class BoxStore:
         config = _object_field(row["config"])
         return Box(
             id=row["id"],
+            uuid=str(row["uuid"]) if row["uuid"] else new_uuid(),
             name=row["name"],
             description=row["description"],
             icon=row["icon"],

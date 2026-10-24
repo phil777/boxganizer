@@ -52,6 +52,7 @@ def test_to_dict_is_json_friendly() -> None:
     assert payload["created_at"] == "2026-01-02T03:04:05+00:00"
     assert set(payload) == {
         "id",
+        "uuid",
         "name",
         "description",
         "icon",

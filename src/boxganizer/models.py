@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from boxganizer.errors import InvalidBoxName
 
@@ -29,6 +30,11 @@ DEFAULT_ICON = "\U0001f4e6"  # 📦
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def new_uuid() -> str:
+    """A fresh identity for a box: stable, unique, safe to put in a URL."""
+    return str(uuid4())
 
 
 def canonical_name(name: str) -> str:
@@ -53,6 +59,9 @@ class Box:
     #: Type-specific settings. Arbitrary JSON, unlike the flat string metadata.
     config: dict[str, Any] = field(default_factory=dict)
     id: int | None = None
+    #: Permanent identifier. `id` is a row number; this is what links, saved
+    #: layouts and URLs refer to, so it survives a rename and an export.
+    uuid: str = field(default_factory=new_uuid)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
@@ -89,6 +98,7 @@ class Box:
         """Plain JSON-serialisable view, used by the web API and the TUI."""
         return {
             "id": self.id,
+            "uuid": self.uuid,
             "name": self.name,
             "description": self.description,
             "icon": self.icon,
@@ -110,6 +120,7 @@ class Box:
         if not isinstance(raw_config, Mapping):
             raise InvalidBoxName(str(data.get("name", "")), "config must be an object")
         return cls(
+            uuid=str(data["uuid"]) if data.get("uuid") else new_uuid(),
             name=str(data["name"]),
             description=str(data.get("description", "")),
             icon=str(data.get("icon") or DEFAULT_ICON),
