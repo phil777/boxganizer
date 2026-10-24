@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from boxganizer import __version__
 from boxganizer.cli.main import app, main
 from boxganizer.errors import BoxNotFound, MissingDependency
+from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
 runner = CliRunner()
@@ -207,3 +208,98 @@ def test_main_turns_a_core_error_into_exit_code_1(
         main()
     assert exit_info.value.code == 1
     assert "no box named 'Ghost'" in capsys.readouterr().err
+
+
+# -- box types through the shell -------------------------------------------
+
+
+def test_types_prints_the_hierarchy(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    result = invoke(db_path, "types")
+    assert result.exit_code == 0
+    assert "(group)" in result.output
+    for key in ("markdown", "parental-graph", "home-assistant", "windowed-viewport"):
+        assert key in result.output
+
+
+def test_types_json_carries_the_rules(db_path: Path) -> None:
+    import json
+
+    result = invoke(db_path, "types", "--json")
+    assert result.exit_code == 0
+    described = json.loads(result.output)
+    by_key = {entry["key"]: entry for entry in described}
+    assert by_key["pdf"]["extensions"] == [".pdf"]
+    assert by_key["mqtt"]["required_metadata"] == ["topic"]
+    assert by_key["image"]["allows_children"] is False
+
+
+def test_types_selectable_leaves_out_the_grouping_levels(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    result = invoke(db_path, "types", "--selectable")
+    assert "(group)" not in result.output
+    listed = {line.split()[1] for line in result.output.splitlines() if line.strip()}
+    assert listed.isdisjoint({"content", "resource", "dynamic", "organizer", "viewport"})
+    assert "markdown" in listed
+
+
+def test_add_a_box_of_a_type_and_show_it(db_path: Path) -> None:
+    result = invoke(db_path, "box", "add", "Notes", "-t", "markdown", "-r", "/tmp/notes.md")
+    assert result.exit_code == 0
+    shown = invoke(db_path, "box", "show", "Notes")
+    assert "Markdown (markdown)" in shown.output
+
+
+def test_the_type_is_in_the_json_view(db_path: Path) -> None:
+    invoke(db_path, "box", "add", "Pic", "-t", "image", "-r", "/tmp/a.png")
+    result = invoke(db_path, "box", "list", "--json")
+    assert '"box_type": "image"' in result.output
+
+
+def test_an_unknown_type_is_refused_by_the_store(db_path: Path) -> None:
+    from boxganizer.errors import UnknownBoxType
+
+    result = invoke(db_path, "box", "add", "Odd", "-t", "spreadsheet")
+    assert isinstance(result.exception, UnknownBoxType)
+
+
+def test_a_box_that_fails_its_type_is_refused(db_path: Path) -> None:
+    from boxganizer.errors import InvalidBoxContent
+
+    result = invoke(db_path, "box", "add", "Fake", "-t", "pdf", "-r", "/tmp/a.png")
+    assert isinstance(result.exception, InvalidBoxContent)
+
+
+def test_the_shell_refuses_to_put_a_box_inside_an_image(db_path: Path) -> None:
+    from boxganizer.errors import ChildrenNotAllowed
+
+    invoke(db_path, "box", "add", "Pic", "-t", "image", "-r", "/tmp/a.png")
+    invoke(db_path, "box", "add", "Note")
+    result = invoke(db_path, "link", "in", "Note", "Pic")
+    assert isinstance(result.exception, ChildrenNotAllowed)
+
+
+def test_a_box_from_a_newer_version_is_still_readable(db_path: Path) -> None:
+    """Reading must not need every type to be known; writing must."""
+    import sqlite3
+
+    from boxganizer.errors import UnknownBoxType
+
+    with BoxStore(db_path) as store:
+        store.add(Box(name="Future thing"))
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("UPDATE boxes SET box_type = 'hologram' WHERE name = 'Future thing'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    shown = invoke(db_path, "box", "show", "Future thing")
+    assert shown.exit_code == 0
+    assert "hologram (unknown type" in shown.output
+    assert invoke(db_path, "box", "list").exit_code == 0
+
+    with BoxStore(db_path) as store, pytest.raises(UnknownBoxType):
+        store.update(store.get("Future thing"))

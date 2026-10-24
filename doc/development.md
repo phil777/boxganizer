@@ -54,6 +54,22 @@ never `src.boxganizer`.
 * Prefer a named constant over a magic string repeated in two places — except
   SQL, which stays inline and readable.
 
+## Adding a box type
+
+Types are classes in `src/boxganizer/boxtypes/`, one module per branch of the
+hierarchy. `doc/box-types.md` explains the attributes and the rules they carry.
+The short version:
+
+1. Subclass the right parent, declare `key`, `label`, `icon`, `summary` and the
+   rules the type needs.
+2. Re-export it from `boxtypes/__init__.py`.
+3. Add it to `DOCUMENTED` in `tests/test_boxtypes.py` — that table is the
+   contract with the source document, and the suite fails without it.
+
+The store validates on write and the interfaces list types from the registry, so
+a new type is usable the moment it imports. Never branch on `box_type` in a
+frontend: ask the type.
+
 ## Adding a feature, end to end
 
 1. Write the behaviour in the core, with a failing test first.

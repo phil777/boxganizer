@@ -38,7 +38,11 @@ box box list
 box box show Kitchen
 box box search cooking
 box tree
+box types                                      # the box type hierarchy
 ```
+
+Every box declares a type — `box add -t markdown`, `-t mqtt`, `-t mindmap` —
+out of a hierarchy of 40 kinds documented in [doc/box-types.md](doc/box-types.md).
 
 ```bash
 box serve --port 8000                        # API on /api, docs on /docs, page on /
@@ -87,10 +91,14 @@ make run-tui          # box tui
 
 ## Status
 
-Early development. The core store (boxes, links, search), the CLI, the web API
-with a minimal HTML browser, and the text UI all work and are covered by tests.
-Not built yet: import/export, box types with validation, full-text search,
-authentication, and multi-user access.
+Early development. The core store (boxes, links, search), the box type registry
+with its validation, the CLI, the web API with a minimal HTML browser, and the
+text UI all work and are covered by tests.
+
+The 40 box types are **declared, not built**: they enforce their rules, but none
+of them fetches, renders, indexes or lays anything out yet — that is what the
+`planned` line of each type describes. Also not built: import/export, full-text
+search, authentication, and multi-user access.
 
 See [doc/architecture.md](doc/architecture.md) for the design and
 [doc/development.md](doc/development.md) for the workflow.

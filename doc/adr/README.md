@@ -34,3 +34,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0003   | One core library, three thin frontends      | accepted |
 | 0004   | src layout with optional extras             | accepted, partly superseded by 0005 |
 | 0005   | One console script named `box`                | accepted |
+| 0006   | Box types are classes in a registry           | accepted |

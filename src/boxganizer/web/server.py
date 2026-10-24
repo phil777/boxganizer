@@ -36,7 +36,11 @@ def run(
     from boxganizer.web.app import create_app
 
     store: BoxStore = BoxStore(db)
-    asgi = create_app(store)
-    if on_start is not None:
-        on_start(host, port)
-    uvicorn.run(asgi, host=host, port=port, reload=reload)
+    try:
+        asgi = create_app(store)
+        if on_start is not None:
+            on_start(host, port)
+        uvicorn.run(asgi, host=host, port=port, reload=reload)
+    finally:
+        # This function created the store, so this function closes it.
+        store.close()

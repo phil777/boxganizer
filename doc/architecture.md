@@ -36,10 +36,11 @@ Three rules hold this together:
 | Module          | Responsibility                                                     |
 | --------------- | ------------------------------------------------------------------ |
 | `models.py`     | `Box` dataclass; name validation; `key` identity; JSON view.       |
+| `boxtypes/`     | The box type hierarchy and its registry; rules per type.           |
 | `store.py`      | `BoxStore`: CRUD, search, links, cycle guard, schema, migrations.  |
 | `config.py`     | Resolves the database path (argument → env → XDG → home).          |
 | `errors.py`     | `BoxganizerError` and its subclasses.                             |
-| `cli/main.py`   | Typer app `box`: `init`, `status`, `version`, `box add/list/show/search/rm`, `link`, `tree`, `serve`, `tui`. |
+| `cli/main.py`   | Typer app `box`: `init`, `status`, `version`, `types`, `box add/list/show/search/rm`, `link`, `tree`, `serve`, `tui`. |
 | `web/app.py`    | FastAPI factory `create_app()`: JSON API + HTML page.              |
 | `web/server.py` | `run()`: builds the app and hands it to uvicorn.                    |
 | `tui/app.py`    | Textual `BoxganizerApp` and the `NewBoxScreen` modal.              |
@@ -54,10 +55,14 @@ index, so `Kitchen` and `kitchen` cannot both exist, and no locale-dependent SQL
 ## Data model
 
 ```
-boxes (id, name, key UNIQUE, description, icon, resource_uri, metadata JSON,
-       created_at, updated_at)
+boxes (id, name, key UNIQUE, description, icon, box_type, resource_uri,
+       metadata JSON, created_at, updated_at)
 links (parent_id → boxes.id, child_id → boxes.id, added_at)   PRIMARY KEY (parent_id, child_id)
 ```
+
+`box_type` is the key of a class in `boxganizer.boxtypes`; see
+`doc/box-types.md`. Schema version 2 added it, and opening an older file upgrades
+it in place.
 
 One box may sit in many boxes, so the graph is a DAG, not a tree: `links` is a
 join table, `ON DELETE CASCADE` removes the edges of a deleted box, and
@@ -85,6 +90,9 @@ The core raises `BoxganizerError` subclasses. Each frontend maps them once:
 | `DuplicateBoxName` | message, exit 1| 409               | detail pane, red     |
 | `InvalidBoxName`   | message, exit 1| 422               | detail pane, red     |
 | `CyclicLink`       | message, exit 1| 409               | detail pane, red     |
+| `UnknownBoxType`   | message, exit 1| 422               | (reads tolerate it)  |
+| `InvalidBoxContent`| message, exit 1| 422               | detail pane, red     |
+| `ChildrenNotAllowed`| message, exit 1| 409              | detail pane, red     |
 | `MissingDependency`| install hint, exit 1 | n/a         | n/a                |
 
 `box serve` and `box tui` import their framework inside the command, so a
@@ -97,8 +105,9 @@ never swallows one silently.
 ## Extension points
 
 * **New frontend** — import `BoxStore`, add a console script, no core change.
-* **Box types and validation** — a registry next to `models.py`, checked in
-  `BoxStore.add`; the frontends pick the available types up from one function.
+* **Box types** — done: a class registry (`boxganizer.boxtypes`) checked in
+  `BoxStore.add` and `update`, with `tree()` and `describe()` feeding the CLI,
+  the API and the docs. Behaviour per type is what still has to be written.
 * **Full-text search** — swap the `LIKE` query in `store._SEARCH_SQL` for an
   FTS5 index; keep the `search()` signature, and the three frontends keep working.
 * **Another database** — everything SQL is in `store.py`; the rest of the core is

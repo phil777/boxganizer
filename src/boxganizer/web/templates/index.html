@@ -27,6 +27,7 @@
       {% for box in boxes %}
       <li>
         <span class="name">{{ box.icon }} {{ box.name }}</span>
+        <span class="muted">{{ box.box_type }}</span>
         {% if box.description %}<div class="desc">{{ box.description }}</div>{% endif %}
         {% if box.resource_uri %}<div class="muted">{{ box.resource_uri }}</div>{% endif %}
       </li>

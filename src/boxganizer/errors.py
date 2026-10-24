@@ -44,6 +44,40 @@ class CyclicLink(BoxganizerError):
         self.child = child
 
 
+class UnknownBoxType(BoxganizerError):
+    """No box type is registered under that name."""
+
+    def __init__(self, key: str, known: list[str] | None = None) -> None:
+        message = f"unknown box type {key!r}"
+        if known:
+            message += f"; try one of: {', '.join(known[:12])}"
+        super().__init__(message)
+        self.key = key
+
+
+class InvalidBoxContent(BoxganizerError):
+    """A box does not satisfy the rules of its type."""
+
+    def __init__(self, type_key: str, reason: str, name: str = "") -> None:
+        subject = f"box {name!r}" if name else "this box"
+        super().__init__(f"{subject} is not a valid {type_key!r}: {reason}")
+        self.type_key = type_key
+        self.reason = reason
+
+
+class ChildrenNotAllowed(BoxganizerError):
+    """A box of a leaf type was asked to contain another box."""
+
+    def __init__(self, parent: str, parent_type: str, child: str) -> None:
+        super().__init__(
+            f"cannot put {child!r} inside {parent!r}: a {parent_type!r} box holds a "
+            f"resource, not other boxes"
+        )
+        self.parent = parent
+        self.parent_type = parent_type
+        self.child = child
+
+
 class StoreError(BoxganizerError):
     """The database could not be opened or written."""
 

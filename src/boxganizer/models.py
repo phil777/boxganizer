@@ -41,6 +41,8 @@ class Box:
     name: str
     description: str = ""
     icon: str = DEFAULT_ICON
+    #: Key of a class in :mod:`boxganizer.boxtypes`. Plain boxes use ``"box"``.
+    box_type: str = "box"
     resource_uri: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     id: int | None = None
@@ -82,6 +84,7 @@ class Box:
             "name": self.name,
             "description": self.description,
             "icon": self.icon,
+            "box_type": self.box_type,
             "resource_uri": self.resource_uri,
             "metadata": dict(self.metadata),
             "created_at": self.created_at.isoformat(),
@@ -98,6 +101,7 @@ class Box:
             name=str(data["name"]),
             description=str(data.get("description", "")),
             icon=str(data.get("icon") or DEFAULT_ICON),
+            box_type=str(data.get("box_type") or "box"),
             resource_uri=(None if data.get("resource_uri") is None else str(data["resource_uri"])),
             metadata={str(k): str(v) for k, v in raw_meta.items()},
         )

@@ -18,16 +18,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-from boxganizer import config
+from boxganizer import boxtypes, config
 from boxganizer.errors import (
     BoxNotFound,
+    ChildrenNotAllowed,
     CyclicLink,
     DuplicateBoxName,
     StoreError,
 )
 from boxganizer.models import DEFAULT_ICON, Box, canonical_name
 
-SCHEMA_VERSION = 1
+#: 1 = boxes and links. 2 = boxes gained ``box_type`` (see ``doc/box-types.md``).
+SCHEMA_VERSION = 2
 
 _SCHEMA = f"""
 PRAGMA user_version = {SCHEMA_VERSION};
@@ -38,6 +40,7 @@ CREATE TABLE IF NOT EXISTS boxes (
     key          TEXT    NOT NULL,
     description  TEXT    NOT NULL DEFAULT '',
     icon         TEXT    NOT NULL DEFAULT '{DEFAULT_ICON}',
+    box_type     TEXT    NOT NULL DEFAULT 'box',
     resource_uri TEXT,
     metadata     TEXT    NOT NULL DEFAULT '{{}}',
     created_at   TEXT    NOT NULL,
@@ -57,8 +60,9 @@ CREATE INDEX IF NOT EXISTS links_child_idx ON links (child_id);
 """
 
 _INSERT_BOX = """
-INSERT INTO boxes (name, key, description, icon, resource_uri, metadata, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO boxes (name, key, description, icon, box_type, resource_uri, metadata,
+                   created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _SELECT_BY_KEY = "SELECT * FROM boxes WHERE key = ?"
@@ -111,6 +115,7 @@ class BoxStore:
     """
 
     def __init__(self, path: str | Path | None = None) -> None:
+        """Open (and if needed create or upgrade) the database at *path*."""
         self.path = Path(path) if path is not None else config.default_db_path()
         if str(self.path) != ":memory:":
             config.ensure_parent(self.path)
@@ -121,9 +126,12 @@ class BoxStore:
             raise StoreError(f"cannot open database at {self.path}: {exc}") from exc
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            before = self._conn.execute("PRAGMA user_version").fetchone()
+            stored_version = int(before[0]) if before is not None else 0
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+        self._migrate(stored_version)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -145,7 +153,12 @@ class BoxStore:
     # -- boxes -------------------------------------------------------------
 
     def add(self, box: Box) -> Box:
-        """Insert *box* and return the stored copy with ``id`` filled in."""
+        """Insert *box* and return the stored copy with ``id`` filled in.
+
+        The type named by ``box.box_type`` must exist and must accept the box:
+        see :mod:`boxganizer.boxtypes`.
+        """
+        boxtypes.get(box.box_type).validate(box)
         now = _now()
         row_id = self._execute(
             _INSERT_BOX,
@@ -154,6 +167,7 @@ class BoxStore:
                 box.key,
                 box.description,
                 box.icon,
+                box.box_type,
                 box.resource_uri,
                 json.dumps(box.metadata, sort_keys=True),
                 box.created_at.isoformat(timespec="seconds"),
@@ -177,14 +191,19 @@ class BoxStore:
         return bool(self._rows(_SELECT_BY_KEY, (canonical_name(name),)))
 
     def update(self, box: Box) -> Box:
-        """Write the mutable fields of *box* back to the database."""
+        """Write the mutable fields of *box* back to the database.
+
+        The type is re-checked, so a box cannot be retyped into something its
+        resource or metadata does not support.
+        """
         if box.id is None:
             raise StoreError(f"cannot update {box.name!r}: box has no id")
+        boxtypes.get(box.box_type).validate(box)
         box.touch()
         self._execute(
             """
             UPDATE boxes
-               SET name = ?, key = ?, description = ?, icon = ?,
+               SET name = ?, key = ?, description = ?, icon = ?, box_type = ?,
                    resource_uri = ?, metadata = ?, updated_at = ?
              WHERE id = ?
             """,
@@ -193,6 +212,7 @@ class BoxStore:
                 box.key,
                 box.description,
                 box.icon,
+                box.box_type,
                 box.resource_uri,
                 json.dumps(box.metadata, sort_keys=True),
                 box.updated_at.isoformat(timespec="seconds"),
@@ -237,8 +257,16 @@ class BoxStore:
     # -- links -------------------------------------------------------------
 
     def link(self, parent: str, child: str) -> None:
-        """Put the box *child* inside the box *parent*."""
-        parent_id = self._id_of(parent)
+        """Put the box *child* inside the box *parent*.
+
+        Refused when the parent's type holds a resource rather than boxes, or
+        when the link would make a box reach itself.
+        """
+        parent_box = self.get(parent)
+        parent_kind = boxtypes.get(parent_box.box_type)
+        if not parent_kind.allows_children:
+            raise ChildrenNotAllowed(parent, parent_kind.key, child)
+        parent_id = parent_box.id or 0
         child_id = self._id_of(child)
         if self._is_descendant(child_id, parent_id):
             raise CyclicLink(parent, child)
@@ -314,6 +342,18 @@ class BoxStore:
         ]
         return node
 
+    def _migrate(self, stored_version: int) -> None:
+        """Bring a database written by an older Boxganizer up to date.
+
+        ``stored_version`` is 0 for a brand-new file, which needs nothing: the
+        current schema was just created there.
+        """
+        if stored_version in (0, SCHEMA_VERSION) or stored_version > SCHEMA_VERSION:
+            return
+        columns = {str(row["name"]) for row in self._rows("PRAGMA table_info(boxes)")}
+        if "box_type" not in columns:
+            self._execute("ALTER TABLE boxes ADD COLUMN box_type TEXT NOT NULL DEFAULT 'box'")
+
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Box:
         raw = row["metadata"] or "{}"
@@ -327,6 +367,7 @@ class BoxStore:
             name=row["name"],
             description=row["description"],
             icon=row["icon"],
+            box_type=str(row["box_type"]),
             resource_uri=row["resource_uri"],
             metadata={str(k): str(v) for k, v in metadata.items()},
             created_at=datetime.fromisoformat(row["created_at"]),

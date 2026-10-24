@@ -11,12 +11,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from boxganizer import __version__
+from boxganizer import __version__, boxtypes
 from boxganizer.errors import (
     BoxNotFound,
+    ChildrenNotAllowed,
     CyclicLink,
     DuplicateBoxName,
+    InvalidBoxContent,
     InvalidBoxName,
+    UnknownBoxType,
 )
 from boxganizer.models import DEFAULT_ICON, Box
 from boxganizer.store import BoxStore
@@ -41,6 +44,7 @@ class BoxCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     icon: str | None = None
+    box_type: str = boxtypes.DEFAULT_TYPE_KEY
     resource_uri: str | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
@@ -104,9 +108,41 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
     async def _cycle(request: Request, exc: CyclicLink) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": {"error": "cyclic_link"}})
 
+    @app.exception_handler(ChildrenNotAllowed)
+    async def _no_children(request: Request, exc: ChildrenNotAllowed) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"error": "children_not_allowed", "parent_type": exc.parent_type}},
+        )
+
+    @app.exception_handler(UnknownBoxType)
+    async def _unknown_type(request: Request, exc: UnknownBoxType) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content={"detail": {"error": "unknown_box_type", "key": exc.key}}
+        )
+
+    @app.exception_handler(InvalidBoxContent)
+    async def _invalid_content(request: Request, exc: InvalidBoxContent) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "error": "invalid_for_type",
+                    "type": exc.type_key,
+                    "reason": exc.reason,
+                }
+            },
+        )
+
     @app.get("/api/health")
     def health(store: StoreDep) -> dict[str, object]:
         return {"status": "ok", "version": __version__, "boxes": store.count()}
+
+    @app.get("/api/types")
+    def list_types(
+        selectable_only: Annotated[bool, Query(description="Leave out grouping levels.")] = False,
+    ) -> list[dict[str, object]]:
+        return boxtypes.describe_all(include_abstract=not selectable_only)
 
     @app.get("/api/boxes", response_model=None)
     def list_boxes(
@@ -120,9 +156,12 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
             name=payload.name,
             description=payload.description,
             icon=payload.icon or DEFAULT_ICON,
+            box_type=payload.box_type,
             resource_uri=payload.resource_uri,
             metadata=payload.metadata,
         )
+        if payload.icon is None:
+            boxtypes.adopt_type_icon(box)
         return store.add(box).to_dict()
 
     @app.get("/api/boxes/{name}")

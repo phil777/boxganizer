@@ -55,11 +55,23 @@ def test_to_dict_is_json_friendly() -> None:
         "name",
         "description",
         "icon",
+        "box_type",
         "resource_uri",
         "metadata",
         "created_at",
         "updated_at",
     }
+
+
+def test_box_type_defaults_to_plain_box() -> None:
+    from boxganizer import boxtypes
+
+    assert Box(name="Plain").box_type == boxtypes.DEFAULT_TYPE_KEY
+
+
+def test_box_type_survives_the_json_view() -> None:
+    box = Box(name="Notes", box_type="markdown")
+    assert Box.from_mapping(box.to_dict()).box_type == "markdown"
 
 
 def test_from_mapping_ignores_unknown_keys() -> None:

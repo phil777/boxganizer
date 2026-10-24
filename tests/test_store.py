@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from boxganizer.errors import BoxNotFound, CyclicLink, DuplicateBoxName
 from boxganizer.models import Box
-from boxganizer.store import BoxStore
+from boxganizer.store import SCHEMA_VERSION, BoxStore
 
 
 def test_add_then_get(store: BoxStore) -> None:
@@ -142,3 +143,129 @@ def test_data_survives_reopen(db_path: Path) -> None:
 
 def test_count(populated: BoxStore) -> None:
     assert populated.count() == 5
+
+
+# -- box types --------------------------------------------------------------
+
+
+def test_box_type_round_trips(store: BoxStore) -> None:
+    store.add(Box(name="Notes", box_type="markdown", resource_uri="/tmp/notes.md"))
+    assert store.get("notes").box_type == "markdown"
+
+
+def test_add_rejects_an_unknown_type(store: BoxStore) -> None:
+    from boxganizer.errors import UnknownBoxType
+
+    with pytest.raises(UnknownBoxType):
+        store.add(Box(name="Whatever", box_type="spreadsheet"))
+
+
+def test_add_enforces_the_rules_of_the_type(store: BoxStore) -> None:
+    from boxganizer.errors import InvalidBoxContent
+
+    with pytest.raises(InvalidBoxContent, match="needs a resource"):
+        store.add(Box(name="No picture", box_type="image"))
+    with pytest.raises(InvalidBoxContent, match="must end with"):
+        store.add(Box(name="Wrong", box_type="archive", resource_uri="/tmp/plain.zip.txt"))
+
+
+def test_typed_boxes_survive_reopening(db_path: Path) -> None:
+    with BoxStore(db_path) as store:
+        store.add(Box(name="Sensor", box_type="mqtt", metadata={"topic": "cellar/temp"}))
+    with BoxStore(db_path) as again:
+        box = again.get("sensor")
+        assert box.box_type == "mqtt"
+        assert box.metadata == {"topic": "cellar/temp"}
+
+
+def test_update_can_change_the_type(store: BoxStore) -> None:
+    box = store.add(Box(name="Thing"))
+    assert box.box_type == "box"
+    box.box_type = "label"
+    store.update(box)
+    assert store.get("thing").box_type == "label"
+
+
+def test_update_still_enforces_the_type(store: BoxStore) -> None:
+    """A box may not be retyped into something it does not satisfy."""
+    from boxganizer.errors import InvalidBoxContent
+
+    box = store.add(Box(name="Note"))
+    box.box_type = "pdf"
+    with pytest.raises(InvalidBoxContent, match="needs a resource"):
+        store.update(box)
+
+
+def test_linking_into_a_leaf_type_is_refused(store: BoxStore) -> None:
+    from boxganizer.errors import ChildrenNotAllowed
+
+    store.add(Box(name="Picture", box_type="image", resource_uri="/tmp/a.png"))
+    store.add(Box(name="Notes", box_type="markdown", resource_uri="/tmp/a.md"))
+    with pytest.raises(ChildrenNotAllowed, match="holds a resource"):
+        store.link("Picture", "Notes")
+    assert store.children("Picture") == []
+
+
+def test_a_directory_may_hold_boxes(store: BoxStore) -> None:
+    store.add(Box(name="Trip", box_type="directory", resource_uri="/tmp"))
+    store.add(Box(name="Photos", box_type="indexed-directory", resource_uri="/tmp/photos"))
+    store.link("Trip", "Photos")
+    assert [b.name for b in store.children("Trip")] == ["Photos"]
+
+
+# -- schema migration -------------------------------------------------------
+
+_V1_SCHEMA = """
+CREATE TABLE boxes (
+    id INTEGER PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '', icon TEXT NOT NULL DEFAULT 'x',
+    resource_uri TEXT, metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX boxes_key_idx ON boxes (key);
+CREATE TABLE links (
+    parent_id INTEGER NOT NULL, child_id INTEGER NOT NULL, added_at TEXT NOT NULL,
+    PRIMARY KEY (parent_id, child_id)
+);
+PRAGMA user_version = 1;
+"""
+
+
+def _write_v1_database(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(_V1_SCHEMA)
+    connection.execute(
+        "INSERT INTO boxes (name, key, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("Old note", "old note", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_an_older_database_gains_the_box_type_column(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    _write_v1_database(path)
+
+    with BoxStore(path) as store:
+        assert store.get("Old note").box_type == "box"
+        assert store.count() == 1
+        # the upgraded database behaves like a new one
+        store.add(Box(name="Picture", box_type="image", resource_uri="/tmp/a.png"))
+
+    connection = sqlite3.connect(path)
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(boxes)")}
+    finally:
+        connection.close()
+    assert version == SCHEMA_VERSION
+    assert "box_type" in columns
+
+
+def test_migrating_twice_is_not_an_error(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    _write_v1_database(path)
+    with BoxStore(path):
+        pass
+    with BoxStore(path) as again:
+        assert again.get("Old note").box_type == "box"

@@ -1,0 +1,130 @@
+"""Dynamic resources: things that answer back.
+
+Everything here changes over time — a web page, a shell, a sensor. None of them
+talk to the outside world yet; the declared rules (which URI, which metadata)
+are already enforced.
+"""
+
+from __future__ import annotations
+
+from typing import ClassVar
+
+from boxganizer.boxtypes.resource import ResourceBox
+
+
+class DynamicResource(ResourceBox):
+    """Base for resources whose content comes from a live source."""
+
+    key: ClassVar[str] = "dynamic"
+    label: ClassVar[str] = "Dynamic Resource"
+    icon: ClassVar[str] = "\u26a1"  # ⚡
+    summary: ClassVar[str] = "Content that is fetched, not stored."
+    abstract: ClassVar[bool] = True
+    allows_children: ClassVar[bool] = True
+    #: A terminal or a sensor may point at nothing at all; the subtypes say what they need.
+    resource_uri_required: ClassVar[bool] = False
+
+
+class WebResource(DynamicResource):
+    """A page or endpoint on the web."""
+
+    key: ClassVar[str] = "web"
+    label: ClassVar[str] = "Web Page"
+    icon: ClassVar[str] = "\U0001f310"  # 🌐
+    summary: ClassVar[str] = "An http(s) address."
+    resource_uri_required: ClassVar[bool] = True
+    resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"http", "https"})
+    planned: ClassVar[str] = "Fetch title, favicon and a text extract."
+
+
+class BrowserResource(WebResource):
+    """An interactive browser pane."""
+
+    key: ClassVar[str] = "browser"
+    label: ClassVar[str] = "Browser"
+    icon: ClassVar[str] = "\U0001f9ed"  # 🧭
+    summary: ClassVar[str] = "The page, browsable inside Boxganizer."
+    planned: ClassVar[str] = "Embed a view; keep the current URL back into the box."
+
+
+class SnapshotResource(WebResource):
+    """The page as it was at one moment."""
+
+    key: ClassVar[str] = "snapshot"
+    label: ClassVar[str] = "Snapshot"
+    icon: ClassVar[str] = "\U0001f4f8"  # 📸
+    summary: ClassVar[str] = "A capture of a web page, taken once and kept."
+    planned: ClassVar[str] = (
+        "Write captured_at and the capture location itself when the shot is taken; "
+        "nothing is required at creation time."
+    )
+
+
+class TerminalResource(DynamicResource):
+    """A shell session, kept as a box so it can sit where you work."""
+
+    key: ClassVar[str] = "terminal"
+    label: ClassVar[str] = "Terminal"
+    icon: ClassVar[str] = "\u2328️"  # ⌨️
+    summary: ClassVar[str] = "A command to run, and its output."
+    planned: ClassVar[str] = "Run the command in metadata['command'] and keep the last output."
+
+
+class SSHResource(TerminalResource):
+    """A terminal over SSH."""
+
+    key: ClassVar[str] = "ssh"
+    label: ClassVar[str] = "SSH Terminal"
+    icon: ClassVar[str] = "\U0001f510"  # 🔐
+    summary: ClassVar[str] = "A shell on another machine."
+    required_metadata: ClassVar[frozenset[str]] = frozenset({"host"})
+    resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"ssh"})
+    planned: ClassVar[str] = "Connect through the system ssh client; never store the password."
+
+
+class SensorResource(DynamicResource):
+    """Something that reports a value."""
+
+    key: ClassVar[str] = "sensor"
+    label: ClassVar[str] = "Sensor"
+    icon: ClassVar[str] = "\U0001f4e1"  # 📡
+    summary: ClassVar[str] = "A value that arrives from outside and updates itself."
+    planned: ClassVar[str] = "Keep the last reading and its timestamp; alert on change."
+
+
+class MQTTResource(SensorResource):
+    """A value published on an MQTT topic."""
+
+    key: ClassVar[str] = "mqtt"
+    label: ClassVar[str] = "MQTT Sensor"
+    icon: ClassVar[str] = "\U0001f4f6"  # 📶
+    summary: ClassVar[str] = "Subscribes to one topic."
+    required_metadata: ClassVar[frozenset[str]] = frozenset({"topic"})
+    resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"mqtt", "mqtts"})
+    planned: ClassVar[str] = "Subscribe and cache the last message per topic."
+
+
+class HTTPResource(SensorResource):
+    """A value read from an HTTP endpoint."""
+
+    key: ClassVar[str] = "http"
+    label: ClassVar[str] = "HTTP Sensor"
+    icon: ClassVar[str] = "\U0001f4e5"  # 📥
+    summary: ClassVar[str] = "Polls an http(s) endpoint for a value."
+    resource_uri_required: ClassVar[bool] = True
+    resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"http", "https"})
+    planned: ClassVar[str] = "Poll on a schedule in metadata['interval_s'] and extract the value."
+
+
+class HomeAssistantResource(SensorResource):
+    """An entity from a Home Assistant instance."""
+
+    key: ClassVar[str] = "home-assistant"
+    label: ClassVar[str] = "Home Assistant"
+    icon: ClassVar[str] = "\U0001f3e0"  # 🏠
+    summary: ClassVar[str] = "One Home Assistant entity."
+    required_metadata: ClassVar[frozenset[str]] = frozenset({"entity_id"})
+    resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"http", "https"})
+    planned: ClassVar[str] = (
+        "Read the entity state; the token stays in the environment, never in the box."
+    )

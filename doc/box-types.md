@@ -1,0 +1,149 @@
+# Box types
+
+Every box declares what kind of thing it is. The hierarchy below comes from the
+project's source document — a heading outline of box kinds, kept in this repo as
+[box-types-source.md](box-types-source.md) — and is implemented as Python classes
+in `src/boxganizer/boxtypes/`.
+
+See it live, straight from the registry:
+
+```bash
+box types                 # the whole hierarchy, grouped levels marked
+box types --selectable    # only the types you can actually pick
+box types --json          # every rule each type declares
+```
+
+Or over HTTP: `GET /api/types`, `GET /api/types?selectable_only=true`.
+
+## The hierarchy
+
+`group` = a level of structure, not a choice. `leaf` = holds one thing, never
+other boxes. Rules in brackets are enforced by the store.
+
+```
+- `box` 📦 Box
+  - `content` 📄 Content — group; leaf
+    - `label` 🏷️ Label — leaf
+  - `resource` 🔗 Resource — group; leaf; resource required
+    - `file` 📃 File — leaf; resource required; schemes: file
+      - `text` 🔤 Text — leaf; resource required; schemes: file
+        - `markdown` 📝 Markdown — leaf; resource required; extensions: .md .markdown .mdown
+      - `image` 🖼️ Image — leaf; resource required; extensions: .png .jpg .jpeg .gif .webp .bmp .svg .heic
+      - `pdf` 📕 PDF — leaf; resource required; extensions: .pdf
+      - `archive` 🗜️ Archive — leaf; resource required; extensions: .zip .tar .gz .tgz .bz2 .xz .7z .rar
+    - `directory` 📁 Directory — resource required; schemes: file
+      - `indexed-directory` 🗂️ Indexed Directory — resource required; schemes: file
+    - `dynamic` ⚡ Dynamic Resource — group
+      - `web` 🌐 Web Page — resource required; schemes: http https
+        - `browser` 🧭 Browser — resource required; schemes: http https
+        - `snapshot` 📸 Snapshot — resource required; schemes: http https
+      - `terminal` ⌨️ Terminal
+        - `ssh` 🔐 SSH Terminal — schemes: ssh; needs metadata: host
+      - `sensor` 📡 Sensor
+        - `mqtt` 📶 MQTT Sensor — schemes: mqtt mqtts; needs metadata: topic
+        - `http` 📥 HTTP Sensor — resource required; schemes: http https
+        - `home-assistant` 🏠 Home Assistant — schemes: http https; needs metadata: entity_id
+  - `folder` 📂 Folder
+    - `dynamic-folder` 🌀 Dynamic Folder
+    - `cabinet` 🗄️ Cabinet
+  - `organizer` 🧰 Organizer — group
+    - `desktop` 🖥️ Desktop
+      - `blueprint` 📐 Blueprint
+    - `3d-model` 🧊 3D Model
+    - `grid` 🔳 Grid
+    - `mindmap` 🕸️ Mindmap
+    - `graph` 🧩 Graph
+      - `manual-graph` ✍️ Manual Graph
+      - `parental-graph` 🌳 Parental Graph
+    - `dashboard` 📊 Dashboard
+    - `checklist` ✅ Checklist
+  - `viewport` 🎛️ Viewport — group
+    - `simple-viewport` 👁️ Simple Viewport
+    - `tiling-viewport` 🔷 Tiling Viewport
+    - `windowed-viewport` 🪟 Windowed Viewport
+```
+
+40 types: 5 grouping levels and 35 you can put on a box.
+
+## What a type declares
+
+| Class attribute         | Meaning                                                     |
+| ----------------------- | ----------------------------------------------------------- |
+| `key`                   | Public identifier, stored in `Box.box_type`. Required, unique. |
+| `label`                 | Name shown to a human.                                      |
+| `icon`                  | Default glyph for the interfaces.                           |
+| `summary`               | One line about what the type is for.                        |
+| `abstract`              | `True` on grouping levels only. Not inherited.              |
+| `allows_children`       | May this box contain other boxes?                           |
+| `resource_uri_required` | Must the box point at something?                            |
+| `resource_uri_schemes`  | Allowed URI schemes; `"file"` also accepts plain paths.     |
+| `extensions`            | Allowed filename suffixes, or `None` for any.               |
+| `required_metadata`     | Metadata keys the user must supply.                         |
+| `planned`               | What the type will do once it is built. Empty means: done.  |
+| `check(box)`            | Hook for rules that need logic.                             |
+
+## What is enforced today
+
+1. **The type must exist** — `store.add()` and `store.update()` resolve the key
+   and raise `UnknownBoxType` when it does not.
+2. **The box must satisfy its type** — required resource, URI scheme, file
+   extension, required metadata, then the type's own `check()`. Failures raise
+   `InvalidBoxContent`.
+3. **Leaves stay leaves** — linking a box into one whose type has
+   `allows_children = False` raises `ChildrenNotAllowed`.
+4. **The type lends the box its icon** — a box created without an explicit
+   `--icon` takes the icon of its type, so a picture looks like a picture. An
+   icon chosen by hand always wins (`boxtypes.adopt_type_icon`).
+5. **Reads are forgiving** — listing and showing a box uses `boxtypes.try_get()`,
+   so a database written by a newer Boxganizer still opens; it displays
+   `hologram (unknown type; this Boxganizer is older than the box)`.
+
+No type **does** anything yet: nothing fetches, renders, indexes, subscribes or
+lays out. That is the work each `planned` line describes.
+
+## Two rules that shaped the hierarchy
+
+**A leaf is one immutable thing, not a class with few subclasses.** `Label`,
+`ImageResource` and `PDFResource` forbid children; `DirectoryResource`,
+`FolderBox` and every organizer allow them. `ArchiveResource` is a leaf: the
+source doc points it at `DirectoryResource`, which means an archive is *browsed*
+like a folder — its entries are virtual and are not stored as contained boxes.
+
+**A field the machine writes is never required at creation.** `SnapshotResource`
+will gain `captured_at` when the capture happens, so requiring it up front would
+make the type impossible to create. Required metadata is only for what the user
+knows at creation time: `ssh` needs `host`, `mqtt` needs `topic`,
+`home-assistant` needs `entity_id`.
+
+## Adding a type
+
+1. Pick the module that owns the branch (`content.py`, `resource.py`,
+   `dynamic.py`, `folder.py`, `organizer.py`, `viewport.py`) and add a subclass
+   in the order the hierarchy reads.
+2. Declare `key`, `label`, `icon`, `summary`, plus `allows_children` and the
+   resource/metadata rules. Set `planned` to what it will eventually do.
+3. Add it to the re-exports and `__all__` in `boxtypes/__init__.py`.
+4. Add one line to `DOCUMENTED` in `tests/test_boxtypes.py` (key → parent).
+   That test is the contract with the source document: forget it and the suite
+   fails.
+5. Add the rule tests if the type declares anything unusual, and update the
+   tree above.
+
+Two mistakes the registry already catches for you: a subclass that forgets
+`key`, and two types claiming the same key — both raise `TypeError` at import.
+
+## Open questions from the source document
+
+* One heading under `ContentBox` is empty. Content kinds are missing, not
+  undecided — `label` is the only one that landed.
+* Where does a `Desktop` store the position of each child: on the child link, or
+  in the child's metadata? `Grid` and the viewports will ask the same question,
+  so it wants one answer.
+* `Blueprint` is a layout that makes `Desktop`s. Whether it holds boxes of its
+  own (it allows children today) or only describes them is unresolved.
+* `Model3D` is written that way in code because a Python class name cannot start
+  with a digit; its key and label are still `3d-model` and "3D Model".
+* `Graph` and `ViewportBox` overlap: both show other boxes rather than holding
+  them. Kept separate for now, because a graph may be edited and a viewport may
+  not.
+* Where checklist ticks live: this scaffold says `metadata["done"]` on the child.

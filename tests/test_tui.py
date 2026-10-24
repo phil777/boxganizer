@@ -154,3 +154,15 @@ def test_labels_carry_the_box_icon(db_path: Path, populated: BoxStore) -> None:
         assert any("\U0001f373" in text for text in texts)
 
     _run(app, scenario)
+
+
+def test_detail_pane_names_the_box_type(db_path: Path) -> None:
+    with BoxStore(db_path) as store:
+        store.add(Box(name="Ideas", box_type="mindmap", description="Branches"))
+    app = BoxganizerApp(db_path)
+
+    async def scenario(app: BoxganizerApp, pilot: Any) -> None:
+        assert "type" in app.detail_markup
+        assert "Mindmap" in app.detail_markup
+
+    _run(app, scenario)

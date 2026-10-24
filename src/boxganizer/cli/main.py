@@ -20,7 +20,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from boxganizer import __version__, config
+from boxganizer import __version__, boxtypes, config
 from boxganizer.errors import BoxganizerError, MissingDependency
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
@@ -124,6 +124,9 @@ def box_add(
     name: Annotated[str, typer.Argument(help="Unique box name.")],
     description: Annotated[str, typer.Option("--description", "-d")] = "",
     icon: Annotated[str | None, typer.Option("--icon", "-i")] = None,
+    box_type: Annotated[
+        str, typer.Option("--type", "-t", help="Box type; see 'box types'.")
+    ] = boxtypes.DEFAULT_TYPE_KEY,
     resource: Annotated[str | None, typer.Option("--resource", "-r")] = None,
     meta: Annotated[
         list[str] | None, typer.Option("--meta", "-m", help="key=value, repeatable.")
@@ -133,11 +136,14 @@ def box_add(
     box = Box(
         name=name,
         description=description,
+        box_type=box_type,
         resource_uri=resource,
         metadata=_parse_metadata(meta or []),
     )
     if icon:
         box.icon = icon
+    else:
+        boxtypes.adopt_type_icon(box)
     with _open(ctx, _db_of(ctx)) as store:
         saved = store.add(box)
     say("added", f"{saved.icon} {saved.name} (#{saved.id})")
@@ -186,6 +192,7 @@ def box_show(
         console.print_json(json.dumps(payload))
         return
     console.print(Text.assemble(f"{box.icon} ", (box.name, "bold"), f"  #{box.id}"))
+    lit(f"  type     : {_type_note(box.box_type)}")
     if box.description:
         lit(f"  {box.description}")
     if box.resource_uri:
@@ -274,6 +281,54 @@ def _print_tree(store: BoxStore, box: Box, *, level: int, max_depth: int) -> Non
         return
     for kid in store.children(box.name):
         _print_tree(store, kid, level=level + 1, max_depth=max_depth)
+
+
+@app.command()
+def types(
+    as_json: Annotated[bool, typer.Option("--json", help="Machine readable output.")] = False,
+    selectable_only: Annotated[
+        bool, typer.Option("--selectable", help="Leave out the grouping levels.")
+    ] = False,
+) -> None:
+    """Print the box type hierarchy and what each type insists on."""
+    if as_json:
+        described = [
+            kind.describe() for kind in boxtypes.all_types(include_abstract=not selectable_only)
+        ]
+        console.print_json(json.dumps(described))
+        return
+    for depth, kind in boxtypes.tree(include_abstract=not selectable_only):
+        needs = _type_requirements(kind)
+        console.print(
+            Text.assemble(
+                "  " * depth,
+                f"{kind.icon} ",
+                (kind.key, "bold"),
+                "  (group)" if kind.is_grouping() else "",
+                (f"  {kind.summary}", "dim"),
+                (f"  [{needs}]" if needs else "", "dim"),
+            )
+        )
+
+
+def _type_note(key: str) -> str:
+    """Describe a stored type, even one this version does not know."""
+    kind = boxtypes.try_get(key)
+    if kind is None:
+        return f"{key} (unknown type; this Boxganizer is older than the box)"
+    return f"{kind.icon} {kind.label} ({kind.key})"
+
+
+def _type_requirements(kind: type[boxtypes.BoxType]) -> str:
+    """Short note about what a type demands, shown by `box types`."""
+    parts: list[str] = []
+    if kind.required_metadata:
+        parts.append("metadata: " + ", ".join(sorted(kind.required_metadata)))
+    if not kind.allows_children:
+        parts.append("no children")
+    if kind.resource_uri_required:
+        parts.append("resource required")
+    return ", ".join(parts)
 
 
 @app.command()

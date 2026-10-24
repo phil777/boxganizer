@@ -34,6 +34,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - only when the extra is 
         "the text UI needs the 'tui' extra: pip install 'boxganizer[tui]'"
     ) from exc
 
+from boxganizer import boxtypes
 from boxganizer.errors import BoxganizerError
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
@@ -203,8 +204,15 @@ class BoxganizerApp(App[None]):
             return
         parents = ", ".join(p.name for p in self.store.parents(name)) or "—"
         children = ", ".join(c.name for c in self.store.children(name)) or "—"
+        kind = boxtypes.try_get(box.box_type)
+        type_note = (
+            f"{kind.icon} {escape(kind.label)}"
+            if kind
+            else f"{escape(box.box_type)} (unknown type)"
+        )
         lines = [
             f"[b]{box.icon} {escape(box.name)}[/]  #{box.id}",
+            f"type     : {type_note}",
             escape(box.description) if box.description else "[dim]no description[/]",
         ]
         if box.resource_uri:
@@ -227,7 +235,7 @@ class BoxganizerApp(App[None]):
         if not name:
             return
         try:
-            box = self.store.add(Box(name=name))
+            box = self.store.add(Box(name=name))  # TODO: let the modal pick a type
         except BoxganizerError as exc:  # reported in the detail pane, no crash
             self._show_error(str(exc))
             return
