@@ -534,6 +534,21 @@ async function submitNewBox(event) {
   }
 }
 
+/**
+ * Jump to the root box. It is normally in the list, but the list may be filtered
+ * by a search, so fall back to the name `box init` gives it.
+ */
+async function goToRoot() {
+  const known = state.boxes.find((box) => isRootType(box));
+  if (known) return openBox(known.uuid);
+  try {
+    return await openBox("root");
+  } catch {
+    status("no root box in this library — run `box init`", true);
+    return null;
+  }
+}
+
 /* ---------------------------------------------------------------- init ----- */
 
 async function init() {
@@ -557,6 +572,7 @@ async function init() {
   });
   el("up").addEventListener("click", goUp);
   el("new-box").addEventListener("click", () => openNewBoxModal());
+  el("go-root").addEventListener("click", goToRoot);
   el("nb-cancel").addEventListener("click", () => el("new-box-modal").close());
   el("nb-type").addEventListener("change", renderConfigFields);
   el("new-box-form").addEventListener("submit", submitNewBox);
@@ -1265,6 +1281,7 @@ const boxganizer = {
   openBox,
   goUp,
   status,
+  goToRoot,
   iconPane,
   detailPanel,
   setting,

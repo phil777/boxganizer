@@ -660,3 +660,20 @@ def test_grid_endpoints_on_an_unknown_box_are_not_found(client: TestClient) -> N
         client.post("/api/boxes/Ghost/grid/resize", json={"rows": 2, "columns": 2}).status_code
         == 404
     )
+
+
+# -- the root button --------------------------------------------------------
+
+
+def test_the_side_panel_has_a_root_button(client: TestClient) -> None:
+    page = client.get("/")
+    assert 'id="go-root"' in page.text
+    assert "🌲 Root" in page.text
+
+
+def test_the_root_button_falls_back_to_the_name_when_filtered(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "async function goToRoot()" in script
+    assert "state.boxes.find((box) => isRootType(box))" in script
+    assert 'await openBox("root")' in script
+    assert 'el("go-root").addEventListener("click", goToRoot);' in script

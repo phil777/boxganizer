@@ -42,7 +42,8 @@ body {
   gap: var(--gap);
 }
 
-.brand { font-weight: 600; }
+.brand { font-weight: 600; flex: 1; text-align: center; }
+#go-root { flex: none; font-size: 0.82rem; }
 
 #search-form { display: flex; }
 
