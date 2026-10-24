@@ -58,6 +58,20 @@ const api = {
       body: JSON.stringify({ child }),
     }),
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
+  rawText: async (ref) => {
+    const response = await fetch(api.rawUrl(ref));
+    if (!response.ok) {
+      let reason = `HTTP ${response.status}`;
+      try {
+        const detail = (await response.json()).detail;
+        reason = detail?.reason || detail?.error || reason;
+      } catch {
+        /* nothing structured to say */
+      }
+      throw new Error(reason);
+    }
+    return response.text();
+  },
 };
 
 /* ------------------------------------------------------------- type info --- */
@@ -158,6 +172,7 @@ const context = {
   open: openBox,
   status,
   saveSetting,
+  saveSection,
   mode: () => state.mode,
   reload: () => openBox(state.current.uuid, { mode: state.mode }),
   showMenu,
@@ -223,6 +238,23 @@ async function goUp() {
   }
   const parents = (state.current && state.current.parents) || [];
   if (parents.length) await openBox(parents[0].uuid, { mode: state.mode });
+}
+
+/**
+ * Merge one view's settings into `config.<section>` and save the box.
+ * Each view owns a namespace, so the grid's cells never collide with a text
+ * view's font size.
+ */
+async function saveSection(section, patch) {
+  const current = { ...(state.current.config || {}) };
+  current[section] = { ...(current[section] || {}), ...patch };
+  state.current = { ...state.current, config: current };
+  try {
+    await api.setConfig(state.current.uuid, current);
+  } catch (error) {
+    status(`could not save ${section}: ${error.message}`, true);
+  }
+  renderMain();
 }
 
 /* ------------------------------------------------------------ left pane ---- */
@@ -645,6 +677,68 @@ registerView("image", {
     });
     stage.append(image);
     canvas.append(stage);
+  },
+});
+
+/* ---------------------------------------------------------------- text ---- */
+
+const TEXT_DEFAULTS = { wrap: true, crop: false, font_size: 14 };
+
+/** How the text should look: saved settings over the defaults. */
+function textOptions(box) {
+  return { ...TEXT_DEFAULTS, ...((box.config || {}).text || {}) };
+}
+
+registerView("text", {
+  async render(canvas, box, ctx) {
+    if (ctx.mode() !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    const options = textOptions(box);
+    const stage = document.createElement("div");
+    stage.className = "text-view";
+    stage.dataset.wrap = options.wrap ? "on" : "off";
+    stage.dataset.crop = options.crop ? "on" : "off";
+    stage.style.setProperty("--text-size", `${options.font_size}px`);
+
+    const body = document.createElement("pre");
+    body.className = "text-body";
+    stage.append(body);
+    canvas.append(stage);
+
+    try {
+      body.textContent = await api.rawText(box.uuid);
+    } catch (error) {
+      stage.replaceChildren(emptyMessage(`Cannot read ${box.resource_uri}: ${error.message}`));
+      stage.classList.add("failed");
+      return;
+    }
+
+    stage.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      ctx.showMenu(event.clientX, event.clientY, [
+        {
+          label: `${options.wrap ? "✕" : "✓"} Wrap lines`,
+          run: () => ctx.saveSection("text", { wrap: !options.wrap }),
+        },
+        {
+          label: `${options.crop ? "✕" : "✓"} Crop to the pane`,
+          run: () => ctx.saveSection("text", { crop: !options.crop }),
+        },
+        { separator: true },
+        {
+          label: "A+ Larger text",
+          run: () => ctx.saveSection("text", { font_size: Math.min(40, options.font_size + 2) }),
+        },
+        {
+          label: "A- Smaller text",
+          run: () => ctx.saveSection("text", { font_size: Math.max(8, options.font_size - 2) }),
+        },
+        { separator: true },
+        { label: "Reload", run: ctx.reload },
+      ]);
+    });
   },
 });
 

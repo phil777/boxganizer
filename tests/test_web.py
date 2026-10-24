@@ -381,3 +381,19 @@ def test_a_confined_server_refuses_files_outside_its_root(
         refused = confined.get(f"/api/boxes/{box_out.uuid}/raw")
         assert refused.status_code == 403
         assert refused.json()["detail"]["error"] == "resource_out_of_range"
+
+
+# -- the text view's rules travel with the assets ---------------------------
+
+
+def test_the_text_view_is_registered(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'registerView("text"' in script
+    assert "TEXT_DEFAULTS" in script
+    assert "wrap" in script and "crop" in script and "font_size" in script
+
+
+def test_horizontal_scrolling_is_tied_to_wrapping(client: TestClient) -> None:
+    css = client.get("/static/app.css").text
+    assert '.text-view[data-wrap="off"] { overflow-x: auto; }' in css
+    assert "overflow-y: auto" in css

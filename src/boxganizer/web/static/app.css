@@ -242,3 +242,37 @@ pre.text {
 }
 
 .image-view.failed { display: block; overflow: auto; }
+
+/* ---------- text view ---------- */
+
+/* Vertical scrolling is always available. Horizontal scrolling appears only
+   when wrapping is off: with wrapped lines there is nothing to scroll to. */
+.text-view {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: var(--panel);
+}
+
+.text-view[data-wrap="off"] { overflow-x: auto; }
+.text-view[data-crop="on"] { overflow: hidden; }
+
+.text-view .text-body {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  font-family: ui-monospace, monospace;
+  font-size: var(--text-size, 14px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.text-view[data-wrap="off"] .text-body {
+  white-space: pre;
+  overflow-wrap: normal;
+  width: max-content;
+  min-width: 100%;
+}
+
+.text-view.failed { display: block; }
