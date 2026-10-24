@@ -59,6 +59,7 @@ const api = {
       body: JSON.stringify({ child }),
     }),
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
+  thumbnailUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/thumbnail`,
   unlink: (ref, child) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/children/${encodeURIComponent(child)}`, {
       method: "DELETE",
@@ -344,8 +345,7 @@ function renderSide() {
     item.dataset.uuid = box.uuid;
     item.draggable = true; // a box can be dragged onto a grid cell
     item.setAttribute("role", "option");
-    const glyph = document.createElement("span");
-    glyph.textContent = box.icon;
+    const glyph = iconElement(box);
     const name = document.createElement("span");
     name.textContent = box.name;
     const kind = document.createElement("span");
@@ -757,14 +757,39 @@ function chipList(boxes, ctx) {
   return holder;
 }
 
+/**
+ * A box's icon. Image and PDF boxes carry a miniature of their own file, drawn
+ * in a thin frame; everything else is the type's emoji. If the miniature cannot
+ * be served (the file moved), the emoji comes back instead of a broken image.
+ */
+function iconElement(box, className = "") {
+  const usesThumb = (box.config || {}).icon_source === "thumbnail";
+  if (usesThumb && box.uuid) {
+    const img = document.createElement("img");
+    img.className = `box-icon box-icon--thumb ${className}`.trim();
+    img.src = api.thumbnailUrl(box.uuid);
+    img.alt = box.name;
+    img.draggable = false;
+    img.addEventListener("error", () => {
+      const fallback = document.createElement("span");
+      fallback.className = `box-icon ${className}`.trim();
+      fallback.textContent = box.icon;
+      img.replaceWith(fallback);
+    });
+    return img;
+  }
+  const span = document.createElement("span");
+  span.className = `box-icon ${className}`.trim();
+  span.textContent = box.icon;
+  return span;
+}
+
 /** The big glyph, with the name and description: what every type falls back to. */
 function iconPane(box, note = "") {
   const wrap = document.createElement("div");
   wrap.className = "icon-view";
   wrap.dataset.boxType = box.box_type;
-  const glyph = document.createElement("div");
-  glyph.className = "glyph";
-  glyph.textContent = box.icon;
+  const glyph = iconElement(box, "glyph");
   const name = document.createElement("div");
   name.className = "name";
   name.textContent = box.name;
@@ -887,7 +912,7 @@ function chipFor(child, ctx) {
   chip.type = "button";
   chip.className = "chip";
   chip.draggable = true;
-  chip.textContent = `${child.icon} ${child.name}`;
+  chip.append(iconElement(child), document.createTextNode(` ${child.name}`));
   chip.addEventListener("dragstart", (event) => {
     event.dataTransfer.setData("text/plain", child.uuid);
     event.dataTransfer.effectAllowed = "move";
@@ -997,7 +1022,7 @@ function gridCell(box, ctx, row, column, child, depth) {
     }
     const caption = document.createElement("span");
     caption.className = "cell-caption muted";
-    caption.textContent = `${child.icon} ${child.name}`;
+    caption.append(iconElement(child), document.createTextNode(` ${child.name}`));
     cell.append(caption);
     cell.title = `Drag to move · double-click to open ${child.name}`;
   } else {
@@ -1081,7 +1106,10 @@ registerView("root", {
     bar.className = "root-bar";
     const label = document.createElement("span");
     label.className = "muted";
-    label.textContent = child ? `root › ${child.icon} ${child.name}` : "root — nothing filed in it";
+    label.append(
+      child ? "root › " : "root — nothing filed in it",
+      ...(child ? [iconElement(child), document.createTextNode(` ${child.name}`)] : [])
+    );
     bar.append(label);
     if (child) {
       const open = document.createElement("button");
@@ -1340,6 +1368,7 @@ const boxganizer = {
   goUp,
   status,
   goToRoot,
+  iconElement,
   iconPane,
   detailPanel,
   setting,

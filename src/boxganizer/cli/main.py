@@ -25,7 +25,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from boxganizer import __version__, bootstrap, boxtypes, config, editing, infer
+from boxganizer import __version__, bootstrap, boxtypes, config, editing, infer, thumbs
 from boxganizer.errors import BoxganizerError, EditError, MissingDependency
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
@@ -234,6 +234,7 @@ def box_add(
         box.icon = icon
     else:
         boxtypes.adopt_type_icon(box)
+        thumbs.icon_from_resource(box)  # an image box is drawn as its own picture
     with _open(ctx, _db_of(ctx)) as store:
         container = _resolve_parent(store, box, parent=parent, no_parent=no_parent)
         saved = store.add(box)

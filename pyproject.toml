@@ -12,6 +12,7 @@ authors = [{ name = "Philippe Biondi", email = "phil@secdev.org" }]
 keywords = ["knowledge-management", "graph", "cli", "tui", "web"]
 dynamic = ["version"]
 dependencies = [
+    "pillow>=10.0",
     "pyyaml>=6.0",
     "typer>=0.12",
 ]
@@ -73,7 +74,7 @@ strict = true
 warn_unreachable = true
 
 [[tool.mypy.overrides]]
-module = ["textual.*", "uvicorn.*", "jinja2.*"]
+module = ["textual.*", "uvicorn.*", "jinja2.*", "PIL.*", "pypdfium2.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

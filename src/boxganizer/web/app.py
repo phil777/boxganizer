@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from boxganizer import __version__, boxtypes, grid, infer, paths
+from boxganizer import __version__, boxtypes, grid, infer, paths, thumbs
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -293,6 +293,22 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         parent = store.resolve(ref)
         store.unlink(parent.uuid, child)
 
+    @app.get("/api/boxes/{ref}/thumbnail")
+    def read_thumbnail(ref: str, store: StoreDep) -> Response:
+        """The miniature this box uses as its icon, generated from its resource."""
+        box = store.resolve(ref)
+        data = thumbs.thumb_bytes(box)
+        if data is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "no_thumbnail", "name": box.name},
+            )
+        return Response(
+            content=data,
+            media_type="image/png",
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=60"},
+        )
+
     @app.get("/api/boxes/{ref}/children")
     def read_children(ref: str, store: StoreDep) -> list[dict[str, object]]:
         box = store.resolve(ref)
@@ -318,6 +334,7 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         )
         if payload.icon is None:
             boxtypes.adopt_type_icon(box)
+            thumbs.icon_from_resource(box)
         saved = store.add(box)
         if payload.parent:
             store.link(payload.parent, saved.uuid)

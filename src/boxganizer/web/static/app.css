@@ -450,3 +450,39 @@ pre.text {
   gap: 0.5rem;
   flex-wrap: wrap;
 }
+
+/* ---------- a box's icon, sometimes a miniature of its own file ---------- */
+
+.box-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  flex: none;
+}
+
+/* "in a thin frame": a hairline border, no shadow, no mat. */
+.box-icon--thumb {
+  border: 1px solid var(--line);
+  border-radius: 0.2rem;
+  background: var(--panel);
+  padding: 1px;
+  object-fit: contain;
+  width: 1.4em;
+  height: 1.4em;
+}
+
+#box-list li .box-icon { font-size: 1.05rem; }
+.child .box-icon { font-size: 1.4rem; }
+.children-view[data-layout="grid"] .child .box-icon { font-size: 2.2rem; }
+.cell-caption .box-icon,
+.chip .box-icon,
+.root-bar .box-icon { font-size: 1em; }
+
+/* Icon mode shows the miniature large, still in the same thin frame. */
+.icon-view .glyph.box-icon--thumb {
+  width: clamp(6rem, 30vh, 15rem);
+  height: clamp(6rem, 30vh, 15rem);
+  border-width: 1px;
+  padding: 2px;
+}

@@ -78,6 +78,7 @@ class ImageResource(FileResource):
     label: ClassVar[str] = "Image"
     icon: ClassVar[str] = "\U0001f5bc️"  # 🖼️
     summary: ClassVar[str] = "One image file."
+    thumbnail_kind: ClassVar[str | None] = "image"
     extensions: ClassVar[frozenset[str] | None] = frozenset(
         {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic"}
     )

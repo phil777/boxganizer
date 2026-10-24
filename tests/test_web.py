@@ -716,3 +716,58 @@ def test_a_hidden_element_stays_hidden_under_display_flex(client: TestClient) ->
     """`.suggest { display: flex }` would otherwise beat the `hidden` attribute."""
     css = client.get("/static/app.css").text
     assert ".suggest[hidden] { display: none; }" in css
+
+
+# -- the miniature a box uses as its icon -----------------------------------
+
+
+@pytest.fixture
+def picture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from PIL import Image
+
+    from boxganizer import config
+
+    monkeypatch.setattr(config, "data_dir", lambda: tmp_path / "data")
+    source = tmp_path / "shot.png"
+    Image.new("RGB", (600, 150), (30, 90, 200)).save(source)
+    return source
+
+
+def test_creating_an_image_box_gives_it_a_picture_icon(client: TestClient, picture: Path) -> None:
+    created = client.post(
+        "/api/boxes", json={"name": "Shot", "box_type": "image", "resource_uri": str(picture)}
+    ).json()
+    assert created["config"]["icon_source"] == "thumbnail"
+
+
+def test_the_thumbnail_endpoint_serves_a_png(client: TestClient, picture: Path) -> None:
+    created = client.post(
+        "/api/boxes", json={"name": "Shot", "box_type": "image", "resource_uri": str(picture)}
+    ).json()
+    response = client.get(f"/api/boxes/{created['uuid']}/thumbnail")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content[:4] == b"\x89PNG"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_thumbnail_can_be_fetched_by_name(client: TestClient, picture: Path) -> None:
+    client.post(
+        "/api/boxes", json={"name": "Shot", "box_type": "image", "resource_uri": str(picture)}
+    )
+    assert client.get("/api/boxes/Shot/thumbnail").status_code == 200
+
+
+def test_a_box_without_a_miniature_answers_not_found(client: TestClient) -> None:
+    response = client.get("/api/boxes/Kitchen/thumbnail")
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "no_thumbnail"
+
+
+def test_an_explicit_icon_is_not_replaced_by_a_miniature(client: TestClient, picture: Path) -> None:
+    created = client.post(
+        "/api/boxes",
+        json={"name": "Chosen", "box_type": "image", "resource_uri": str(picture), "icon": "🐧"},
+    ).json()
+    assert created["icon"] == "🐧"
+    assert "icon_source" not in created["config"]

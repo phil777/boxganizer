@@ -52,6 +52,9 @@ class BoxType:
     required_metadata: ClassVar[frozenset[str]] = frozenset()
     #: True when at most one box of this type may exist in a database.
     singleton: ClassVar[bool] = False
+    #: What the box's icon is made from: "image", "pdf-page", or None for the
+    #: type's emoji. See `boxganizer.thumbs`.
+    thumbnail_kind: ClassVar[str | None] = None
     #: True for the one box that anchors the graph: nothing contains it.
     is_root: ClassVar[bool] = False
     #: True when `resource_uri` points at a local file the interfaces may read —
