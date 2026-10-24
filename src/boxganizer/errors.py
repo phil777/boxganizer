@@ -96,6 +96,10 @@ class RootCannotBeFiled(BoxganizerError):
         self.parent = parent
 
 
+class GridError(BoxganizerError):
+    """A cell reference or a placement that the grid cannot accept."""
+
+
 class StoreError(BoxganizerError):
     """The database could not be opened or written."""
 

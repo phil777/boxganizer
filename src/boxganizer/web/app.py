@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import unquote, urlsplit
 
-from boxganizer import __version__, boxtypes
+from boxganizer import __version__, boxtypes, grid
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
     CyclicLink,
     DuplicateBoxName,
+    GridError,
     InvalidBoxContent,
     InvalidBoxName,
     RootCannotBeFiled,
@@ -61,6 +62,29 @@ class BoxCreate(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
     config: dict[str, JsonValue] = Field(default_factory=dict)
     parent: str | None = Field(default=None, description="Name or uuid of the box to create it in.")
+    cell: list[int] | None = Field(
+        default=None, description="[row, column] when the parent is a grid."
+    )
+
+
+class GridPlace(BaseModel):
+    """Put a child in a grid cell, swapping with whoever is there."""
+
+    child: str = Field(description="Name or uuid of the child box.")
+    cell: list[int] = Field(description="[row, column], both counted from 0.")
+
+
+class GridUnplace(BaseModel):
+    """Take a child out of the grid; the box stays in the graph."""
+
+    child: str
+
+
+class GridResize(BaseModel):
+    """A new grid size. Children outside it lose their cell, not their place."""
+
+    rows: int = Field(ge=1, le=grid.MAX_ROWS)
+    columns: int = Field(ge=1, le=grid.MAX_COLUMNS)
 
 
 class ConfigUpdate(BaseModel):
@@ -142,6 +166,12 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
     async def _filed_root(request: Request, exc: RootCannotBeFiled) -> JSONResponse:
         return JSONResponse(
             status_code=409, content={"detail": {"error": "root_cannot_be_filed", "name": exc.name}}
+        )
+
+    @app.exception_handler(GridError)
+    async def _bad_grid_move(request: Request, exc: GridError) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content={"detail": {"error": "bad_grid_move", "reason": str(exc)}}
         )
 
     @app.exception_handler(UnknownBoxType)
@@ -231,6 +261,29 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
             headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
         return Response(content=path.read_bytes(), media_type=media_type, headers=headers)
 
+    @app.post("/api/boxes/{ref}/grid/place")
+    def place_in_grid(ref: str, payload: GridPlace, store: StoreDep) -> dict[str, object]:
+        box = store.resolve(ref)
+        child = store.resolve(payload.child)
+        return _grid_place(store, box.uuid, child.uuid, payload.cell)
+
+    @app.post("/api/boxes/{ref}/grid/unplace")
+    def unplace_from_grid(ref: str, payload: GridUnplace, store: StoreDep) -> dict[str, object]:
+        box = store.resolve(ref)
+        child = store.resolve(payload.child)
+        cells = grid.cells_of(box.config)
+        box.config = grid.to_config(box.config, cells=grid.unplace(cells, child.uuid))
+        return store.update(box).to_dict()
+
+    @app.post("/api/boxes/{ref}/grid/resize")
+    def resize_grid(ref: str, payload: GridResize, store: StoreDep) -> dict[str, object]:
+        box = store.resolve(ref)
+        size = grid.GridSize(rows=payload.rows, columns=payload.columns)
+        kept, lost = grid.unplace_outside(grid.cells_of(box.config), size)
+        box.config = grid.to_config(box.config, size=size, cells=kept)
+        saved = store.update(box)
+        return saved.to_dict() | {"unplaced": lost}
+
     @app.get("/api/boxes/{ref}/children")
     def read_children(ref: str, store: StoreDep) -> list[dict[str, object]]:
         box = store.resolve(ref)
@@ -259,6 +312,8 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         saved = store.add(box)
         if payload.parent:
             store.link(payload.parent, saved.uuid)
+            if payload.cell is not None:
+                _grid_place(store, payload.parent, saved.uuid, payload.cell)
         return saved.to_dict()
 
     @app.delete("/api/boxes/{ref}", status_code=204)
@@ -293,6 +348,28 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
 
 def _dump(boxes: Sequence[Box]) -> list[dict[str, object]]:
     return [box.to_dict() for box in boxes]
+
+
+def _grid_place(
+    store: BoxStore, parent_ref: str, child_uuid: str, cell_value: list[int]
+) -> dict[str, object]:
+    """One placement: file the child if needed, then put it in its cell."""
+    parent = store.resolve(parent_ref)
+    size = grid.size_of(parent.config)
+    cells = grid.cells_of(parent.config)
+    children = {child.uuid for child in store.children(parent.uuid)}
+    if child_uuid not in children:
+        store.link(parent.uuid, child_uuid)
+        children.add(child_uuid)
+    placed = grid.place(
+        cells=cells,
+        size=size,
+        child_uuid=child_uuid,
+        cell=grid.parse_cell(cell_value),
+        known_children=children,
+    )
+    parent.config = grid.to_config(parent.config, size=size, cells=placed)
+    return store.update(parent).to_dict()
 
 
 def _local_path(resource_uri: str) -> Path:

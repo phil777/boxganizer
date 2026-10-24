@@ -16,6 +16,7 @@ const state = {
   boxes: [], // what the left pane shows right now
   current: null, // the box on screen
   trail: [], // boxes walked through to get here, oldest first
+  pendingCell: null, // cell the modal should place the new box in
   mode: "icon", // "icon" | "content" for the current box
 };
 
@@ -58,6 +59,21 @@ const api = {
       body: JSON.stringify({ child }),
     }),
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
+  gridPlace: (ref, child, cell) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/grid/place`, {
+      method: "POST",
+      body: JSON.stringify({ child, cell }),
+    }),
+  gridUnplace: (ref, child) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/grid/unplace`, {
+      method: "POST",
+      body: JSON.stringify({ child }),
+    }),
+  gridResize: (ref, rows, columns) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/grid/resize`, {
+      method: "POST",
+      body: JSON.stringify({ rows, columns }),
+    }),
   rawText: async (ref) => {
     const response = await fetch(api.rawUrl(ref));
     if (!response.ok) {
@@ -394,7 +410,8 @@ function fillParentChoices() {
 
 /** Type-specific fields. Views add theirs with `registerConfigForm`. */
 /** Open the create-box modal; `parentUuid` presets where the new box goes. */
-function openNewBoxModal(parentUuid = null) {
+function openNewBoxModal(parentUuid = null, cell = null) {
+  state.pendingCell = cell;
   fillParentChoices();
   if (parentUuid) el("nb-parent").value = parentUuid;
   renderConfigFields();
@@ -464,6 +481,7 @@ async function submitNewBox(event) {
     description: value("nb-description"),
     resource_uri: value("nb-resource") || null,
     parent: value("nb-parent") || null,
+    cell: state.pendingCell || null,
     config: {},
   };
   try {
@@ -474,6 +492,7 @@ async function submitNewBox(event) {
   }
   try {
     const created = await api.create(payload);
+    state.pendingCell = null;
     el("new-box-modal").close();
     el("new-box-form").reset();
     await refreshSide();
@@ -694,6 +713,228 @@ registerView("image", {
     canvas.append(stage);
   },
 });
+
+/* ---------------------------------------------------------------- grid ---- */
+
+const GRID_DEFAULTS = { rows: 3, columns: 4 };
+
+function gridOptions(box) {
+  const section = (box.config || {}).grid || {};
+  return { ...GRID_DEFAULTS, ...section };
+}
+
+/**
+ * A grid of cells. Each cell holds one child: containment lives in the links
+ * table, the cell a child sits in lives in `config.grid.cells` keyed by uuid.
+ * Drag to move, onto an occupied cell to swap, double-click to open.
+ */
+registerView("grid", {
+  async render(canvas, box, ctx) {
+    if (ctx.mode() !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    const options = gridOptions(box);
+    let children = [];
+    try {
+      children = await api.children(box.uuid);
+    } catch (error) {
+      canvas.append(emptyMessage(`Cannot list the children: ${error.message}`));
+      return;
+    }
+    const byUuid = new Map(children.map((child) => [child.uuid, child]));
+    const cells = new Map(
+      Object.entries(options.cells || {}).map(([where, uuid]) => [where, uuid])
+    );
+
+    canvas.append(gridToolbar(box, options, ctx));
+
+    const board = document.createElement("div");
+    board.className = "grid-board";
+    board.style.gridTemplateRows = `repeat(${options.rows}, minmax(4rem, 1fr))`;
+    board.style.gridTemplateColumns = `repeat(${options.columns}, minmax(4rem, 1fr))`;
+    canvas.append(board);
+
+    for (let row = 0; row < options.rows; row += 1) {
+      for (let column = 0; column < options.columns; column += 1) {
+        board.append(
+          gridCell(box, ctx, row, column, cells.get(`${row},${column}`), byUuid)
+        );
+      }
+    }
+
+    const orphans = children.filter((child) => ![...cells.values()].includes(child.uuid));
+    if (orphans.length) {
+      const strip = document.createElement("div");
+      strip.className = "grid-unplaced";
+      const label = document.createElement("span");
+      label.className = "muted";
+      label.textContent = `Not placed (${orphans.length}): drag one onto a cell`;
+      strip.append(label);
+      orphans.forEach((child) => strip.append(chipFor(child, ctx)));
+      canvas.append(strip);
+    }
+  },
+});
+
+function chipFor(child, ctx) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "chip";
+  chip.draggable = true;
+  chip.textContent = `${child.icon} ${child.name}`;
+  chip.addEventListener("dragstart", (event) => {
+    event.dataTransfer.setData("text/plain", child.uuid);
+    event.dataTransfer.effectAllowed = "move";
+  });
+  chip.addEventListener("dblclick", () => ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() }));
+  return chip;
+}
+
+function gridToolbar(box, options, ctx) {
+  const bar = document.createElement("div");
+  bar.className = "grid-toolbar";
+
+  const stepper = (labelText, value, actionPrefix, max) => {
+    const group = document.createElement("span");
+    group.className = "stepper";
+    const label = document.createElement("span");
+    label.textContent = labelText;
+    const minus = document.createElement("button");
+    minus.type = "button";
+    minus.dataset.action = `${actionPrefix}-minus`;
+    minus.textContent = "−";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "1";
+    input.max = String(max);
+    input.value = String(value);
+    input.dataset.action = `${actionPrefix}-value`;
+    const plus = document.createElement("button");
+    plus.type = "button";
+    plus.dataset.action = `${actionPrefix}-plus`;
+    plus.textContent = "＋";
+    group.append(label, minus, input, plus);
+    return group;
+  };
+
+  const rows = stepper("rows", options.rows, "grid-rows", 24);
+  const columns = stepper("columns", options.columns, "grid-columns", 24);
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.textContent = "＋ New box here";
+  add.addEventListener("click", () => ctx.newBox(box.uuid));
+
+  bar.append(rows, columns, add);
+
+  async function resize(nextRows, nextColumns) {
+    const clampedRows = Math.min(24, Math.max(1, nextRows));
+    const clampedColumns = Math.min(24, Math.max(1, nextColumns));
+    try {
+      await api.gridResize(box.uuid, clampedRows, clampedColumns);
+      ctx.reload();
+    } catch (error) {
+      ctx.status(`cannot resize: ${error.message}`, true);
+    }
+  }
+
+  bar.addEventListener("click", (event) => {
+    const action = event.target.dataset.action;
+    if (!action || action.endsWith("-value")) return;
+    const isRows = action.startsWith("grid-rows");
+    const delta = action.endsWith("-minus") ? -1 : 1;
+    if (isRows) resize(options.rows + delta, options.columns);
+    else resize(options.rows, options.columns + delta);
+  });
+  const applyTyped = (event) => {
+    const action = event.target.dataset.action;
+    if (action === "grid-rows-value") resize(Number(event.target.value), options.columns);
+    else if (action === "grid-columns-value") resize(options.rows, Number(event.target.value));
+    else return false;
+    return true;
+  };
+  // Apply on blur (change) and on Enter: typing a number and hitting Return is
+  // how people expect a size box to behave.
+  bar.addEventListener("change", applyTyped);
+  bar.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && applyTyped(event)) event.preventDefault();
+  });
+  return bar;
+}
+
+function gridCell(box, ctx, row, column, uuid, byUuid) {
+  const cell = document.createElement("div");
+  cell.className = "grid-cell";
+  cell.dataset.row = String(row);
+  cell.dataset.column = String(column);
+  const child = uuid ? byUuid.get(uuid) : null;
+  if (child) {
+    cell.classList.add("occupied");
+    cell.dataset.uuid = child.uuid;
+    const tile = document.createElement("div");
+    tile.className = "child";
+    tile.draggable = true;
+    const glyph = document.createElement("span");
+    glyph.className = "child-icon";
+    glyph.textContent = child.icon;
+    const name = document.createElement("span");
+    name.className = "child-name";
+    name.textContent = child.name;
+    tile.append(glyph, name);
+    tile.addEventListener("dragstart", (event) => {
+      event.dataTransfer.setData("text/plain", child.uuid);
+      event.dataTransfer.effectAllowed = "move";
+    });
+    cell.append(tile);
+  } else {
+    const mark = document.createElement("span");
+    mark.className = "cell-coords muted";
+    mark.textContent = `${row},${column}`;
+    cell.append(mark);
+  }
+
+  cell.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    cell.classList.add("drop-target");
+  });
+  cell.addEventListener("dragleave", () => cell.classList.remove("drop-target"));
+  cell.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    cell.classList.remove("drop-target");
+    const dragged = event.dataTransfer.getData("text/plain");
+    if (!dragged) return;
+    try {
+      await api.gridPlace(box.uuid, dragged, [row, column]);
+      ctx.reload();
+    } catch (error) {
+      ctx.status(`cannot place that box here: ${error.message}`, true);
+    }
+  });
+  cell.addEventListener("dblclick", () => {
+    if (child) ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() });
+  });
+  cell.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const here = [row, column];
+    ctx.showMenu(event.clientX, event.clientY, [
+      child && { label: `Open ${child.name}`, run: () => ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() }) },
+      child && { label: "Show as icon", run: () => ctx.open(child.uuid, { mode: "icon" }) },
+      child && {
+        label: "Empty this cell",
+        run: async () => {
+          await api.gridUnplace(box.uuid, child.uuid);
+          ctx.reload();
+        },
+      },
+      child && { separator: true },
+      { label: child ? "New box in this cell" : "New box here", run: () => ctx.newBox(box.uuid, here) },
+    ]);
+  });
+  return cell;
+}
 
 /* -------------------------------------------------------------- folders ---- */
 

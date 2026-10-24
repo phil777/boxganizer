@@ -445,3 +445,162 @@ def test_the_side_panel_pins_the_root(client: TestClient) -> None:
     script = client.get("/static/app.js").text
     assert "function orderedForSide(boxes)" in script
     assert "orderedForSide(state.boxes)" in script
+
+
+# -- the grid view ----------------------------------------------------------
+
+
+def test_the_grid_view_is_registered(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'registerView("grid"' in script
+    assert "GRID_DEFAULTS" in script
+    for endpoint in ("grid/place", "grid/unplace", "grid/resize"):
+        assert endpoint in script
+
+
+def test_grid_cells_are_drawn_from_the_config(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "gridTemplateRows" in script
+    assert "gridTemplateColumns" in script
+    assert "cell.dataset.row" in script and "cell.dataset.column" in script
+
+
+def test_the_grid_has_absolute_and_stepped_controls(client: TestClient) -> None:
+    """Both ways of setting rows and columns: type a number, or step it."""
+    script = client.get("/static/app.js").text
+    assert 'stepper("rows"' in script
+    assert 'stepper("columns"' in script
+    assert '"grid-rows"' in script and '"grid-columns"' in script
+    for suffix in ("-minus", "-plus", "-value"):
+        assert suffix in script, suffix
+    assert 'action.endsWith("-minus")' in script
+    assert 'action === "grid-rows-value"' in script
+    assert 'action === "grid-columns-value"' in script
+    assert 'input.type = "number"' in script
+    assert 'input.min = "1"' in script and "input.max = String(max)" in script
+
+
+def test_grid_cells_accept_drops_and_open_on_double_click(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert '"dragover"' in script
+    assert '"drop"' in script
+    assert "drop-target" in script
+    assert 'cell.addEventListener("dblclick"' in script
+    assert '"contextmenu"' in script
+
+
+def test_typed_grid_sizes_apply_on_enter_too(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'bar.addEventListener("keydown"' in script
+    assert 'event.key === "Enter"' in script
+
+
+# -- grid endpoints ---------------------------------------------------------
+
+
+@pytest.fixture
+def board(populated: BoxStore) -> Box:
+    """A 2x2 grid to place things in."""
+    populated.add(Box(name="Board", box_type="grid"))
+    box = populated.get("Board")
+    box.config = {"grid": {"rows": 2, "columns": 2, "cells": {}}}
+    return populated.update(box)
+
+
+def grid_of(client: TestClient, ref: str = "Board") -> dict:
+    return client.get(f"/api/boxes/{ref}").json()["config"]["grid"]
+
+
+def test_placing_a_child_in_a_cell(client: TestClient, populated: BoxStore, board: Box) -> None:
+    child = populated.get("Passport").uuid
+    response = client.post(
+        "/api/boxes/Board/grid/place", json={"child": "Passport", "cell": [0, 1]}
+    )
+    assert response.status_code == 200
+    assert grid_of(client)["cells"] == {"0,1": child}
+
+
+def test_placing_files_the_box_if_it_was_not_a_child(
+    client: TestClient, populated: BoxStore, board: Box
+) -> None:
+    before = [box.name for box in populated.children("Board")]
+    assert "Books" not in before
+    client.post("/api/boxes/Board/grid/place", json={"child": "Books", "cell": [1, 0]})
+    assert "Books" in [box.name for box in populated.children("Board")]
+
+
+def test_two_children_swap_cells(client: TestClient, populated: BoxStore, board: Box) -> None:
+    client.post("/api/boxes/Board/grid/place", json={"child": "Passport", "cell": [0, 0]})
+    client.post("/api/boxes/Board/grid/place", json={"child": "Books", "cell": [1, 1]})
+    client.post("/api/boxes/Board/grid/place", json={"child": "Passport", "cell": [1, 1]})
+    cells = grid_of(client)["cells"]
+    uuids = {box.name: box.uuid for box in populated.list_boxes()}
+    assert cells == {"1,1": uuids["Passport"], "0,0": uuids["Books"]}
+
+
+def test_a_child_dragged_in_displaces_the_occupant(
+    client: TestClient, populated: BoxStore, board: Box
+) -> None:
+    client.post("/api/boxes/Board/grid/place", json={"child": "Passport", "cell": [0, 0]})
+    client.post("/api/boxes/Board/grid/place", json={"child": "Books", "cell": [0, 0]})
+    cells = grid_of(client)["cells"]
+    uuids = {box.name: box.uuid for box in populated.list_boxes()}
+    assert cells["0,0"] == uuids["Books"]
+    assert cells["0,1"] == uuids["Passport"]
+
+
+def test_a_cell_outside_the_grid_is_refused(client: TestClient, board: Box) -> None:
+    response = client.post(
+        "/api/boxes/Board/grid/place", json={"child": "Passport", "cell": [7, 7]}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "bad_grid_move"
+
+
+def test_resizing_unplaces_what_no_longer_fits_but_keeps_the_box(
+    client: TestClient, populated: BoxStore, board: Box
+) -> None:
+    client.post("/api/boxes/Board/grid/place", json={"child": "Passport", "cell": [1, 1]})
+    response = client.post("/api/boxes/Board/grid/resize", json={"rows": 1, "columns": 1})
+    assert response.status_code == 200
+    assert response.json()["config"]["grid"]["cells"] == {}
+    assert response.json()["unplaced"] == [populated.get("Passport").uuid]
+    assert "Passport" in [box.name for box in populated.children("Board")]
+
+
+def test_an_absurd_grid_size_is_rejected(client: TestClient, board: Box) -> None:
+    assert (
+        client.post("/api/boxes/Board/grid/resize", json={"rows": 99, "columns": 2}).status_code
+        == 422
+    )
+
+
+def test_unplacing_leaves_the_box_in_the_graph(
+    client: TestClient, populated: BoxStore, board: Box
+) -> None:
+    client.post("/api/boxes/Board/grid/place", json={"child": "Passport", "cell": [0, 0]})
+    response = client.post("/api/boxes/Board/grid/unplace", json={"child": "Passport"})
+    assert response.status_code == 200
+    assert response.json()["config"]["grid"]["cells"] == {}
+    assert "Passport" in [box.name for box in populated.children("Board")]
+
+
+def test_a_new_box_can_be_created_straight_into_a_cell(
+    client: TestClient, populated: BoxStore, board: Box
+) -> None:
+    created = client.post(
+        "/api/boxes", json={"name": "Fresh", "parent": "Board", "cell": [1, 0]}
+    ).json()
+    assert grid_of(client)["cells"] == {"1,0": created["uuid"]}
+    assert created["config"] == {}
+
+
+def test_grid_endpoints_on_an_unknown_box_are_not_found(client: TestClient) -> None:
+    assert (
+        client.post("/api/boxes/Ghost/grid/place", json={"child": "x", "cell": [0, 0]}).status_code
+        == 404
+    )
+    assert (
+        client.post("/api/boxes/Ghost/grid/resize", json={"rows": 2, "columns": 2}).status_code
+        == 404
+    )
