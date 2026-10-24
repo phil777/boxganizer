@@ -37,3 +37,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0006   | Box types are classes in a registry           | accepted |
 | 0007   | Box rows are edited as YAML via `$EDITOR`       | accepted |
 | 0008   | Layout and view settings live in the config   | accepted |
+| 0009   | The graph may contain cycles                    | accepted |

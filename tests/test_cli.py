@@ -508,3 +508,40 @@ def test_edit_does_not_touch_links(
     invoke(db_path, "edit", "Thing")
     with BoxStore(db_path) as store:
         assert [box.name for box in store.parents("Thing")] == ["root"]
+
+
+# -- cycles in the graph ----------------------------------------------------
+
+
+def test_tree_survives_a_cycle(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    invoke(db_path, "box", "add", "Mirror")
+    invoke(db_path, "box", "add", "Reflection")
+    invoke(db_path, "link", "in", "Reflection", "Mirror")
+    result = invoke(db_path, "link", "in", "Mirror", "Reflection")
+    assert result.exit_code == 0
+    shown = invoke(db_path, "tree", "Mirror")
+    assert "cycle" in shown.output
+    assert shown.exit_code == 0
+
+
+def test_tree_of_a_box_inside_itself(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    invoke(db_path, "box", "add", "Ouroboros", "--no-parent")
+    invoke(db_path, "link", "in", "Ouroboros", "Ouroboros")
+    shown = invoke(db_path, "tree", "Ouroboros")
+    assert "cycle" in shown.output
+
+
+def test_tree_without_a_root_still_prints_something(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    invoke(db_path, "box", "add", "X", "--no-parent")
+    invoke(db_path, "box", "add", "Y", "--no-parent")
+    invoke(db_path, "link", "in", "Y", "X")
+    invoke(db_path, "link", "in", "X", "Y")
+    # both boxes now have a parent, so there is no root to start from
+    shown = invoke(db_path, "tree")
+    assert shown.exit_code == 0
+    assert "X" in shown.output and "Y" in shown.output

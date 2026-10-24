@@ -1,4 +1,4 @@
-"""Store behaviour: CRUD, search, links, cycles, persistence."""
+"""Store behaviour: CRUD, search, links (many parents, cycles allowed), persistence."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from boxganizer.errors import BoxNotFound, CyclicLink, DuplicateBoxName
+from boxganizer.errors import BoxNotFound, DuplicateBoxName
 from boxganizer.models import Box
 from boxganizer.store import SCHEMA_VERSION, BoxStore
 
@@ -110,19 +110,63 @@ def test_unlink(store: BoxStore) -> None:
     store.unlink("A", "B")  # removing an absent link is not an error
 
 
-def test_self_link_is_a_cycle(store: BoxStore) -> None:
+def test_a_box_may_be_its_own_child(store: BoxStore) -> None:
     store.add(Box(name="A"))
-    with pytest.raises(CyclicLink):
-        store.link("A", "A")
+    store.link("A", "A")
+    assert [box.name for box in store.children("A")] == ["A"]
+    assert [box.name for box in store.parents("A")] == ["A"]
 
 
-def test_deep_cycle_is_refused(store: BoxStore) -> None:
+def test_cycles_are_allowed(store: BoxStore) -> None:
     for name in ["A", "B", "C"]:
         store.add(Box(name=name))
     store.link("A", "B")
     store.link("B", "C")
-    with pytest.raises(CyclicLink):
-        store.link("C", "A")
+    store.link("C", "A")
+    assert [box.name for box in store.children("C")] == ["A"]
+    assert [box.name for box in store.parents("A")] == ["C"]
+
+
+def test_a_child_can_have_many_parents(store: BoxStore) -> None:
+    for name in ["House", "Studio", "Painting"]:
+        store.add(Box(name=name))
+    store.link("House", "Painting")
+    store.link("Studio", "Painting")
+    assert sorted(box.name for box in store.parents("Painting")) == ["House", "Studio"]
+    # removing one parent leaves the other
+    store.unlink("House", "Painting")
+    assert [box.name for box in store.parents("Painting")] == ["Studio"]
+
+
+def test_linking_the_same_pair_twice_is_not_an_error(store: BoxStore) -> None:
+    store.add(Box(name="A"))
+    store.add(Box(name="B"))
+    store.link("A", "B")
+    store.link("A", "B")
+    assert len(store.children("A")) == 1
+
+
+def test_tree_stops_at_a_cycle(store: BoxStore) -> None:
+    store.add(Box(name="A"))
+    store.add(Box(name="B"))
+    store.link("A", "B")
+    store.link("B", "A")
+    node = store.tree("A")
+    children = node["children"]
+    assert isinstance(children, list) and len(children) == 1
+    inner = children[0]
+    assert inner["box"].name == "B"
+    assert inner["children"][0]["truncated"] is True
+
+
+def test_deleting_a_box_in_a_cycle_leaves_the_others(store: BoxStore) -> None:
+    store.add(Box(name="A"))
+    store.add(Box(name="B"))
+    store.link("A", "B")
+    store.link("B", "A")
+    store.remove("B")
+    assert store.children("A") == []
+    assert store.parents("A") == []
 
 
 def test_tree_shape(populated: BoxStore) -> None:

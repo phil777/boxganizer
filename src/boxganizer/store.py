@@ -22,7 +22,6 @@ from boxganizer import boxtypes, config
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
-    CyclicLink,
     DuplicateBoxName,
     InvalidBoxContent,
     RootCannotBeFiled,
@@ -85,15 +84,6 @@ SELECT b.* FROM boxes b JOIN links l ON l.child_id = b.id
 _SELECT_RELATED_PARENTS = """
 SELECT b.* FROM boxes b JOIN links l ON l.parent_id = b.id
  WHERE l.child_id = ? ORDER BY b.key
-"""
-
-_SELECT_DESCENDANTS = """
-WITH RECURSIVE reachable (id) AS (
-    SELECT ?
-    UNION
-    SELECT l.child_id FROM links l JOIN reachable r ON l.parent_id = r.id
-)
-SELECT 1 FROM reachable WHERE id = ? LIMIT 1
 """
 
 _SEARCH_SQL = r"""
@@ -320,10 +310,12 @@ class BoxStore:
     # -- links -------------------------------------------------------------
 
     def link(self, parent: str, child: str) -> None:
-        """Put the box *child* inside the box *parent*.
+        """Put the box *child* inside the box *parent*. Either may be a uuid.
 
-        Refused when the parent's type holds a resource rather than boxes, or
-        when the link would make a box reach itself.
+        A box may sit in several parents, and the graph may contain cycles —
+        including a box inside itself. Only the parent's type is consulted: a
+        leaf type holds a resource, not boxes. Anything that walks the graph has
+        to expect to come back where it started; see `tree()`.
         """
         parent_box = self.resolve(parent)
         parent_kind = boxtypes.get(parent_box.box_type)
@@ -334,8 +326,6 @@ class BoxStore:
             raise RootCannotBeFiled(child_box.name, parent_box.name)
         parent_id = parent_box.id or 0
         child_id = child_box.id or 0
-        if self._is_descendant(child_id, parent_id):
-            raise CyclicLink(parent, child)
         self._execute(
             "INSERT OR IGNORE INTO links (parent_id, child_id, added_at) VALUES (?, ?, ?)",
             (parent_id, child_id, _now()),
@@ -361,7 +351,11 @@ class BoxStore:
         ]
 
     def tree(self, name: str, *, max_depth: int = 10) -> dict[str, object]:
-        """Nested ``{"box", "depth", "children"}`` mapping, guarded against cycles."""
+        """Nested ``{"box", "depth", "children"}`` mapping.
+
+        Cycles are legal in the graph, so a box already on the path down from
+        *name* is marked ``truncated`` instead of being followed again.
+        """
         return self._tree_node(self.get(name), depth=0, max_depth=max_depth, seen=frozenset())
 
     # -- internals ---------------------------------------------------------
@@ -389,10 +383,6 @@ class BoxStore:
     def _id_of(self, ref: str) -> int:
         """Row id of a box named or identified by *ref*."""
         return self.resolve(ref).id or 0
-
-    def _is_descendant(self, start_id: int, target_id: int) -> bool:
-        """True when *target_id* is *start_id* or reachable from it downwards."""
-        return bool(self._rows(_SELECT_DESCENDANTS, (start_id, target_id)))
 
     def _tree_node(
         self, box: Box, *, depth: int, max_depth: int, seen: frozenset[int]

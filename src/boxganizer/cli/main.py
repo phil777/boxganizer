@@ -368,25 +368,39 @@ def tree(
     name: Annotated[str | None, typer.Argument(help="Root box. Omit to list roots.")] = None,
     depth: Annotated[int, typer.Option("--depth", "-d", min=1, max=20)] = 10,
 ) -> None:
-    """Print the containment tree below *name*."""
+    """Print the containment tree below *name*.
+
+    The graph may hold cycles, so a box that turns up inside itself is marked and
+    not followed again.
+    """
     with _open(ctx, _db_of(ctx)) as store:
         roots = [store.get(name)] if name else _find_roots(store)
-        for root_box in roots:
-            _print_tree(store, root_box, level=0, max_depth=depth)
         if not roots:
-            console.print("every box has a parent; pass a box name to start there")
+            console.print("no box without a parent — the graph is all cycles; each box once")
+            roots = store.list_boxes(limit=200)
+        started: set[str] = set()
+        for root_box in roots:
+            if root_box.key in started:
+                continue
+            started.add(root_box.key)
+            _print_tree(store, root_box, level=0, max_depth=depth, path=())
 
 
 def _find_roots(store: BoxStore) -> list[Box]:
     return [box for box in store.list_boxes() if not store.parents(box.name)]
 
 
-def _print_tree(store: BoxStore, box: Box, *, level: int, max_depth: int) -> None:
+def _print_tree(
+    store: BoxStore, box: Box, *, level: int, max_depth: int, path: tuple[str, ...]
+) -> None:
+    if box.key in path:
+        lit("  " * level + f"\u27f2 {box.icon} {box.name}  (cycle: already above)")
+        return
     lit("  " * level + f"{box.icon} {box.name}")
     if level + 1 >= max_depth:
         return
     for kid in store.children(box.name):
-        _print_tree(store, kid, level=level + 1, max_depth=max_depth)
+        _print_tree(store, kid, level=level + 1, max_depth=max_depth, path=(*path, box.key))
 
 
 @app.command()

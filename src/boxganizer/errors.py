@@ -35,15 +35,6 @@ class BoxNotFound(BoxganizerError):
         self.name = name
 
 
-class CyclicLink(BoxganizerError):
-    """Linking two boxes would make a box contain itself."""
-
-    def __init__(self, parent: str, child: str) -> None:
-        super().__init__(f"linking {child!r} inside {parent!r} would create a cycle")
-        self.parent = parent
-        self.child = child
-
-
 class UnknownBoxType(BoxganizerError):
     """No box type is registered under that name."""
 

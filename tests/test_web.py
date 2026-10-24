@@ -81,9 +81,11 @@ def test_link_boxes(client: TestClient) -> None:
     assert "Books" in [child["name"] for child in response.json()["children"]]
 
 
-def test_linking_a_box_into_its_own_child_conflicts(client: TestClient) -> None:
+def test_a_cycle_through_the_api_is_accepted(client: TestClient) -> None:
+    """The graph may contain cycles: House holds Kitchen holds Passport holds House."""
     response = client.post("/api/boxes/Passport/children", json={"child": "House"})
-    assert response.status_code == 409
+    assert response.status_code == 201
+    assert "House" in [child["name"] for child in response.json()["children"]]
 
 
 def test_search_endpoint(client: TestClient) -> None:

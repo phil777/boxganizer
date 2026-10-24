@@ -18,7 +18,6 @@ from boxganizer import __version__, boxtypes, grid
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
-    CyclicLink,
     DuplicateBoxName,
     GridError,
     InvalidBoxContent,
@@ -150,10 +149,6 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         return JSONResponse(
             status_code=422, content={"detail": {"error": "invalid_name", "reason": exc.reason}}
         )
-
-    @app.exception_handler(CyclicLink)
-    async def _cycle(request: Request, exc: CyclicLink) -> JSONResponse:
-        return JSONResponse(status_code=409, content={"detail": {"error": "cyclic_link"}})
 
     @app.exception_handler(ChildrenNotAllowed)
     async def _no_children(request: Request, exc: ChildrenNotAllowed) -> JSONResponse:

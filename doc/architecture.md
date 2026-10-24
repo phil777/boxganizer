@@ -23,7 +23,7 @@
 
 Three rules hold this together:
 
-1. **The core owns the logic.** Name rules, cycle detection, search, the schema:
+1. **The core owns the logic.** Name rules, link rules, search, the schema:
    all of it lives in `boxganizer.models` and `boxganizer.store`.
 2. **A frontend only calls `BoxStore`.** It parses input, calls one method, and
    renders the result. If a frontend needs an `if` that decides something about
@@ -40,7 +40,7 @@ Three rules hold this together:
 | `editing.py`    | A box row as YAML and back — pure text, no editor, no database.    |
 | `grid.py`       | Grid placement rules: swap, displace, unplace on shrink, clamp.     |
 | `bootstrap.py`  | The two boxes every library starts with (`root`, `cabinet`).       |
-| `store.py`      | `BoxStore`: CRUD, search, links, cycle guard, schema, migrations.  |
+| `store.py`      | `BoxStore`: CRUD, search, links, schema, migrations.               |
 | `config.py`     | Resolves the database path (argument → env → XDG → home).          |
 | `errors.py`     | `BoxganizerError` and its subclasses.                             |
 | `cli/main.py`   | Typer app `box`: `init`, `status`, `version`, `types`, `box add/list/show/search/rm`, `link`, `tree`, `serve`, `tui`. |
@@ -72,10 +72,14 @@ Two JSON columns: `metadata` is a flat map of strings the user labels freely;
 applied when an older file is opened, so upgrading is one code path and one test
 per version.
 
-One box may sit in many boxes, so the graph is a DAG, not a tree: `links` is a
-join table, `ON DELETE CASCADE` removes the edges of a deleted box, and
-`BoxStore.link` refuses an edge that would make a box reach itself
-(`CyclicLink`), checked with a recursive CTE before the insert.
+One box may sit in many boxes, so the graph is not a tree: `links` is a join
+table and `ON DELETE CASCADE` removes the edges of a deleted box. Cycles are
+legal, including a box inside itself (see `doc/adr/0009`), so **anything that
+walks the graph has to expect to come back where it started**: `BoxStore.tree`
+marks a repeated box `truncated`, and `box tree` prints `⟲ … (cycle: already
+above)`. The only link the store refuses is filing a box inside a type that
+cannot hold boxes (`ChildrenNotAllowed`) or filing the root box
+(`RootCannotBeFiled`).
 
 Timestamps are stored as ISO-8601 strings in UTC. Metadata is a JSON object of
 string values; unknown shapes decode to an empty object rather than raising.
@@ -149,7 +153,6 @@ The core raises `BoxganizerError` subclasses. Each frontend maps them once:
 | `BoxNotFound`      | message, exit 1| 404               | detail pane, red     |
 | `DuplicateBoxName` | message, exit 1| 409               | detail pane, red     |
 | `InvalidBoxName`   | message, exit 1| 422               | detail pane, red     |
-| `CyclicLink`       | message, exit 1| 409               | detail pane, red     |
 | `UnknownBoxType`   | message, exit 1| 422               | (reads tolerate it)  |
 | `InvalidBoxContent`| message, exit 1| 422               | detail pane, red     |
 | `ChildrenNotAllowed`| message, exit 1| 409              | detail pane, red     |
