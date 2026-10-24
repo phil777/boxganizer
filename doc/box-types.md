@@ -125,6 +125,30 @@ make the type impossible to create. Required metadata is only for what the user
 knows at creation time: `ssh` needs `host`, `mqtt` needs `topic`,
 `home-assistant` needs `entity_id`.
 
+## Resource analysis and proposals
+
+`boxganizer/infer.py` reads a resource URI and answers "which type really fits?".
+It proposes a type in two cases only: the suggestion is a **descendant** of the one
+chosen (`file` → `pdf`), or the chosen type would **reject** the resource (`mqtt`
+holding an `https://` address). Everything else stays quiet — `image` with a `.png`
+needs no advice.
+
+Proposals are never applied on their own:
+
+* `box box add -t file -r report.pdf` creates the box and prints
+  `tip: that resource ends with .pdf — it would suit 📕 PDF (-t pdf, or --infer)`.
+* `--infer` accepts on the command line, but **only when `-t` was not typed**: an
+  explicit choice is respected even with `--infer` (detected via Click's parameter
+  source, matched by name because Typer vendors its own copy of that enum).
+* The web modal shows a proposal row with a **Use 📕 PDF** button.
+
+One rule the analysis exposed: a `file` box may not point at a **directory**.
+`FileResource.check` now refuses it at write time ("use the 'directory' type for
+that"), and inference treats it as a rejection, so choosing `file` for a folder
+path proposes `directory`. `boxganizer/paths.py` holds the one URI parser that
+inference, the file endpoint and the type all share — three readers of the same
+field was three chances to disagree about `file://` quoting.
+
 ## Adding a type
 
 1. Pick the module that owns the branch (`content.py`, `resource.py`,

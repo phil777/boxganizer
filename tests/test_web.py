@@ -677,3 +677,42 @@ def test_the_root_button_falls_back_to_the_name_when_filtered(client: TestClient
     assert "state.boxes.find((box) => isRootType(box))" in script
     assert 'await openBox("root")' in script
     assert 'el("go-root").addEventListener("click", goToRoot);' in script
+
+
+# -- type proposals for a resource ------------------------------------------
+
+
+def test_the_api_proposes_a_more_specific_type(client: TestClient) -> None:
+    body = client.get(
+        "/api/types/suggest", params={"resource_uri": "/tmp/report.pdf", "current": "file"}
+    ).json()
+    assert body["suggestion"]["key"] == "pdf"
+    assert ".pdf" in body["suggestion"]["reason"]
+
+
+def test_the_api_proposes_nothing_when_the_choice_is_right(client: TestClient) -> None:
+    body = client.get(
+        "/api/types/suggest", params={"resource_uri": "/tmp/a.png", "current": "image"}
+    ).json()
+    assert body["suggestion"] is None
+
+
+def test_the_api_proposes_a_usable_type_when_the_choice_would_fail(client: TestClient) -> None:
+    body = client.get(
+        "/api/types/suggest", params={"resource_uri": "https://x.test/y", "current": "mqtt"}
+    ).json()
+    assert body["suggestion"]["key"] == "web"
+
+
+def test_the_modal_offers_the_proposal(client: TestClient) -> None:
+    assert 'id="nb-suggest"' in client.get("/").text
+    script = client.get("/static/app.js").text
+    assert "accept-suggestion" in script
+    assert "api.suggestType" in script
+    assert 'el("nb-type").value = suggestion.key' in script
+
+
+def test_a_hidden_element_stays_hidden_under_display_flex(client: TestClient) -> None:
+    """`.suggest { display: flex }` would otherwise beat the `hidden` attribute."""
+    css = client.get("/static/app.css").text
+    assert ".suggest[hidden] { display: none; }" in css

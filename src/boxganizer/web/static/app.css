@@ -434,3 +434,19 @@ pre.text {
   text-align: center;
   padding: 1rem;
 }
+
+/* An explicit `display` would otherwise beat the `hidden` attribute. */
+.suggest[hidden] { display: none; }
+
+.suggest {
+  margin: 0;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 0.25rem;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}

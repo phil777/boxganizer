@@ -35,6 +35,7 @@ box box add "Kitchen" -d "Room for cooking" -m floor=0
 box box add "Passport" -i 🛂 -d "Expires 2031" --parent Kitchen
 box box add "Loose" --no-parent                # keep it out of the tree
 box box edit Kitchen                           # edit the row as YAML in $EDITOR
+box box add "Report" -r report.pdf --infer     # take the type the resource suggests
 box link in "Passport" "Kitchen"               # put a box inside another box
 box link in "Kitchen" root                     # take the root's slot from cabinet
 box box list

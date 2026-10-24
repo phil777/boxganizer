@@ -12,9 +12,8 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import unquote, urlsplit
 
-from boxganizer import __version__, boxtypes, grid
+from boxganizer import __version__, boxtypes, grid, infer, paths
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -198,6 +197,15 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
     ) -> list[dict[str, object]]:
         return boxtypes.describe_all(include_abstract=not selectable_only)
 
+    @app.get("/api/types/suggest")
+    def suggest_type(
+        resource_uri: Annotated[str, Query(description="The resource being pointed at.")],
+        current: Annotated[str, Query(description="The type chosen so far.")] = "box",
+    ) -> dict[str, object]:
+        """A type that fits the resource better, or null. A proposal, never a change."""
+        found = infer.suggest(resource_uri, current)
+        return {"suggestion": found.as_dict() if found else None}
+
     @app.get("/api/boxes", response_model=None)
     def list_boxes(
         store: StoreDep, limit: Annotated[int, Query(ge=1, le=1000)] = 200
@@ -375,15 +383,13 @@ def _grid_place(
 
 def _local_path(resource_uri: str) -> Path:
     """A `file://` URL or a plain path, as a Path."""
-    if "://" in resource_uri:
-        parts = urlsplit(resource_uri)
-        if parts.scheme != "file":
-            raise HTTPException(
-                status_code=415,
-                detail={"error": "resource_not_local", "scheme": parts.scheme},
-            )
-        return Path(unquote(parts.path))
-    return Path(resource_uri).expanduser()
+    scheme, _ = paths.split_resource(resource_uri)
+    if scheme not in ("", "file"):
+        raise HTTPException(
+            status_code=415,
+            detail={"error": "resource_not_local", "scheme": scheme},
+        )
+    return paths.local_path(resource_uri)
 
 
 def _inside(path: Path, root: Path) -> bool:

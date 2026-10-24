@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from boxganizer import paths
 from boxganizer.boxtypes.base import BoxType
+from boxganizer.errors import InvalidBoxContent
+from boxganizer.models import Box
 
 _FILE_SCHEMES = frozenset({"file"})  # plain paths are accepted as file: too
 
@@ -35,6 +38,16 @@ class FileResource(ResourceBox):
     serves_content: ClassVar[bool] = True
     resource_uri_schemes: ClassVar[frozenset[str] | None] = _FILE_SCHEMES
     planned: ClassVar[str] = "Detect the concrete kind (text, image, pdf, archive) from the file."
+
+    @classmethod
+    def check(cls, box: Box) -> None:
+        """A file box holds a file. A directory belongs to a `directory` box."""
+        if box.resource_uri and paths.is_directory(box.resource_uri):
+            raise InvalidBoxContent(
+                cls.key,
+                f"{box.resource_uri} is a directory; use the 'directory' type for that",
+                box.name,
+            )
 
 
 class TextResource(FileResource):

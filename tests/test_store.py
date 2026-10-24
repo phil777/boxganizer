@@ -545,3 +545,15 @@ def test_a_box_displaced_from_the_root_keeps_its_other_parent(store: BoxStore) -
     store.link("root", "Shared")
     store.link("root", store.add(Box(name="Newcomer", box_type="folder")).name)
     assert [box.name for box in store.parents("Shared")] == ["Archive"]
+
+
+def test_a_file_box_may_not_point_at_a_directory(store: BoxStore, tmp_path: Path) -> None:
+    from boxganizer.errors import InvalidBoxContent
+
+    a_directory = tmp_path / "drawers"
+    a_directory.mkdir()
+    with pytest.raises(InvalidBoxContent, match="is a directory"):
+        store.add(Box(name="Wrong", box_type="file", resource_uri=str(a_directory)))
+    # the same path is fine as a directory box
+    store.add(Box(name="Right", box_type="directory", resource_uri=str(a_directory)))
+    assert store.get("Right").box_type == "directory"

@@ -25,7 +25,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from boxganizer import __version__, bootstrap, boxtypes, config, editing
+from boxganizer import __version__, bootstrap, boxtypes, config, editing, infer
 from boxganizer.errors import BoxganizerError, EditError, MissingDependency
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
@@ -188,6 +188,7 @@ def box_add(
     box_type: Annotated[
         str, typer.Option("--type", "-t", help="Box type; see 'box types'.")
     ] = boxtypes.DEFAULT_TYPE_KEY,
+    explicit_type: Annotated[bool, typer.Option("--explicit-type", hidden=True)] = False,
     resource: Annotated[str | None, typer.Option("--resource", "-r")] = None,
     meta: Annotated[
         list[str] | None, typer.Option("--meta", "-m", help="key=value, repeatable.")
@@ -203,8 +204,25 @@ def box_add(
     no_parent: Annotated[
         bool, typer.Option("--no-parent", help="Create the box at the top level.")
     ] = False,
+    infer_type: Annotated[
+        bool,
+        typer.Option(
+            "--infer/--no-infer",
+            help="Use --infer to create the specialised type the resource suggests "
+            "(-t pdf is still your call).",
+        ),
+    ] = False,
 ) -> None:
     """Create a box."""
+    # `-t` on the command line is a decision; the default is not. Only an
+    # unqualified choice is ever changed by --infer.
+    # Typer ships its own copy of click's ParameterSource, so the enum member is
+    # matched by name rather than by importing one of the two classes.
+    source = ctx.get_parameter_source("box_type")
+    explicit_type = getattr(source, "name", "") == "COMMANDLINE"
+    proposal = infer.suggest(resource, box_type)
+    if proposal is not None and infer_type and not explicit_type:
+        box_type = proposal.key
     box = Box(
         name=name,
         description=description,
@@ -223,6 +241,11 @@ def box_add(
             store.link(container, saved.name)
     note = f" in {container}" if container else ""
     say("added", f"{saved.icon} {saved.name} (#{saved.id}){note}")
+    if proposal is not None and saved.box_type != proposal.key:
+        lit(
+            f"  tip: that resource {proposal.reason} — it would suit "
+            f"{proposal.icon} {proposal.label} (-t {proposal.key}, or --infer)"
+        )
 
 
 @boxes_app.command("list")

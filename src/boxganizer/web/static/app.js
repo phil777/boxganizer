@@ -63,6 +63,10 @@ const api = {
     request(`/api/boxes/${encodeURIComponent(ref)}/children/${encodeURIComponent(child)}`, {
       method: "DELETE",
     }),
+  suggestType: (resourceUri, current) =>
+    request(
+      `/api/types/suggest?resource_uri=${encodeURIComponent(resourceUri)}&current=${encodeURIComponent(current || "box")}`
+    ),
   gridPlace: (ref, child, cell) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/grid/place`, {
       method: "POST",
@@ -141,6 +145,10 @@ function formFor(typeKey) {
 /* ------------------------------------------------------------- feedback ---- */
 
 let statusTimer = null;
+
+function ctx_free_status(message, isError = false) {
+  status(message, isError);
+}
 
 function status(message, isError = false) {
   const target = el("status");
@@ -439,6 +447,48 @@ function fillParentChoices() {
   if (root) select.value = root.uuid;
 }
 
+let suggestTimer = null;
+
+/**
+ * Ask the server whether the resource suits a more specific type than the one
+ * picked, and offer it. A proposal only: nothing changes until it is clicked.
+ */
+async function checkResourceType() {
+  const resource = el("nb-resource").value.trim();
+  const holder = el("nb-suggest");
+  if (!resource) {
+    holder.hidden = true;
+    holder.replaceChildren();
+    return;
+  }
+  let payload;
+  try {
+    payload = await api.suggestType(resource, el("nb-type").value);
+  } catch (error) {
+    ctx_free_status(`cannot check the resource type: ${error.message}`, true);
+    return;
+  }
+  const suggestion = payload.suggestion;
+  holder.replaceChildren();
+  if (!suggestion) {
+    holder.hidden = true;
+    return;
+  }
+  holder.hidden = false;
+  holder.append(document.createTextNode(`${suggestion.icon} ${suggestion.reason} — ${suggestion.label}? `));
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.className = "primary";
+  accept.dataset.action = "accept-suggestion";
+  accept.textContent = `Use ${suggestion.icon} ${suggestion.label}`;
+  accept.addEventListener("click", () => {
+    el("nb-type").value = suggestion.key;
+    renderConfigFields();
+    holder.hidden = true;
+  });
+  holder.append(accept);
+}
+
 /** Type-specific fields. Views add theirs with `registerConfigForm`. */
 /** Open the create-box modal; `parentUuid` presets where the new box goes. */
 function openNewBoxModal(parentUuid = null, cell = null) {
@@ -574,7 +624,14 @@ async function init() {
   el("new-box").addEventListener("click", () => openNewBoxModal());
   el("go-root").addEventListener("click", goToRoot);
   el("nb-cancel").addEventListener("click", () => el("new-box-modal").close());
-  el("nb-type").addEventListener("change", renderConfigFields);
+  el("nb-type").addEventListener("change", () => {
+    renderConfigFields();
+    checkResourceType();
+  });
+  el("nb-resource").addEventListener("input", () => {
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(checkResourceType, 300);
+  });
   el("new-box-form").addEventListener("submit", submitNewBox);
   document.addEventListener("click", hideMenu);
   window.addEventListener("blur", hideMenu);
@@ -1275,6 +1332,7 @@ registerView("*", {
 const boxganizer = {
   api,
   state,
+  checkResourceType,
   registerView,
   registerConfigForm,
   addStyle,
