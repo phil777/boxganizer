@@ -73,6 +73,25 @@ The store validates on write and the interfaces list types from the registry, so
 a new type is usable the moment it imports. Never branch on `box_type` in a
 frontend: ask the type.
 
+## Adding a web view
+
+Views live in `src/boxganizer/web/static/app.js`: `registerView("type", { render })`,
+resolved by walking the box type's ancestors, so most types inherit a parent's
+view for free. Three rules:
+
+* Save settings with `ctx.saveSection("name", patch)` — one namespace per view in
+  `config`, never a top-level key someone else might want.
+* Never put box data on the page with `innerHTML`; use `textContent`.
+* Anything that is a *rule* rather than a rendering goes in the core
+  (`grid.py` is the model) so it can be tested without a browser.
+
+Check it in a real browser — `make test` does not run JavaScript:
+
+```bash
+.venv/bin/pip install playwright && playwright install chromium
+.venv/bin/python tools/verify_web_ui.py http://127.0.0.1:8300   # see the file header
+```
+
 ## Adding a feature, end to end
 
 1. Write the behaviour in the core, with a failing test first.

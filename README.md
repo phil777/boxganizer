@@ -58,9 +58,28 @@ Every box declares a type — `box add -t markdown`, `-t mqtt`, `-t mindmap` —
 out of a hierarchy of 40 kinds documented in [doc/box-types.md](doc/box-types.md).
 
 ```bash
-box serve --port 8000                        # API on /api, docs on /docs, page on /
+box serve --port 8000                        # UI on /, API on /api, docs on /docs
 box tui                                      # browse, filter (type), drill in (enter), new (n)
 ```
+
+### The web app
+
+A left pane to search and pick, a main pane to show one box — as its icon or as
+its content. **New box** opens a modal where you choose the type and configure
+it. What a box shows depends on what it is:
+
+| Box                | Content view                                              |
+| ------------------ | --------------------------------------------------------- |
+| image              | the picture, scaled into the space left, ratio untouched   |
+| text, markdown     | the file's text; wrap, crop and font size in the right-click menu; vertical scroll always, horizontal when wrap is off |
+| folder, directory, cabinet | its children, as a list or as icons; double-click opens one in place |
+| grid               | rows and columns you set (type them or step them), one child per cell, drag to move, drop on an occupied cell to swap, right-click to create a box in a cell |
+| anything else      | its icon, and a detail panel with description, resource, metadata and config |
+
+Display mode, list-or-icons, text appearance and the grid layout are saved in the
+box's own `config` column, so they come back tomorrow in another browser. A grid
+remembers cells by box **uuid**, so renaming a box does not scramble it; shrinking
+a grid leaves children linked and shows them as "Not placed".
 
 `box serve` and `box tui` import their own framework, so `box --help` works
 even when only the core is installed; asking for one without its extra prints
@@ -109,7 +128,9 @@ make run-tui          # box tui
 
 Early development. The core store (boxes, links, search), the box type registry
 with its validation, the CLI, the web API with a minimal HTML browser, and the
-text UI all work and are covered by tests.
+text UI all work and are covered by tests. The web UI shows images, file text,
+folder contents and draggable grids; the other 35 box types still render as their
+icon.
 
 The 40 box types are **declared, not built**: they enforce their rules, but none
 of them fetches, renders, indexes or lays anything out yet — that is what the

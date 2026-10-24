@@ -38,6 +38,7 @@ Three rules hold this together:
 | `models.py`     | `Box` dataclass; name validation; `key` identity; JSON view.       |
 | `boxtypes/`     | The box type hierarchy and its registry; rules per type.           |
 | `editing.py`    | A box row as YAML and back — pure text, no editor, no database.    |
+| `grid.py`       | Grid placement rules: swap, displace, unplace on shrink, clamp.     |
 | `bootstrap.py`  | The two boxes every library starts with (`root`, `cabinet`).       |
 | `store.py`      | `BoxStore`: CRUD, search, links, cycle guard, schema, migrations.  |
 | `config.py`     | Resolves the database path (argument → env → XDG → home).          |
@@ -79,6 +80,47 @@ join table, `ON DELETE CASCADE` removes the edges of a deleted box, and
 Timestamps are stored as ISO-8601 strings in UTC. Metadata is a JSON object of
 string values; unknown shapes decode to an empty object rather than raising.
 
+## The web interface
+
+Two panes. The left one searches and lists boxes and opens the create-box modal;
+the right one shows the selected box, as its icon or as its content.
+
+A view registers under a box type key (`registerView("grid", …)`) and is resolved
+by walking the box type's ancestors, so a type inherits the nearest ancestor's
+view — `cabinet` browses like a folder, `markdown` reads like text, and anything
+unbuilt falls back to the icon. This mirrors the class hierarchy in `boxtypes/`;
+the client learns the ancestry from `/api/types`.
+
+Settings that belong to a box — display mode, list or icons, wrap, font size, the
+grid's rows, columns and cells — are written into the box's `config` column under
+the view's own namespace, so they survive a reload and follow the box. See
+`doc/adr/0008`.
+
+Endpoints the interface uses:
+
+| Endpoint                             | What it is for                                  |
+| ------------------------------------ | ----------------------------------------------- |
+| `GET /api/types`                     | the hierarchy, the rules, what the modal offers  |
+| `GET /api/boxes`, `/api/search`       | the side pane                                   |
+| `GET /api/boxes/{ref}`                | one box, with `{uuid,name,icon,box_type}` relations |
+| `GET /api/boxes/{ref}/children`       | what a container holds                          |
+| `POST /api/boxes`                     | create, optionally in a parent and a grid cell  |
+| `PUT /api/boxes/{ref}/config`         | save view settings                              |
+| `POST /api/boxes/{ref}/grid/place`    | place a child, swapping occupants               |
+| `POST /api/boxes/{ref}/grid/resize`   | new size; reports what lost a cell              |
+| `POST /api/boxes/{ref}/grid/unplace`  | empty a cell, keep the child                    |
+| `GET /api/boxes/{ref}/raw`            | the bytes behind a file box (see below)         |
+
+`{ref}` is a name or a uuid everywhere.
+
+**Reading files off the disk** is the one place the server touches the
+filesystem beyond the database. Only types whose `serves_content` is true — from
+`FileResource` down — are readable, only regular files, only under 32 MiB, and
+only inside `$BOXGANIZER_CONTENT_ROOT` when that is set (symlinks resolved
+first). Responses carry `X-Content-Type-Options: nosniff`, and SVG gets a
+sandboxing CSP header because an SVG can carry script. Text is put on the page
+with `textContent`, never as HTML.
+
 ## Editing a box in place
 
 `box edit` is the one place a whole row is rewritten by hand. It is split so the
@@ -119,7 +161,12 @@ missing extra reaches the user as `MissingDependency` instead of an import
 traceback.
 
 A frontend never translates an error into another frontend's vocabulary, and
-never swallows one silently.
+never swallows one silently. `GridError` is the web layer's 422; `EditError`
+exists only for `box edit`.
+
+Boxes are identified two ways: `id` is the row number, `uuid` is permanent.
+Anything written down by a person or by a layout — a URL, a grid cell — uses the
+uuid, because names change.
 
 ## Extension points
 
