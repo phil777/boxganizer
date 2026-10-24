@@ -6,10 +6,13 @@ both, through :func:`boxganizer.web.server.run`). The app owns one :class:`BoxSt
 
 from __future__ import annotations
 
+import mimetypes
+import os
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import unquote, urlsplit
 
 from boxganizer import __version__, boxtypes
 from boxganizer.errors import (
@@ -26,7 +29,7 @@ from boxganizer.store import BoxStore
 
 try:
     from fastapi import Depends, FastAPI, HTTPException, Query, Request
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
     from pydantic import BaseModel, Field, JsonValue
@@ -34,6 +37,12 @@ except ModuleNotFoundError as exc:  # pragma: no cover - only when the extra is 
     raise ModuleNotFoundError(
         "the web frontend needs the 'web' extra: pip install 'boxganizer[web]'"
     ) from exc
+
+#: Files larger than this are not handed to the browser.
+MAX_RAW_BYTES = 32 * 1024 * 1024
+
+#: Environment variable that confines served files to one subtree.
+CONTENT_ROOT_ENV = "BOXGANIZER_CONTENT_ROOT"
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -94,6 +103,8 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    confine = os.environ.get(CONTENT_ROOT_ENV)
+    app.state.content_root = Path(confine).expanduser() if confine else None
     app.state.store = store if store is not None else BoxStore()
     app.state.owns_store = store is None
 
@@ -169,6 +180,50 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
             "parents": [_brief(b) for b in store.parents(box.uuid)],
         }
 
+    @app.get("/api/boxes/{ref}/raw")
+    def read_raw(ref: str, request: Request, store: StoreDep) -> Response:
+        """The bytes behind a file box, for `<img>` and for the text view.
+
+        Only types that say they serve content, only real regular files, and only
+        inside `BOXGANIZER_CONTENT_ROOT` when that is set.
+        """
+        box = store.resolve(ref)
+        kind = boxtypes.get(box.box_type)
+        if not kind.serves_content:
+            raise HTTPException(
+                status_code=415,
+                detail={"error": "type_not_servable", "type": kind.key},
+            )
+        if not box.resource_uri:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "resource_missing", "name": box.name},
+            )
+        path = _local_path(box.resource_uri)
+        root = getattr(request.app.state, "content_root", None)
+        if root is not None and not _inside(path, root):
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "resource_out_of_range", "root": str(root)},
+            )
+        if not path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "resource_missing", "path": str(path)},
+            )
+        size = path.stat().st_size
+        if size > MAX_RAW_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"error": "resource_too_large", "size": size, "limit": MAX_RAW_BYTES},
+            )
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        headers = {"X-Content-Type-Options": "nosniff", "Content-Disposition": "inline"}
+        if media_type == "image/svg+xml":
+            # An SVG can carry script; sandbox it so it cannot act as this origin.
+            headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        return Response(content=path.read_bytes(), media_type=media_type, headers=headers)
+
     @app.get("/api/boxes/{ref}/children")
     def read_children(ref: str, store: StoreDep) -> list[dict[str, object]]:
         box = store.resolve(ref)
@@ -231,6 +286,28 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
 
 def _dump(boxes: Sequence[Box]) -> list[dict[str, object]]:
     return [box.to_dict() for box in boxes]
+
+
+def _local_path(resource_uri: str) -> Path:
+    """A `file://` URL or a plain path, as a Path."""
+    if "://" in resource_uri:
+        parts = urlsplit(resource_uri)
+        if parts.scheme != "file":
+            raise HTTPException(
+                status_code=415,
+                detail={"error": "resource_not_local", "scheme": parts.scheme},
+            )
+        return Path(unquote(parts.path))
+    return Path(resource_uri).expanduser()
+
+
+def _inside(path: Path, root: Path) -> bool:
+    """True when `path` is `root` or below it, symlinks resolved."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _brief(box: Box) -> dict[str, object]:

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
 pytest.importorskip("fastapi")
@@ -262,7 +263,7 @@ def test_config_is_replaced_and_persisted(client: TestClient, populated: BoxStor
     assert populated.get("Kitchen").config["view"] == "grid"
 
 
-def test_config_must_be_an_object(client: TestClient) -> None:
+def test_put_config_must_be_an_object(client: TestClient) -> None:
     assert client.put("/api/boxes/Kitchen/config", json={"config": [1]}).status_code == 422
 
 
@@ -295,3 +296,88 @@ def test_a_box_can_be_deleted_by_uuid(client: TestClient, populated: BoxStore) -
     uuid = populated.get("Books").uuid
     assert client.delete(f"/api/boxes/{uuid}").status_code == 204
     assert client.get(f"/api/boxes/{uuid}").status_code == 404
+
+
+# -- serving the file behind a box -----------------------------------------
+
+
+def _write(tmp_path: Path, name: str = "pic.png", body: bytes = b"\x89PNG fake") -> Path:
+    path = tmp_path / name
+    path.write_bytes(body)
+    return path
+
+
+def test_a_file_box_serves_its_bytes(
+    client: TestClient, populated: BoxStore, tmp_path: Path
+) -> None:
+    path = _write(tmp_path)
+    box = populated.add(Box(name="Picture", box_type="image", resource_uri=str(path)))
+    response = client.get(f"/api/boxes/{box.uuid}/raw")
+    assert response.status_code == 200
+    assert response.content == b"\x89PNG fake"
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_file_url_is_served_too(client: TestClient, populated: BoxStore, tmp_path: Path) -> None:
+    path = _write(tmp_path, "notes.txt", b"hello")
+    box = populated.add(Box(name="Text", box_type="text", resource_uri=path.as_uri()))
+    response = client.get(f"/api/boxes/{box.uuid}/raw")
+    assert response.status_code == 200
+    assert response.text == "hello"
+
+
+def test_types_without_a_file_are_not_served(client: TestClient) -> None:
+    response = client.get("/api/boxes/House/raw")
+    assert response.status_code == 415
+    assert response.json()["detail"]["error"] == "type_not_servable"
+
+
+def test_a_file_box_without_a_resource_is_not_found(
+    client: TestClient, populated: BoxStore
+) -> None:
+    box = populated.add(Box(name="Empty image", box_type="image", resource_uri="/tmp/gone.png"))
+    response = client.get(f"/api/boxes/{box.uuid}/raw")
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "resource_missing"
+
+
+def test_a_directory_is_not_read_as_content(client: TestClient, populated: BoxStore) -> None:
+    box = populated.add(Box(name="Some dir", box_type="directory", resource_uri="/tmp"))
+    response = client.get(f"/api/boxes/{box.uuid}/raw")
+    assert response.status_code == 415
+    assert response.json()["detail"]["error"] == "type_not_servable"
+
+
+def test_an_http_box_is_not_read_from_disk(client: TestClient, populated: BoxStore) -> None:
+    box = populated.add(Box(name="Site", box_type="web", resource_uri="https://example.com"))
+    response = client.get(f"/api/boxes/{box.uuid}/raw")
+    assert response.status_code == 415
+
+
+def test_svg_is_sandboxed(client: TestClient, populated: BoxStore, tmp_path: Path) -> None:
+    path = _write(tmp_path, "mark.svg", b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+    box = populated.add(Box(name="Mark", box_type="image", resource_uri=str(path)))
+    response = client.get(f"/api/boxes/{box.uuid}/raw")
+    assert response.status_code == 200
+    assert "sandbox" in response.headers["content-security-policy"]
+
+
+def test_a_confined_server_refuses_files_outside_its_root(
+    populated: BoxStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    good = _write(root, "ok.png")
+    outside = _write(tmp_path, "secret.png")
+
+    monkeypatch.setenv("BOXGANIZER_CONTENT_ROOT", str(root))
+    from boxganizer.web.app import create_app
+
+    with TestClient(create_app(populated)) as confined:
+        box_in = populated.add(Box(name="Inside", box_type="image", resource_uri=str(good)))
+        box_out = populated.add(Box(name="Outside", box_type="image", resource_uri=str(outside)))
+        assert confined.get(f"/api/boxes/{box_in.uuid}/raw").status_code == 200
+        refused = confined.get(f"/api/boxes/{box_out.uuid}/raw")
+        assert refused.status_code == 403
+        assert refused.json()["detail"]["error"] == "resource_out_of_range"

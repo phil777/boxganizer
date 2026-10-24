@@ -52,6 +52,9 @@ class BoxType:
     required_metadata: ClassVar[frozenset[str]] = frozenset()
     #: True when at most one box of this type may exist in a database.
     singleton: ClassVar[bool] = False
+    #: True when `resource_uri` points at a local file the interfaces may read —
+    #: which is not the same as existing: a directory or a URL is not served raw.
+    serves_content: ClassVar[bool] = False
     #: What this type is meant to do once it is built. Empty means: already does all it claims.
     planned: ClassVar[str] = ""
 

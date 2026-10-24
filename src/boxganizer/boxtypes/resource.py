@@ -32,6 +32,7 @@ class FileResource(ResourceBox):
     label: ClassVar[str] = "File"
     icon: ClassVar[str] = "\U0001f4c3"  # 📃
     summary: ClassVar[str] = "A file on disk, of any kind."
+    serves_content: ClassVar[bool] = True
     resource_uri_schemes: ClassVar[frozenset[str] | None] = _FILE_SCHEMES
     planned: ClassVar[str] = "Detect the concrete kind (text, image, pdf, archive) from the file."
 

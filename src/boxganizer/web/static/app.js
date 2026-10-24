@@ -625,6 +625,29 @@ registerView("box", {
   },
 });
 
+/* An image: scaled into whatever space the screen has left, ratio untouched. */
+registerView("image", {
+  render(canvas, box, ctx, mode) {
+    if (mode !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    const stage = document.createElement("div");
+    stage.className = "image-view";
+    const image = document.createElement("img");
+    image.src = api.rawUrl(box.uuid);
+    image.alt = box.name;
+    image.addEventListener("error", () => {
+      stage.replaceChildren(
+        emptyMessage(`Could not load the image at ${box.resource_uri || "(no resource)"}.`)
+      );
+      stage.classList.add("failed");
+    });
+    stage.append(image);
+    canvas.append(stage);
+  },
+});
+
 /* The fallback for every type that has nothing better yet. */
 registerView("*", {
   render(canvas, box, ctx, mode) {
