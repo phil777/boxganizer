@@ -187,17 +187,25 @@ function formFor(typeKey) {
 /* ----------------------------------------------------------- live views ---- */
 
 /**
- * Something a view keeps open — an event stream, a socket. A connection the page
- * no longer shows is a leak, so a view that opens one hands the way to close it
- * to `holdLive`, and the main pane calls `releaseLive` before drawing the next
- * box.
+ * How many times the main pane has been handed to a new box.
  *
- * `liveGeneration` goes up with every release. A view still waiting on a fetch
- * when that happens sees the number move and abandons its work, rather than
- * opening a stream behind the page's back for a box nobody is looking at.
+ * A view that waits for the server must ask, when the answer arrives, whether the
+ * pane still shows the box it was asked to draw. Two picks in quick succession
+ * otherwise both finish and both append, and the page ends up holding two of
+ * whatever the box shows — two desktops, two folders, one of them invisible.
+ *
+ * Something a view keeps open — an event stream, a socket — is released by the
+ * same number, because a connection the page no longer shows is a leak. A view
+ * that opens one hands the way to close it to `holdLive`, and the pane calls
+ * `releaseLive` as it moves on.
  */
 const liveReleases = new Set();
-let liveGeneration = 0;
+let paneGeneration = 0;
+
+/** Whether the render that asked is still the render the pane is showing. */
+function stillOnScreen(token) {
+  return token === paneGeneration;
+}
 
 function holdLive(release) {
   liveReleases.add(release);
@@ -205,7 +213,7 @@ function holdLive(release) {
 }
 
 function releaseLive() {
-  liveGeneration += 1;
+  paneGeneration += 1;
   const releases = [...liveReleases];
   liveReleases.clear();
   releases.forEach((release) => {
@@ -689,7 +697,7 @@ async function submitEditBox(event) {
 
 /* --------------------------------------------------------- file picker ---- */
 
-const picker = { target: null, path: "", root: null, selected: null };
+const picker = { target: null, from: "", path: "", root: null, selected: null };
 
 /**
  * A selector over the machine the server runs on. This cannot be
@@ -697,8 +705,12 @@ const picker = { target: null, path: "", root: null, selected: null };
  * a resource URI has to be the path the server will read. What is browsable is
  * the same confine the file endpoints use.
  */
-async function openFilePicker(inputId) {
-  picker.target = inputId;
+async function openFilePicker(target, startValue) {
+  // `target` is the id of the field to fill, or a function to hand the choice to.
+  // A context menu has no field of its own, so the desktop's background picks with
+  // a function and writes the box directly.
+  picker.target = target;
+  picker.from = typeof target === "function" ? String(startValue || "") : "";
   picker.selected = null;
   picker.path = "";
   el("fp-show-hidden").checked = false;
@@ -710,7 +722,7 @@ async function openFilePicker(inputId) {
   // Start where the field points. A directory resource opens on itself; a file
   // opens on the folder holding it; a path the confine refuses falls back to the
   // confine, with the refusal said out loud rather than left as a stale listing.
-  const start = (el(inputId).value || "").trim();
+  const start = (typeof target === "function" ? picker.from : el(target).value || "").trim();
   if (start && (await showIn(start))) return;
   if (start.includes("/")) {
     const parent = start.replace(/\/[^/]*\/?$/, "");
@@ -778,12 +790,19 @@ async function showIn(path) {
   return true;
 }
 
-/** Put the chosen path in the resource field and let the type check react. */
+/**
+ * Put the chosen path where it belongs: in the resource field, or in the hands of
+ * whoever opened the picker from somewhere that has no field.
+ */
 function pick(chosen) {
+  el("file-picker").close();
+  if (typeof picker.target === "function") {
+    picker.target(chosen);
+    return;
+  }
   const input = el(picker.target);
   input.value = chosen;
   input.dispatchEvent(new Event("input", { bubbles: true }));
-  el("file-picker").close();
   status(`resource set to ${chosen}`);
 }
 
@@ -1188,6 +1207,7 @@ registerView("grid", {
       canvas.append(iconPane(box));
       return;
     }
+    const token = paneGeneration;
     const options = gridOptions(box);
     let children = [];
     try {
@@ -1196,6 +1216,7 @@ registerView("grid", {
       canvas.append(emptyMessage(`Cannot list the children: ${error.message}`));
       return;
     }
+    if (!stillOnScreen(token)) return; // the pane moved on while the list was coming
     const byUuid = new Map(children.map((child) => [child.uuid, child]));
     const cells = new Map(
       Object.entries(options.cells || {}).map(([where, uuid]) => [where, uuid])
@@ -1437,6 +1458,7 @@ registerView("desktop", {
       canvas.append(iconPane(box));
       return;
     }
+    const token = paneGeneration;
     const options = desktopOptions(box);
     let children = [];
     try {
@@ -1445,6 +1467,7 @@ registerView("desktop", {
       canvas.append(emptyMessage(`Cannot list the children: ${error.message}`));
       return;
     }
+    if (!stillOnScreen(token)) return; // otherwise a quick second pick draws two desktops
     const positions = options.positions || {};
 
     if (!opts.embedded) canvas.append(desktopToolbar(box, options, ctx, children.length));
@@ -1526,8 +1549,52 @@ registerView("desktop", {
       const frame = surface.getBoundingClientRect();
       await placeOnDesktop(box, ctx, dragged, event.clientX - frame.left, event.clientY - frame.top);
     });
+
+    // Right-clicking the desktop itself — not one of its icons, which answer for
+    // themselves — is where the surface's own business lives: a box to put on it,
+    // and the picture it works on. That picture is the box's resource, nowhere else.
+    surface.addEventListener("contextmenu", (event) => {
+      if (event.target.closest(".desktop-icon")) return;
+      event.preventDefault();
+      ctx.showMenu(
+        event.clientX,
+        event.clientY,
+        boxMenuItems(box, [
+          { label: `New box on ${box.name}`, run: () => ctx.newBox({ parent: box.uuid }) },
+          { separator: true },
+          { label: "\ud83d\uddbc Set a background image\u2026", run: () => chooseBackground(box, ctx) },
+          box.resource_uri
+            ? {
+                label: "Remove the background image",
+                run: () => writeBackground(box, ctx, ""),
+              }
+            : null,
+        ])
+      );
+    });
   },
 });
+
+/** Ask the file selector for a picture, and file what it answers with as the resource. */
+function chooseBackground(box, ctx) {
+  openFilePicker((chosen) => writeBackground(box, ctx, chosen), box.resource_uri || "");
+}
+
+/**
+ * Write the desktop's background, which is simply its `resource_uri`. An empty
+ * path takes it away. The view probes the picture before it claims one, so a
+ * resource that turns out not to be an image leaves a plain desktop.
+ */
+async function writeBackground(box, ctx, chosen) {
+  try {
+    await api.updateBox(box.uuid, { resource_uri: chosen });
+    box.resource_uri = chosen;
+    ctx.status(chosen ? `${box.name} now works on ${chosen}` : `${box.name} has no background`);
+    ctx.reload();
+  } catch (error) {
+    ctx.status(`cannot change the background: ${error.message}`, true);
+  }
+}
 
 /**
  * Tell the server where an icon went, and redraw from what it answered with.
@@ -1761,6 +1828,7 @@ function desktopIcon(box, child, rect, options, ctx) {
  */
 registerView("root", {
   async render(canvas, box, ctx) {
+    const token = paneGeneration;
     let children = [];
     try {
       children = await api.children(box.uuid);
@@ -1768,7 +1836,21 @@ registerView("root", {
       canvas.append(emptyMessage(`Cannot read the root: ${error.message}`));
       return;
     }
-    const child = children[0] || null;
+    if (!stillOnScreen(token)) return;
+    // The list gives the brief of each child — enough to draw a tile, not enough to
+    // be the subject of the page: it carries no children, no metadata, no parents.
+    // The one box on screen is fetched whole.
+    let child = children[0] || null;
+    if (child) {
+      try {
+        child = await api.box(child.uuid);
+      } catch (error) {
+        // The brief is still worth showing; say what could not be read rather than
+        // leaving the slot blank.
+        console.warn(`the root could not read its child whole: ${error.message}`);
+      }
+      if (!stillOnScreen(token)) return;
+    }
 
     const holder = document.createElement("div");
     holder.className = "root-view";
@@ -1817,7 +1899,10 @@ registerView("root", {
       block.className = "root-child";
       block.dataset.uuid = child.uuid;
       body.append(block);
-      renderContent(block, child, { depth: 1 }).catch((error) => {
+      // Not embedded: the root's child is the subject of the page, not a tile in
+      // somebody else's layout. Asking it the way a cell does makes a plain box
+      // answer with its icon and a desktop answer without its toolbar.
+      renderContent(block, child, { depth: 1, embedded: false }).catch((error) => {
         block.replaceChildren(emptyMessage(error.message));
       });
     } else {
@@ -1835,8 +1920,13 @@ registerView("root", {
     });
     holder.addEventListener("dragleave", () => holder.classList.remove("drop-target"));
     holder.addEventListener("drop", async (event) => {
-      event.preventDefault();
       holder.classList.remove("drop-target");
+      // The view of the child sits inside this holder, so its drops bubble here.
+      // One that the child already took — an icon onto a desktop, a box into a
+      // folder — is not the root's to answer; taking it would replace the very box
+      // the drop landed on.
+      if (event.defaultPrevented) return;
+      event.preventDefault();
       const dragged = event.dataTransfer.getData("text/plain");
       if (!dragged) return;
       try {
@@ -1869,6 +1959,7 @@ const folderView = {
       canvas.append(iconPane(box));
       return;
     }
+    const token = paneGeneration;
     const options = folderOptions(box);
     const wrap = document.createElement("div");
     wrap.className = "children-view";
@@ -1909,6 +2000,7 @@ const folderView = {
       holder.append(emptyMessage(`Cannot list the children: ${error.message}`));
       return;
     }
+    if (!stillOnScreen(token)) return;
     count.textContent = ` ${children.length} inside`;
     if (!children.length) {
       holder.append(emptyMessage("Nothing in here yet."));
@@ -2277,6 +2369,7 @@ registerView("archive", {
       canvas.append(iconPane(box));
       return;
     }
+    const token = paneGeneration;
     let payload;
     try {
       payload = opts.archiveUrl
@@ -2286,6 +2379,7 @@ registerView("archive", {
       canvas.append(emptyMessage(`Cannot open the archive: ${error.message}`));
       return;
     }
+    if (!stillOnScreen(token)) return;
     const wrap = document.createElement("div");
     wrap.className = "archive-view";
     const head = document.createElement("p");
@@ -2502,7 +2596,7 @@ const mqttView = {
       return;
     }
 
-    const generation = liveGeneration;
+    const token = paneGeneration;
 
     const wrap = document.createElement("div");
     wrap.className = "mqtt-view";
@@ -2545,11 +2639,11 @@ const mqttView = {
     try {
       info = await api.mqtt(box.uuid);
     } catch (error) {
-      if (generation !== liveGeneration) return;
+      if (!stillOnScreen(token)) return;
       wrap.replaceChildren(emptyMessage(`This sensor cannot be read: ${error.message}`));
       return;
     }
-    if (generation !== liveGeneration) return; // the page moved on mid-fetch
+    if (!stillOnScreen(token)) return; // the page moved on mid-fetch
 
     const target = info.target || {};
     topic.textContent = target.topic || "";
@@ -2610,7 +2704,7 @@ const mqttView = {
     holdLive(() => source.close());
 
     const accept = (event) => {
-      if (generation !== liveGeneration) {
+      if (!stillOnScreen(token)) {
         source.close();
         return;
       }
@@ -2675,6 +2769,7 @@ const boxganizer = {
   mqttView,
   holdLive,
   releaseLive,
+  stillOnScreen,
 };
 window.boxganizer = boxganizer;
 

@@ -77,7 +77,7 @@ it. What a box shows depends on what it is:
 | text, markdown     | the file's text; wrap, crop and font size in the right-click menu; vertical scroll always, horizontal when wrap is off |
 | folder, directory, cabinet | its children, as a list or as icons; double-click opens one in place |
 | grid               | rows and columns you set (type them or step them), one child per cell, drag to move, drop on an occupied cell to swap, right-click to create a box in a cell |
-| desktop            | icons anywhere on the surface: drag them with the pointer, drag a corner to size them, arrow-key them about, and let a magnetic grid of the size you chose pull them onto its lines. The resource, when it is a picture, is the wallpaper. Double-click opens a box in place of the desktop |
+| desktop            | icons anywhere on the surface: drag them with the pointer, drag a corner to size them, arrow-key them about, and let a magnetic grid of the size you chose pull them onto its lines. The resource, when it is a picture, is the wallpaper — right-click the bare surface to choose one or take it away. Double-click opens a box in place of the desktop |
 | browser, web       | the page, framed; the address bar saves back to the box |
 | mqtt               | the last message on its topic, and every one after it, as the broker sends them. The address is shown with its password hidden, which the box keeps for itself. In a grid cell it is the last value alone: the cell does not listen, the opened box does |
 | anything else      | its icon, and a detail panel with description, resource, metadata and config |
@@ -143,6 +143,12 @@ make run-tui          # box tui
 Early development. The core store (boxes, links, search), the box type registry
 with its validation, the CLI, the web API with a minimal HTML browser, and the
 text UI all work and are covered by tests.
+
+The root box is never an icon of what is filed in it: it shows that box the way
+opening it would, toolbars and all, and one box at a time — dropping another takes
+the slot, and the box it displaces stays in the library. Dropping something on a
+view that already caught the drop (an icon onto a desktop, a box into a folder) is
+not the root's to answer.
 
 In the web app these kinds render as themselves: image, text, markdown, pdf,
 video, archive, file, folder, cabinet, directory, grid, desktop, root, web,

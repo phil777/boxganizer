@@ -775,4 +775,32 @@ pre.text {
 /* A desktop drawn inside a cell keeps its proportions and loses its toolbar. */
 .cell-content .desktop-view,
 .cell-content .desktop-surface { height: 100%; }
-.root-child .desktop-view { height: 100%; }
+
+/* The root's slot holds the child itself, and a child that is shown as itself
+   brings its own toolbar. So the slot is a column: the toolbar keeps the height
+   it needs and the content takes what is left. Putting `height: 100%` on every
+   child of the slot makes the toolbar as tall as the pane and pushes the content
+   off the bottom of the page, where no drop and no right-click can reach it. */
+.root-child {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: none;
+  padding: 0;
+  background: none;
+}
+
+.root-child > * { height: auto; min-height: 0; }
+
+.root-child > .desktop-toolbar,
+.root-child > .grid-toolbar,
+.root-child > .children-toolbar { flex: none; margin-bottom: 0; }
+
+.root-child > :not(.desktop-toolbar):not(.grid-toolbar):not(.children-toolbar) {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.root-child .desktop-view,
+.root-child .grid-board { height: auto; }

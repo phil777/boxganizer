@@ -438,8 +438,11 @@ def test_the_root_box_is_always_its_content(client: TestClient) -> None:
 def test_the_root_view_shows_its_one_child_content(client: TestClient) -> None:
     script = client.get("/static/app.js").text
     assert 'registerView("root", {' in script
-    assert "const child = children[0] || null;" in script
-    assert "renderContent(block, child, { depth: 1 })" in script
+    assert "let child = children[0] || null;" in script
+    # the brief of a child is not enough to be the subject of the page: it carries
+    # nothing the child itself contains, so the one box on screen is fetched whole
+    assert "child = await api.box(child.uuid);" in script
+    assert "renderContent(block, child, { depth: 1, embedded: false })" in script
     assert "Drag a box here from the panel on the left" in script
     assert ".root-empty" in client.get("/static/app.css").text
 
@@ -1164,7 +1167,7 @@ def test_the_resource_field_offers_the_selector(client: TestClient) -> None:
     assert html.count('class="browse" data-resource="nb-resource"') == 1
     assert html.count('class="browse" data-resource="eb-resource"') == 1
     for needle in (
-        "async function openFilePicker(inputId)",
+        "async function openFilePicker(target, startValue)",
         "async function showIn(path)",
         "function pick(chosen)",
         "api.browse(",
@@ -1580,4 +1583,79 @@ def test_the_sensor_view_holds_the_password_back_and_the_connection_short(
     assert "function releaseLive()" in script
     assert "releaseLive();" in script
     assert script.index("function renderMain()") < script.index("releaseLive();")
-    assert "generation !== liveGeneration" in script
+    # A view that is mid-fetch when the pane moves on must abandon, not append.
+    assert "function stillOnScreen(token)" in script
+    assert "const token = paneGeneration;" in script
+    assert "!stillOnScreen(token)" in script
+
+
+# -- the root slot, and the desktop surface it can show -----------------------
+
+
+def test_filing_into_the_root_through_the_api_replaces_the_slot(
+    client: TestClient, populated: BoxStore
+) -> None:
+    """What a drop on the root does: the slot holds one box, and the old one lives on."""
+    root = populated.add(Box(name="way-in", box_type="root"))
+    first = client.post("/api/boxes", json={"name": "First"}).json()
+    second = client.post("/api/boxes", json={"name": "Second"}).json()
+    client.post(f"/api/boxes/{root.uuid}/children", json={"child": first["uuid"]})
+    client.post(f"/api/boxes/{root.uuid}/children", json={"child": second["uuid"]})
+    assert [c["name"] for c in client.get(f"/api/boxes/{root.uuid}").json()["children"]] == [
+        "Second"
+    ]
+    # replaced, not deleted
+    assert client.get("/api/boxes/First").status_code == 200
+
+
+def test_a_desktop_holds_as_many_children_as_it_is_given(
+    client: TestClient, populated: BoxStore
+) -> None:
+    desk = populated.add(Box(name="Wide desk", box_type="desktop"))
+    for name in ("one", "two", "three"):
+        created = client.post("/api/boxes", json={"name": name}).json()
+        client.post(f"/api/boxes/{desk.uuid}/children", json={"child": created["uuid"]})
+    names = [c["name"] for c in client.get(f"/api/boxes/{desk.uuid}").json()["children"]]
+    assert sorted(names) == ["one", "three", "two"]
+
+
+def test_the_root_shows_the_child_itself_and_keeps_what_a_child_took(
+    client: TestClient,
+) -> None:
+    script = client.get("/static/app.js").text
+    # Asked as the subject of the page, not as a tile: a plain box answers an
+    # embedded call with its icon, and a desktop with no toolbar of its own.
+    assert "renderContent(block, child, { depth: 1, embedded: false })" in script
+    # A drop the child's own view already took is not the root's to answer, or
+    # dropping an icon on the desktop shown by the root would replace that desktop.
+    assert "if (event.defaultPrevented) return;" in script
+
+
+def test_the_desktop_surface_answers_right_click_with_its_background(
+    client: TestClient,
+) -> None:
+    script = client.get("/static/app.js").text
+    for needle in (
+        'surface.addEventListener("contextmenu"',
+        'if (event.target.closest(".desktop-icon")) return;',
+        "Set a background image",
+        "Remove the background image",
+        "openFilePicker((chosen) => writeBackground(box, ctx, chosen)",
+        "await api.updateBox(box.uuid, { resource_uri: chosen })",
+    ):
+        assert needle in script, needle
+    # The picker answers a callback now, because a menu holds no field to fill.
+    assert 'typeof picker.target === "function"' in script
+    assert "picker.target(chosen);" in script
+
+
+def test_a_desktops_background_is_its_resource_field(
+    client: TestClient, populated: BoxStore
+) -> None:
+    desk = populated.add(Box(name="Desk two", box_type="desktop"))
+    saved = client.put(
+        f"/api/boxes/{desk.uuid}", json={"resource_uri": "/home/me/wall.png"}
+    ).json()
+    assert saved["resource_uri"] == "/home/me/wall.png"
+    cleared = client.put(f"/api/boxes/{desk.uuid}", json={"resource_uri": ""}).json()
+    assert not cleared["resource_uri"]
