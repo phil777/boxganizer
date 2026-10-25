@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from boxganizer import mqtt
+from boxganizer.errors import MqttError
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
@@ -467,7 +470,7 @@ def test_grid_cells_render_child_content_to_a_bounded_depth(client: TestClient) 
     script = client.get("/static/app.js").text
     assert "MAX_EMBED_DEPTH" in script
     assert "class" in script and 'cell.classList.add("occupied")' in script
-    assert "renderContent(content, child, { depth: childDepth })" in script
+    assert "renderContent(content, child, { depth: childDepth, cell: true })" in script
     assert ".cell-content" in client.get("/static/app.css").text
 
 
@@ -1417,3 +1420,164 @@ def test_removing_a_child_from_the_desktop_takes_only_the_link(
     client.delete(f"/api/boxes/Surface/children/{child}")
     assert "Passport" not in [box.name for box in populated.children("Surface")]
     assert populated.get("Passport").name == "Passport"
+
+
+# -- the mqtt sensor (MQTTResource) ------------------------------------------
+
+SENSOR_ADDRESS = "mqtt://watcher:secretpass@cellar.example:1883"
+
+
+@pytest.fixture
+def sensor(populated: BoxStore) -> Box:
+    """A box that listens to a broker. No test below dials it."""
+    return populated.add(
+        Box(
+            name="Cellar temp",
+            box_type="mqtt",
+            resource_uri=SENSOR_ADDRESS,
+            metadata={"topic": "cellar/temp"},
+        )
+    )
+
+
+def _reading(value: str, *, retained: bool = False, encoding: str = "utf-8") -> mqtt.Reading:
+    return mqtt.Reading(
+        topic="cellar/temp",
+        value=value,
+        received_at=datetime(2026, 10, 25, 8, 4, 5, tzinfo=UTC),
+        retained=retained,
+        encoding=encoding,
+    )
+
+
+def _scripted(events: list[mqtt.Event]) -> mqtt.EventStream:
+    """A broker replaced by a script: the events a test wrote, in order."""
+
+    async def story(target: mqtt.Target) -> AsyncIterator[mqtt.Event]:
+        for event in events:
+            yield event
+
+    return story
+
+
+def test_the_sensor_says_what_it_listens_to(client: TestClient, sensor: Box) -> None:
+    body = client.get("/api/boxes/Cellar temp/mqtt").json()
+    assert body["target"] == {
+        "scheme": "mqtt",
+        "host": "cellar.example",
+        "port": 1883,
+        "topic": "cellar/temp",
+        "secured": False,
+        "credentials": True,
+    }
+    assert body["address"] == "mqtt://watcher:•••@cellar.example:1883"
+    # Nothing has been heard yet, and the endpoint does not wait for a message.
+    assert body["reading"] is None
+
+
+def test_the_way_into_the_broker_stays_in_the_box(populated: BoxStore, sensor: Box) -> None:
+    events = [mqtt.Event("value", _reading("21.4"))]
+    with TestClient(create_app(populated, mqtt_events=_scripted(events))) as test_client:
+        value = test_client.get("/api/boxes/Cellar temp/mqtt")
+        stream = test_client.get("/api/boxes/Cellar temp/mqtt/stream")
+    assert "secretpass" not in value.text
+    assert "secretpass" not in stream.text
+
+
+def test_a_box_that_listens_to_nothing_is_refused(client: TestClient) -> None:
+    response = client.get("/api/boxes/Kitchen/mqtt")
+    assert response.status_code == 415
+    assert response.json()["detail"]["error"] == "not_a_live_box"
+
+
+def test_an_address_that_names_no_host_is_said_in_words(populated: BoxStore) -> None:
+    populated.add(
+        Box(name="Broken", box_type="mqtt", resource_uri="mqtt://", metadata={"topic": "t"})
+    )
+    with TestClient(create_app(populated)) as test_client:
+        response = test_client.get("/api/boxes/Broken/mqtt")
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "bad_mqtt_target"
+    assert "no host" in response.json()["detail"]["reason"]
+
+
+def test_the_stream_carries_every_state_and_every_value(populated: BoxStore, sensor: Box) -> None:
+    events = [
+        mqtt.Event("connecting"),
+        mqtt.Event("live"),
+        mqtt.Event("value", _reading("21.4")),
+        mqtt.Event("value", _reading("21.6", retained=True)),
+    ]
+    with TestClient(create_app(populated, mqtt_events=_scripted(events))) as test_client:
+        response = test_client.get("/api/boxes/Cellar temp/mqtt/stream")
+    assert response.headers["content-type"].startswith("text/event-stream")
+    text = response.text
+    assert "event: connecting" in text
+    assert "event: live" in text
+    assert '"state": "value"' in text
+    assert "21.4" in text and "21.6" in text
+    assert '"retained": true' in text
+    assert '"received_at": "2026-10-25T08:04:05+00:00"' in text
+
+
+def test_the_last_value_is_kept_for_a_page_that_opens_afterwards(
+    populated: BoxStore, sensor: Box
+) -> None:
+    events = [mqtt.Event("value", _reading("21.4"))]
+    with TestClient(create_app(populated, mqtt_events=_scripted(events))) as test_client:
+        test_client.get("/api/boxes/Cellar temp/mqtt/stream")
+        later = test_client.get("/api/boxes/Cellar temp/mqtt").json()
+    assert later["reading"]["value"] == "21.4"
+
+
+def test_a_broker_that_refuses_arrives_as_an_error_event(populated: BoxStore, sensor: Box) -> None:
+    async def refusing(target: mqtt.Target) -> AsyncIterator[mqtt.Event]:
+        yield mqtt.Event("connecting")
+        raise MqttError("connection refused: bad username or password")
+
+    with TestClient(create_app(populated, mqtt_events=refusing)) as test_client:
+        text = test_client.get("/api/boxes/Cellar temp/mqtt/stream").text
+    assert "event: error" in text
+    assert "bad username or password" in text
+
+
+def test_the_sensor_view_shows_the_value_and_listens_for_more(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    for needle in (
+        'registerView("mqtt", mqttView)',
+        'request(`/api/boxes/${encodeURIComponent(ref)}/mqtt`)',
+        "/mqtt/stream",
+        "new EventSource(",
+        'value.className = "mqtt-value"',
+        "listening",
+        "log.prepend(line)",
+        "while (log.children.length > MQTT_HISTORY)",
+    ):
+        assert needle in script, needle
+    css = client.get("/static/app.css").text
+    assert ".mqtt-view" in css
+    assert '.mqtt-state[data-state="live"]' in css
+
+
+def test_the_sensor_view_holds_the_password_back_and_the_connection_short(
+    client: TestClient,
+) -> None:
+    script = client.get("/static/app.js").text
+    # The address it was given is already redacted; the page says so rather than
+    # showing a secret it never received.
+    assert "the user and password stay in the box" in script
+    # A cell shows one reading and says it is only what the server last heard; the
+    # opened box is what holds a stream. The flag has to survive the trip through
+    # renderContent, or a wall of sensors becomes a wall of subscriptions.
+    assert 'if (opts.cell) {' in script
+    assert 'chip.textContent = info.reading ? "last value" : "no value yet";' in script
+    assert "renderContent(content, child, { depth: childDepth, cell: true })" in script
+    assert "{ embedded, depth, cell }" in script
+    # A dropped connection carries no body, and is a retry rather than a refusal.
+    assert 'typeof event.data !== "string"' in script
+    # And what a live box had open is closed when the page moves on.
+    assert "function holdLive(" in script
+    assert "function releaseLive()" in script
+    assert "releaseLive();" in script
+    assert script.index("function renderMain()") < script.index("releaseLive();")
+    assert "generation !== liveGeneration" in script

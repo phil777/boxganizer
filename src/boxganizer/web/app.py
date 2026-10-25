@@ -6,6 +6,7 @@ both, through :func:`boxganizer.web.server.run`). The app owns one :class:`BoxSt
 
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 import tarfile
@@ -15,7 +16,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from boxganizer import __version__, boxtypes, desktop, fslist, grid, infer, paths, thumbs
+from boxganizer import __version__, boxtypes, desktop, fslist, grid, infer, mqtt, paths, thumbs
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -23,6 +24,7 @@ from boxganizer.errors import (
     GridError,
     InvalidBoxContent,
     InvalidBoxName,
+    MqttError,
     PlacementError,
     RootCannotBeFiled,
     UnknownBoxType,
@@ -32,7 +34,7 @@ from boxganizer.store import BoxStore
 
 try:
     from fastapi import Depends, FastAPI, HTTPException, Query, Request
-    from fastapi.responses import HTMLResponse, JSONResponse, Response
+    from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
     from pydantic import BaseModel, Field, JsonValue
@@ -155,11 +157,19 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             store.close()
 
 
-def create_app(store: BoxStore | None = None, *, content_root: Path | str | None = None) -> FastAPI:
+def create_app(
+    store: BoxStore | None = None,
+    *,
+    content_root: Path | str | None = None,
+    mqtt_events: mqtt.EventStream | None = None,
+) -> FastAPI:
     """Build the web app. Pass a store to reuse one (tests, embedding).
 
     `content_root` overrides `$BOXGANIZER_CONTENT_ROOT`, the directory every file
     read and every picker browse is confined to.
+
+    `mqtt_events` replaces how an MQTT box is read. It is there for tests, which
+    feed the page a story instead of a broker; production leaves it alone.
     """
     app = FastAPI(
         title="Boxganizer",
@@ -172,6 +182,8 @@ def create_app(store: BoxStore | None = None, *, content_root: Path | str | None
     app.state.content_root = Path(effective_root).expanduser() if effective_root else None
     app.state.store = store if store is not None else BoxStore()
     app.state.owns_store = store is None
+    app.state.mqtt_events = mqtt_events or mqtt.aiomqtt_events
+    app.state.mqtt_latest = mqtt.Latest()
 
     @app.exception_handler(BoxNotFound)
     async def _not_found(request: Request, exc: BoxNotFound) -> JSONResponse:
@@ -214,6 +226,12 @@ def create_app(store: BoxStore | None = None, *, content_root: Path | str | None
     async def _bad_desktop_move(request: Request, exc: PlacementError) -> JSONResponse:
         return JSONResponse(
             status_code=422, content={"detail": {"error": "bad_desktop_move", "reason": str(exc)}}
+        )
+
+    @app.exception_handler(MqttError)
+    async def _bad_mqtt_target(request: Request, exc: MqttError) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content={"detail": {"error": "bad_mqtt_target", "reason": str(exc)}}
         )
 
     @app.exception_handler(UnknownBoxType)
@@ -469,6 +487,52 @@ def create_app(store: BoxStore | None = None, *, content_root: Path | str | None
             headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=60"},
         )
 
+    @app.get("/api/boxes/{ref}/mqtt")
+    def read_mqtt_value(ref: str, request: Request, store: StoreDep) -> dict[str, object]:
+        """What an MQTT box listens to, and the last value this server heard.
+
+        Answers without connecting to anything: the page calls it to learn the
+        topic and show whatever is already known, then opens the stream.
+        """
+        box = _live_box(store, ref, "mqtt")
+        target = mqtt.parse_target(box.resource_uri, box.metadata.get("topic"))
+        reading = request.app.state.mqtt_latest.of(box.uuid)
+        return {
+            "box": _brief(box),
+            # The password is in the box's own row and nowhere in this answer.
+            "address": mqtt.redact(box.resource_uri),
+            "target": target.as_public_dict(),
+            "reading": reading.as_dict() if reading else None,
+        }
+
+    @app.get("/api/boxes/{ref}/mqtt/stream")
+    def stream_mqtt_values(ref: str, request: Request, store: StoreDep) -> StreamingResponse:
+        """Every message the broker sends, as it arrives, until the page goes away.
+
+        One subscription per open page: when the browser closes, the generator is
+        cancelled and the connection to the broker is dropped with it.
+        """
+        box = _live_box(store, ref, "mqtt")
+        target = mqtt.parse_target(box.resource_uri, box.metadata.get("topic"))
+        source = request.app.state.mqtt_events
+        latest = request.app.state.mqtt_latest
+        box_uuid = box.uuid
+
+        async def feed() -> AsyncIterator[str]:
+            try:
+                async for event in source(target):
+                    if event.reading is not None:
+                        latest.remember(box_uuid, event.reading)
+                    yield _sse(event.state, event.as_dict())
+            except MqttError as exc:
+                yield _sse("error", {"state": "error", "reading": None, "detail": str(exc)})
+
+        return StreamingResponse(
+            feed(),
+            media_type="text/event-stream",
+            headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
+        )
+
     @app.get("/api/boxes/{ref}/children")
     def read_children(ref: str, store: StoreDep) -> list[dict[str, object]]:
         box = store.resolve(ref)
@@ -587,6 +651,27 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _live_box(store: BoxStore, ref: str, source: str) -> Box:
+    """A box whose own type says it reads that kind of live source.
+
+    The type is asked, never the `box_type` string: a subtype of an MQTT box gets
+    the MQTT endpoints for free, which is how the hierarchy is meant to work.
+    """
+    box = store.resolve(ref)
+    kind = boxtypes.get(box.box_type)
+    if kind.live_source != source:
+        raise HTTPException(
+            status_code=415,
+            detail={"error": "not_a_live_box", "type": kind.key, "needs": source},
+        )
+    return box
+
+
+def _sse(event: str, payload: dict[str, object]) -> str:
+    """One server-sent event."""
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
 def _desktop_child(store: BoxStore, parent: Box, child_ref: str) -> Box:

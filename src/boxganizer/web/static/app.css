@@ -599,6 +599,86 @@ pre.text {
 }
 .browser-note { flex: none; font-size: 0.75rem; }
 
+/* ---------- mqtt view ---------- */
+
+.mqtt-view { display: flex; flex-direction: column; gap: 0.5rem; min-height: 0; }
+.mqtt-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; flex: none; }
+
+.mqtt-state {
+  flex: none;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+/* The colour says whether the number on screen is current, so it is worth more
+   than the word: green is a live subscription, amber a retry, red a refusal. */
+.mqtt-state[data-state="live"],
+.mqtt-state[data-state="value"] { border-color: #1a7f37; color: #1a7f37; }
+.mqtt-state[data-state="retrying"] { border-color: #b26a00; color: #b26a00; }
+.mqtt-state[data-state="error"] { border-color: var(--accent); color: var(--accent); }
+/* A grid cell does not listen: it repeats what the server last heard, or says it
+   has nothing. Neither is a live state, so neither wears the live colour. */
+.mqtt-state[data-state="cached"] { border-style: dashed; }
+.mqtt-state[data-state="idle"] { border-style: dashed; opacity: 0.7; }
+
+.mqtt-topic { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
+.mqtt-address { font-size: 0.75rem; overflow-wrap: anywhere; }
+
+.mqtt-readout { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; flex: none; }
+
+.mqtt-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 2rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* A payload that is not text is long and means nothing to the eye: keep it small. */
+.mqtt-value[data-encoding="base64"] { font-size: 0.9rem; font-weight: 400; }
+
+.mqtt-badge {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  opacity: 0.7;
+}
+
+.mqtt-detail { margin: 0; flex: none; }
+
+.mqtt-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  overflow: auto;
+  min-height: 0;
+}
+
+.mqtt-log li {
+  display: flex;
+  gap: 0.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.15rem;
+}
+
+.mqtt-log time { flex: none; opacity: 0.62; }
+
+/* A grid cell holds the number and nothing else; the opened box does the listening. */
+.cell-content .mqtt-log,
+.cell-content .mqtt-address { display: none; }
+.cell-content .mqtt-value { font-size: 1rem; font-weight: 500; }
+
 /* ---------- desktop view ---------- */
 
 .desktop-toolbar {

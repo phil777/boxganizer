@@ -67,6 +67,8 @@ const api = {
     }),
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
   thumbnailUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/thumbnail`,
+  mqtt: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/mqtt`),
+  mqttStreamUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/mqtt/stream`,
   contentUrl: (ref, sub) =>
     `/api/boxes/${encodeURIComponent(ref)}/content?sub=${encodeURIComponent(sub || "")}`,
   listing: (ref, sub) =>
@@ -182,6 +184,39 @@ function formFor(typeKey) {
   return null;
 }
 
+/* ----------------------------------------------------------- live views ---- */
+
+/**
+ * Something a view keeps open — an event stream, a socket. A connection the page
+ * no longer shows is a leak, so a view that opens one hands the way to close it
+ * to `holdLive`, and the main pane calls `releaseLive` before drawing the next
+ * box.
+ *
+ * `liveGeneration` goes up with every release. A view still waiting on a fetch
+ * when that happens sees the number move and abandons its work, rather than
+ * opening a stream behind the page's back for a box nobody is looking at.
+ */
+const liveReleases = new Set();
+let liveGeneration = 0;
+
+function holdLive(release) {
+  liveReleases.add(release);
+  return () => liveReleases.delete(release);
+}
+
+function releaseLive() {
+  liveGeneration += 1;
+  const releases = [...liveReleases];
+  liveReleases.clear();
+  releases.forEach((release) => {
+    try {
+      release();
+    } catch {
+      /* a connection already closed is the answer we were asking for */
+    }
+  });
+}
+
 /* ------------------------------------------------------------- feedback ---- */
 
 let statusTimer = null;
@@ -260,6 +295,8 @@ const context = {
 function renderMain() {
   const canvas = el("canvas");
   canvas.replaceChildren();
+  // Whatever the box that was on screen had open, it is not on screen now.
+  releaseLive();
   const box = state.current;
   if (!box) {
     canvas.append(emptyMessage("Nothing selected. Pick a box on the left."));
@@ -292,10 +329,15 @@ const MAX_EMBED_DEPTH = 2;
 /**
  * Draw one box's content into `container`, as used by grid cells and by the root
  * view. The caller owns the container; this only fills it.
+ *
+ * `cell` says the container is one square of a grid: small, and one of many. A
+ * view that holds a connection open reads it and stays a still number there,
+ * because a wall of twelve live boxes would otherwise be twelve subscriptions.
+ * The root view shows its one child at full size, so it does not set the flag.
  */
-async function renderContent(container, box, { depth, embedded = true }) {
+async function renderContent(container, box, { depth, embedded = true, cell = false }) {
   const view = viewFor(box) || views.get("*");
-  await view.render(container, box, context, "content", { embedded, depth });
+  await view.render(container, box, context, "content", { embedded, depth, cell });
 }
 
 function emptyMessage(text) {
@@ -1296,7 +1338,7 @@ function gridCell(box, ctx, row, column, child, depth) {
     cell.append(content);
     const childDepth = depth + 1;
     if (childDepth <= MAX_EMBED_DEPTH) {
-      renderContent(content, child, { depth: childDepth }).catch((error) => {
+      renderContent(content, child, { depth: childDepth, cell: true }).catch((error) => {
         content.replaceChildren(emptyMessage(error.message));
       });
     } else {
@@ -2428,6 +2470,174 @@ const browserView = {
 registerView("browser", browserView);
 registerView("web", browserView);
 
+/* ------------------------------------------------------------------ mqtt ---- */
+
+/** What the stream reports, in the words a person reading a status wants. */
+const MQTT_STATES = {
+  connecting: "connecting",
+  live: "listening",
+  value: "listening",
+  retrying: "retrying",
+  error: "refused",
+};
+
+/** How many of the last messages the opened box keeps on screen. */
+const MQTT_HISTORY = 8;
+
+/**
+ * A `mqtt` box: the last message published on its topic, and every one after it.
+ *
+ * The value endpoint answers from what the server already heard, so the box is
+ * never blank while the subscription is being made; the stream then pushes each
+ * message as it arrives. The address on screen is the redacted one — a box may
+ * hold `mqtt://user:secret@host/topic`, and the secret stays in the box.
+ *
+ * A grid cell shows the last value alone. One subscription per cell would be one
+ * per box on the wall, and the opened box is where the listening belongs.
+ */
+const mqttView = {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    if (mode !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+
+    const generation = liveGeneration;
+
+    const wrap = document.createElement("div");
+    wrap.className = "mqtt-view";
+    wrap.dataset.uuid = box.uuid;
+
+    const chip = document.createElement("span");
+    chip.className = "mqtt-state";
+    chip.dataset.state = "connecting";
+    chip.textContent = "connecting";
+    const topic = document.createElement("span");
+    topic.className = "mqtt-topic";
+    const address = document.createElement("span");
+    address.className = "mqtt-address muted";
+    const head = document.createElement("div");
+    head.className = "mqtt-head";
+    head.append(chip, topic, address);
+
+    const value = document.createElement("span");
+    value.className = "mqtt-value";
+    value.textContent = "\u2014";
+    const badge = document.createElement("span");
+    badge.className = "mqtt-badge";
+    badge.hidden = true;
+    const when = document.createElement("span");
+    when.className = "mqtt-when muted";
+    const readout = document.createElement("div");
+    readout.className = "mqtt-readout";
+    readout.append(value, badge, when);
+
+    const detail = document.createElement("p");
+    detail.className = "mqtt-detail muted";
+
+    const log = document.createElement("ul");
+    log.className = "mqtt-log";
+
+    wrap.append(head, readout, detail, log);
+    canvas.append(wrap);
+
+    let info;
+    try {
+      info = await api.mqtt(box.uuid);
+    } catch (error) {
+      if (generation !== liveGeneration) return;
+      wrap.replaceChildren(emptyMessage(`This sensor cannot be read: ${error.message}`));
+      return;
+    }
+    if (generation !== liveGeneration) return; // the page moved on mid-fetch
+
+    const target = info.target || {};
+    topic.textContent = target.topic || "";
+    topic.title = `topic ${target.topic}`;
+    address.textContent = info.address || "";
+    if (target.credentials) {
+      address.title = `${address.textContent} — the user and password stay in the box`;
+    }
+
+    function show(reading, { newest = false } = {}) {
+      value.textContent = reading.value === "" ? "(empty message)" : reading.value;
+      value.dataset.encoding = reading.encoding || "utf-8";
+      // The note explains *this* message, so a text message after a binary one
+      // must not be left wearing the binary one's tooltip.
+      value.title =
+        reading.encoding && reading.encoding !== "utf-8"
+          ? `the broker sent bytes that are not text, shown as ${reading.encoding}`
+          : "";
+      badge.hidden = !reading.retained;
+      badge.textContent = "retained";
+      badge.title = "the broker kept this message for a subscription that started later";
+      const at = reading.received_at ? new Date(reading.received_at) : null;
+      when.textContent = at ? at.toLocaleTimeString() : "";
+      if (at) when.title = at.toLocaleString();
+      if (!newest) return;
+
+      const line = document.createElement("li");
+      const clock = document.createElement("time");
+      clock.textContent = at ? at.toLocaleTimeString() : "";
+      if (at) clock.dateTime = reading.received_at;
+      const text = document.createElement("span");
+      text.textContent = reading.value === "" ? "(empty message)" : reading.value;
+      line.append(clock, text);
+      log.prepend(line);
+      while (log.children.length > MQTT_HISTORY) log.lastElementChild.remove();
+    }
+
+    function apply(next, reading, note) {
+      chip.dataset.state = next;
+      chip.textContent = MQTT_STATES[next] || next;
+      detail.textContent = note || "";
+      if (reading) show(reading, { newest: true });
+    }
+
+    if (info.reading) show(info.reading);
+    if (opts.cell) {
+      // A cell never subscribes, so it must not claim to be connecting. It shows
+      // what the server last heard — and says so — or admits it has nothing yet.
+      chip.dataset.state = info.reading ? "cached" : "idle";
+      chip.textContent = info.reading ? "last value" : "no value yet";
+      detail.textContent = info.reading ? "" : `open the box to listen for ${target.topic}`;
+      return;
+    }
+
+    apply("connecting", null, `listening for ${target.topic}`);
+
+    const source = new EventSource(api.mqttStreamUrl(box.uuid));
+    holdLive(() => source.close());
+
+    const accept = (event) => {
+      if (generation !== liveGeneration) {
+        source.close();
+        return;
+      }
+      // A dropped connection is an `error` event too, and it carries no body: the
+      // browser is already going back to the broker, so that is a retry, not a refusal.
+      if (typeof event.data !== "string") {
+        apply("retrying", null, "the stream dropped; going back to the broker");
+        return;
+      }
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        apply("error", null, "the stream sent something that is not a reading");
+        return;
+      }
+      apply(payload.state || event.type, payload.reading || null, payload.detail || "");
+    };
+
+    ["connecting", "live", "value", "retrying", "error"].forEach((name) => {
+      source.addEventListener(name, accept);
+    });
+  },
+};
+
+registerView("mqtt", mqttView);
+
 /* The fallback for every type that has nothing better yet. */
 registerView("*", {
   render(canvas, box, ctx, mode, opts = {}) {
@@ -2462,6 +2672,9 @@ const boxganizer = {
   desktopOptions,
   magnetise,
   viewFor,
+  mqttView,
+  holdLive,
+  releaseLive,
 };
 window.boxganizer = boxganizer;
 
