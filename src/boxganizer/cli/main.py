@@ -37,10 +37,6 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_show_locals=False,
 )
-boxes_app = typer.Typer(help="Create, inspect and delete boxes.", no_args_is_help=True)
-links_app = typer.Typer(help="Put boxes inside other boxes.", no_args_is_help=True)
-app.add_typer(boxes_app, name="box")
-app.add_typer(links_app, name="link")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -180,7 +176,7 @@ def init(ctx: typer.Context, db: DbOption = None) -> None:
         lit(f"already initialised: {path} (nothing added)")
 
 
-@boxes_app.command("add")
+@app.command("add")
 def box_add(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="Unique box name.")],
@@ -250,20 +246,20 @@ def box_add(
         )
 
 
-@boxes_app.command("list")
+@app.command("list")
 def box_list(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", "-n", min=1)] = 50,
     as_json: Annotated[bool, typer.Option("--json", help="Machine readable output.")] = False,
 ) -> None:
-    """List boxes."""
+    """List boxes. `box ls` is the same command."""
     with _open(ctx, _db_of(ctx)) as store:
         found = store.list_boxes(limit=limit)
     if as_json:
         console.print_json(json.dumps([b.to_dict() for b in found]))
         return
     if not found:
-        console.print(Text.assemble("no boxes yet — try ", ("box box add", "bold"), ""))
+        console.print(Text.assemble("no boxes yet — try ", ("box add", "bold"), ""))
         return
     table = Table(title=f"boxes ({len(found)})")
     table.add_column("icon", justify="center")
@@ -274,7 +270,12 @@ def box_list(
     console.print(table)
 
 
-@boxes_app.command("show")
+# The shorter spelling, kept out of the command list so --help shows one entry
+# for this command and points at the alias instead of repeating it.
+app.command("ls", hidden=True)(box_list)
+
+
+@app.command("show")
 def box_show(
     ctx: typer.Context,
     name: str,
@@ -310,7 +311,7 @@ def box_show(
     lit(f"  children : {', '.join(c.name for c in kids) or '-'}")
 
 
-@boxes_app.command("value")
+@app.command("value")
 def box_value(
     ctx: typer.Context,
     name: str,
@@ -350,7 +351,7 @@ def _listens_mqtt(box: Box) -> bool:
     return boxtypes.get(box.box_type).live_source == "mqtt"
 
 
-@boxes_app.command("edit")
+@app.command("edit")
 def box_edit(
     ctx: typer.Context,
     name: str,
@@ -378,11 +379,7 @@ def box_edit(
     say("saved", f"{updated.icon} {updated.name} (#{updated.id})")
 
 
-# Reachable as `box edit` as well as `box box edit`.
-app.command("edit")(box_edit)
-
-
-@boxes_app.command("search")
+@app.command("search")
 def box_search(
     ctx: typer.Context,
     term: str,
@@ -397,7 +394,7 @@ def box_search(
         lit(f"nothing matches {term!r}")
 
 
-@boxes_app.command("rm")
+@app.command("rm")
 def box_remove(
     ctx: typer.Context,
     name: str,
@@ -411,25 +408,33 @@ def box_remove(
     say("deleted", removed.name, style="red")
 
 
-@links_app.command("in")
-def link_in(
+@app.command("link")
+def link_box(
     ctx: typer.Context,
     child: Annotated[str, typer.Argument(help="Box to put inside.")],
     parent: Annotated[str, typer.Argument(help="Box to put it in.")],
 ) -> None:
-    """Put *child* inside *parent*."""
+    """Put a box inside another: `box link CHILD PARENT`.
+
+    `box link Passport Kitchen` puts Passport inside Kitchen. The box named first
+    is the one that moves.
+    """
     with _open(ctx, _db_of(ctx)) as store:
         store.link(parent, child)
     say("linked", f"{child} → {parent}")
 
 
-@links_app.command("out")
-def link_out(
+@app.command("unlink")
+def unlink_box(
     ctx: typer.Context,
-    child: str,
-    parent: str,
+    child: Annotated[str, typer.Argument(help="Box to take out.")],
+    parent: Annotated[str, typer.Argument(help="Box to take it out of.")],
 ) -> None:
-    """Take *child* out of *parent*."""
+    """Take a box out of another: `box unlink CHILD PARENT`.
+
+    `box unlink Passport Kitchen` removes the link that holds Passport in Kitchen;
+    Passport itself stays where it is.
+    """
     with _open(ctx, _db_of(ctx)) as store:
         store.unlink(parent, child)
     lit(f"unlinked {child} from {parent}")
@@ -438,29 +443,26 @@ def link_out(
 @app.command()
 def tree(
     ctx: typer.Context,
-    name: Annotated[str | None, typer.Argument(help="Root box. Omit to list roots.")] = None,
+    name: Annotated[
+        str | None,
+        typer.Argument(help="Box to start from. Omit to start from the root box."),
+    ] = None,
     depth: Annotated[int, typer.Option("--depth", "-d", min=1, max=20)] = 10,
 ) -> None:
-    """Print the containment tree below *name*.
+    """Print the containment tree below *name*, or below the root box.
+
+    Without a name the tree starts at the root box — asked of the database by type,
+    so a library with thousands of boxes still starts in the same place.
 
     The graph may hold cycles, so a box that turns up inside itself is marked and
     not followed again.
     """
     with _open(ctx, _db_of(ctx)) as store:
-        roots = [store.get(name)] if name else _find_roots(store)
-        if not roots:
-            console.print("no box without a parent — the graph is all cycles; each box once")
-            roots = store.list_boxes(limit=200)
-        started: set[str] = set()
-        for root_box in roots:
-            if root_box.key in started:
-                continue
-            started.add(root_box.key)
-            _print_tree(store, root_box, level=0, max_depth=depth, path=())
-
-
-def _find_roots(store: BoxStore) -> list[Box]:
-    return [box for box in store.list_boxes() if not store.parents(box.name)]
+        start = store.get(name) if name else store.root_box()
+        if start is None:
+            _fail("no root box in this library — run `box init`")
+            raise typer.Exit(code=1)
+        _print_tree(store, start, level=0, max_depth=depth, path=())
 
 
 def _print_tree(

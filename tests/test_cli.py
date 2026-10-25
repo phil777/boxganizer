@@ -42,56 +42,56 @@ def test_status_reports_the_path(db_path: Path) -> None:
 
 
 def test_add_then_list(db_path: Path) -> None:
-    result = invoke(db_path, "box", "add", "Kitchen", "-d", "Room for cooking", "-m", "floor=0")
+    result = invoke(db_path, "add", "Kitchen", "-d", "Room for cooking", "-m", "floor=0")
     assert result.exit_code == 0
     assert "added" in result.output
-    listing = invoke(db_path, "box", "list")
+    listing = invoke(db_path, "list")
     assert "Kitchen" in listing.output
     assert "Room for cooking" in listing.output
 
 
 def test_list_on_an_empty_store_is_polite(db_path: Path) -> None:
-    result = invoke(db_path, "box", "list")
+    result = invoke(db_path, "list")
     assert result.exit_code == 0
     assert "no boxes" in result.output
 
 
 def test_list_as_json(db_path: Path) -> None:
-    invoke(db_path, "box", "add", "Garage")
-    result = invoke(db_path, "box", "list", "--json")
+    invoke(db_path, "add", "Garage")
+    result = invoke(db_path, "list", "--json")
     assert '"Garage"' in result.output
 
 
 def test_show_prints_relations(db_path: Path) -> None:
-    invoke(db_path, "box", "add", "House")
-    invoke(db_path, "box", "add", "Attic")
-    invoke(db_path, "link", "in", "Attic", "House")
-    shown = invoke(db_path, "box", "show", "Attic")
+    invoke(db_path, "add", "House")
+    invoke(db_path, "add", "Attic")
+    invoke(db_path, "link", "Attic", "House")
+    shown = invoke(db_path, "show", "Attic")
     assert "House" in shown.output
     assert "parents" in shown.output
 
 
 def test_search_from_the_shell(db_path: Path) -> None:
-    invoke(db_path, "box", "add", "Books", "-d", "Novels and manuals")
-    result = invoke(db_path, "box", "search", "manual")
+    invoke(db_path, "add", "Books", "-d", "Novels and manuals")
+    result = invoke(db_path, "search", "manual")
     assert "Books" in result.output
 
 
 def test_remove(db_path: Path) -> None:
-    invoke(db_path, "box", "add", "Temp")
-    result = invoke(db_path, "box", "rm", "Temp", "-y")
+    invoke(db_path, "add", "Temp")
+    result = invoke(db_path, "rm", "Temp", "-y")
     assert "deleted" in result.output
     with BoxStore(db_path) as store:
         assert store.count() == 0
 
 
 def test_bad_meta_is_rejected(db_path: Path) -> None:
-    result = invoke(db_path, "box", "add", "Box", "-m", "no-equals-sign")
+    result = invoke(db_path, "add", "Box", "-m", "no-equals-sign")
     assert result.exit_code != 0
 
 
 def test_unknown_box_raises_the_core_error(db_path: Path) -> None:
-    result = invoke(db_path, "box", "show", "Ghost")
+    result = invoke(db_path, "show", "Ghost")
     assert isinstance(result.exception, BoxNotFound)
 
 
@@ -166,12 +166,13 @@ def test_tui_opens_the_terminal_app(db_path: Path, monkeypatch: pytest.MonkeyPat
 
 def test_markup_characters_in_box_data_stay_visible(db_path: Path) -> None:
     """Rich must never eat brackets that a human typed into a box."""
-    invoke(db_path, "box", "add", "Plan [bold]A[/]", "-d", "cost [red]100[/] euros")
-    invoke(db_path, "box", "add", "Budget [2026]")
-    shown = invoke(db_path, "box", "show", "Plan [bold]A[/]")
+    invoke(db_path, "init")  # the cabinet is what the tree starts from below
+    invoke(db_path, "add", "Plan [bold]A[/]", "-d", "cost [red]100[/] euros")
+    invoke(db_path, "add", "Budget [2026]")
+    shown = invoke(db_path, "show", "Plan [bold]A[/]")
     assert "Plan [bold]A[/]" in shown.output
     assert "cost [red]100[/] euros" in shown.output
-    listing = invoke(db_path, "box", "list")
+    listing = invoke(db_path, "list")
     assert "Budget [2026]" in listing.output
     tree = invoke(db_path, "tree")
     assert "Budget [2026]" in tree.output
@@ -204,7 +205,7 @@ def test_the_install_hint_reaches_stderr_with_its_brackets(
 def test_main_turns_a_core_error_into_exit_code_1(
     db_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["box", "--db", str(db_path), "box", "show", "Ghost"])
+    monkeypatch.setattr(sys, "argv", ["box", "--db", str(db_path), "show", "Ghost"])
     with pytest.raises(SystemExit) as exit_info:
         main()
     assert exit_info.value.code == 1
@@ -251,38 +252,38 @@ def test_types_selectable_leaves_out_the_grouping_levels(
 
 
 def test_add_a_box_of_a_type_and_show_it(db_path: Path) -> None:
-    result = invoke(db_path, "box", "add", "Notes", "-t", "markdown", "-r", "/tmp/notes.md")
+    result = invoke(db_path, "add", "Notes", "-t", "markdown", "-r", "/tmp/notes.md")
     assert result.exit_code == 0
-    shown = invoke(db_path, "box", "show", "Notes")
+    shown = invoke(db_path, "show", "Notes")
     assert "Markdown (markdown)" in shown.output
 
 
 def test_the_type_is_in_the_json_view(db_path: Path) -> None:
-    invoke(db_path, "box", "add", "Pic", "-t", "image", "-r", "/tmp/a.png")
-    result = invoke(db_path, "box", "list", "--json")
+    invoke(db_path, "add", "Pic", "-t", "image", "-r", "/tmp/a.png")
+    result = invoke(db_path, "list", "--json")
     assert '"box_type": "image"' in result.output
 
 
 def test_an_unknown_type_is_refused_by_the_store(db_path: Path) -> None:
     from boxganizer.errors import UnknownBoxType
 
-    result = invoke(db_path, "box", "add", "Odd", "-t", "spreadsheet")
+    result = invoke(db_path, "add", "Odd", "-t", "spreadsheet")
     assert isinstance(result.exception, UnknownBoxType)
 
 
 def test_a_box_that_fails_its_type_is_refused(db_path: Path) -> None:
     from boxganizer.errors import InvalidBoxContent
 
-    result = invoke(db_path, "box", "add", "Fake", "-t", "pdf", "-r", "/tmp/a.png")
+    result = invoke(db_path, "add", "Fake", "-t", "pdf", "-r", "/tmp/a.png")
     assert isinstance(result.exception, InvalidBoxContent)
 
 
 def test_the_shell_refuses_to_put_a_box_inside_an_image(db_path: Path) -> None:
     from boxganizer.errors import ChildrenNotAllowed
 
-    invoke(db_path, "box", "add", "Pic", "-t", "image", "-r", "/tmp/a.png")
-    invoke(db_path, "box", "add", "Note")
-    result = invoke(db_path, "link", "in", "Note", "Pic")
+    invoke(db_path, "add", "Pic", "-t", "image", "-r", "/tmp/a.png")
+    invoke(db_path, "add", "Note")
+    result = invoke(db_path, "link", "Note", "Pic")
     assert isinstance(result.exception, ChildrenNotAllowed)
 
 
@@ -301,10 +302,10 @@ def test_a_box_from_a_newer_version_is_still_readable(db_path: Path) -> None:
     finally:
         connection.close()
 
-    shown = invoke(db_path, "box", "show", "Future thing")
+    shown = invoke(db_path, "show", "Future thing")
     assert shown.exit_code == 0
     assert "hologram (unknown type" in shown.output
-    assert invoke(db_path, "box", "list").exit_code == 0
+    assert invoke(db_path, "list").exit_code == 0
 
     with BoxStore(db_path) as store, pytest.raises(UnknownBoxType):
         store.update(store.get("Future thing"))
@@ -347,25 +348,30 @@ def test_init_on_a_seeded_library_adds_nothing(
 
 
 def test_a_new_box_has_no_parent_by_default(db_path: Path) -> None:
-    """The root holds one box; filing every new box there would keep evicting it."""
+    """The root holds one box; filing every new box there would keep evicting it.
+
+    The cabinet is not counted here: holding every box is what a cabinet is, and it
+    says nothing about where the box was filed by hand.
+    """
     invoke(db_path, "init")
-    invoke(db_path, "box", "add", "Kitchen")
+    invoke(db_path, "add", "Kitchen")
     with BoxStore(db_path) as store:
-        assert store.parents("Kitchen") == []
+        filed = [box.name for box in store.parents("Kitchen") if box.name != "cabinet"]
+        assert filed == []
         assert [box.name for box in store.children("root")] == ["cabinet"]
 
 
 def test_the_root_slot_can_be_taken_on_purpose(db_path: Path) -> None:
     invoke(db_path, "init")
-    invoke(db_path, "box", "add", "Workshop", "--parent", "root")
+    invoke(db_path, "add", "Workshop", "--parent", "root")
     with BoxStore(db_path) as store:
         assert [box.name for box in store.children("root")] == ["Workshop"]
         assert store.exists("cabinet")
 
 
 def test_parent_names_the_container(db_path: Path) -> None:
-    invoke(db_path, "box", "add", "House")
-    result = invoke(db_path, "box", "add", "Kitchen", "--parent", "House")
+    invoke(db_path, "add", "House")
+    result = invoke(db_path, "add", "Kitchen", "--parent", "House")
     assert "in House" in result.output
     with BoxStore(db_path) as store:
         assert [box.name for box in store.children("House")] == ["Kitchen"]
@@ -376,26 +382,27 @@ def test_parent_names_the_container(db_path: Path) -> None:
 
 def test_no_parent_leaves_the_box_at_the_top(db_path: Path) -> None:
     invoke(db_path, "init")
-    invoke(db_path, "box", "add", "Loose", "--no-parent")
+    invoke(db_path, "add", "Loose", "--no-parent")
     with BoxStore(db_path) as store:
-        assert store.parents("Loose") == []
+        filed = [box.name for box in store.parents("Loose") if box.name != "cabinet"]
+        assert filed == []
 
 
 def test_an_unknown_parent_is_refused_before_anything_is_written(db_path: Path) -> None:
-    result = invoke(db_path, "box", "add", "Kitchen", "--parent", "Nowhere")
+    result = invoke(db_path, "add", "Kitchen", "--parent", "Nowhere")
     assert result.exit_code != 0
     with BoxStore(db_path) as store:
         assert store.count() == 0
 
 
 def test_parent_and_no_parent_cannot_be_combined(db_path: Path) -> None:
-    invoke(db_path, "box", "add", "House")
-    result = invoke(db_path, "box", "add", "X", "--parent", "House", "--no-parent")
+    invoke(db_path, "add", "House")
+    result = invoke(db_path, "add", "X", "--parent", "House", "--no-parent")
     assert result.exit_code != 0
 
 
 def test_a_box_cannot_be_its_own_parent(db_path: Path) -> None:
-    result = invoke(db_path, "box", "add", "Ouroboros", "--parent", "Ouroboros")
+    result = invoke(db_path, "add", "Ouroboros", "--parent", "Ouroboros")
     assert result.exit_code != 0
     with BoxStore(db_path) as store:
         assert store.count() == 0
@@ -433,7 +440,7 @@ def _use_editor(script: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_edit_rewrites_the_row_through_the_editor(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    invoke(db_path, "add", "Thing", "-d", "first")
     _use_editor(EDIT_SCRIPT, tmp_path, monkeypatch)
 
     result = invoke(db_path, "edit", "Thing")
@@ -449,9 +456,9 @@ def test_edit_rewrites_the_row_through_the_editor(
 def test_box_box_edit_is_the_same_command(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    invoke(db_path, "add", "Thing", "-d", "first")
     _use_editor(EDIT_SCRIPT, tmp_path, monkeypatch)
-    assert invoke(db_path, "box", "edit", "Thing").exit_code == 0
+    assert invoke(db_path, "edit", "Thing").exit_code == 0
     with BoxStore(db_path) as store:
         assert store.get("Thing").description == "second"
 
@@ -461,7 +468,7 @@ def test_edit_can_be_told_which_editor_to_use(
 ) -> None:
     editor = tmp_path / "nano-ish.py"
     editor.write_text(EDIT_SCRIPT.lstrip())
-    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    invoke(db_path, "add", "Thing", "-d", "first")
     result = invoke(db_path, "edit", "Thing", "--editor", f"{sys.executable} {editor}")
     assert result.exit_code == 0
     with BoxStore(db_path) as store:
@@ -471,7 +478,7 @@ def test_edit_can_be_told_which_editor_to_use(
 def test_editing_nothing_changes_nothing(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    invoke(db_path, "add", "Thing", "-d", "first")
     _use_editor("import sys\n", tmp_path, monkeypatch)  # the editor merely closes
     result = invoke(db_path, "edit", "Thing")
     assert "left unchanged" in result.output
@@ -482,7 +489,7 @@ def test_editing_nothing_changes_nothing(
 def test_a_broken_file_leaves_the_box_alone(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    invoke(db_path, "add", "Thing", "-d", "first")
     _use_editor(BROKEN_SCRIPT, tmp_path, monkeypatch)
     result = invoke(db_path, "edit", "Thing")
     assert isinstance(result.exception, EditError)
@@ -493,7 +500,7 @@ def test_a_broken_file_leaves_the_box_alone(
 def test_a_failing_editor_aborts(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    invoke(db_path, "box", "add", "Thing", "-d", "first")
+    invoke(db_path, "add", "Thing", "-d", "first")
     _use_editor(FAILING_SCRIPT, tmp_path, monkeypatch)
     result = invoke(db_path, "edit", "Thing")
     assert isinstance(result.exception, EditError)
@@ -506,7 +513,7 @@ def test_no_editor_configured_is_reported_clearly(
 ) -> None:
     from boxganizer.errors import EditError as _EditError
 
-    invoke(db_path, "box", "add", "Thing")
+    invoke(db_path, "add", "Thing")
     monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.delenv("VISUAL", raising=False)
     result = invoke(db_path, "edit", "Thing")
@@ -517,8 +524,8 @@ def test_no_editor_configured_is_reported_clearly(
 def test_edit_does_not_touch_links(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    invoke(db_path, "box", "add", "House")
-    invoke(db_path, "box", "add", "Thing", "-d", "first", "--parent", "House")
+    invoke(db_path, "add", "House")
+    invoke(db_path, "add", "Thing", "-d", "first", "--parent", "House")
     _use_editor(EDIT_SCRIPT, tmp_path, monkeypatch)
     invoke(db_path, "edit", "Thing")
     with BoxStore(db_path) as store:
@@ -531,10 +538,10 @@ def test_edit_does_not_touch_links(
 
 def test_tree_survives_a_cycle(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COLUMNS", "200")
-    invoke(db_path, "box", "add", "Mirror")
-    invoke(db_path, "box", "add", "Reflection")
-    invoke(db_path, "link", "in", "Reflection", "Mirror")
-    result = invoke(db_path, "link", "in", "Mirror", "Reflection")
+    invoke(db_path, "add", "Mirror")
+    invoke(db_path, "add", "Reflection")
+    invoke(db_path, "link", "Reflection", "Mirror")
+    result = invoke(db_path, "link", "Mirror", "Reflection")
     assert result.exit_code == 0
     shown = invoke(db_path, "tree", "Mirror")
     assert "cycle" in shown.output
@@ -543,24 +550,54 @@ def test_tree_survives_a_cycle(db_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def test_tree_of_a_box_inside_itself(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COLUMNS", "200")
-    invoke(db_path, "box", "add", "Ouroboros", "--no-parent")
-    invoke(db_path, "link", "in", "Ouroboros", "Ouroboros")
+    invoke(db_path, "add", "Ouroboros", "--no-parent")
+    invoke(db_path, "link", "Ouroboros", "Ouroboros")
     shown = invoke(db_path, "tree", "Ouroboros")
     assert "cycle" in shown.output
 
 
-def test_tree_without_a_root_still_prints_something(
+def test_tree_without_a_root_box_says_the_library_is_not_initialised(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No root box is a fact to report, not a reason to guess at a starting point."""
     monkeypatch.setenv("COLUMNS", "200")
-    invoke(db_path, "box", "add", "X", "--no-parent")
-    invoke(db_path, "box", "add", "Y", "--no-parent")
-    invoke(db_path, "link", "in", "Y", "X")
-    invoke(db_path, "link", "in", "X", "Y")
-    # both boxes now have a parent, so there is no root to start from
+    invoke(db_path, "add", "X", "--no-parent")
+    invoke(db_path, "add", "Y", "--no-parent")
+    invoke(db_path, "link", "Y", "X")
+    invoke(db_path, "link", "X", "Y")
+    shown = invoke(db_path, "tree")
+    assert shown.exit_code == 1
+    combined = shown.output + getattr(shown, "stderr", "")
+    assert "no root box in this library" in combined
+
+
+def test_tree_starts_at_the_root_box_when_no_name_is_given(db_path: Path) -> None:
+    invoke(db_path, "init")
+    invoke(db_path, "add", "Attic")
+    invoke(db_path, "link", "Attic", "cabinet")
     shown = invoke(db_path, "tree")
     assert shown.exit_code == 0
-    assert "X" in shown.output and "Y" in shown.output
+    assert shown.output.strip().splitlines()[0].strip() == "\U0001f332 root"
+
+
+def test_tree_still_starts_where_it_is_told(db_path: Path) -> None:
+    invoke(db_path, "init")
+    invoke(db_path, "add", "Garage")
+    invoke(db_path, "add", "Drill", "--parent", "Garage")
+    shown = invoke(db_path, "tree", "Garage")
+    assert shown.exit_code == 0
+    assert shown.output.strip().splitlines()[0].strip().endswith("Garage")
+
+
+def test_the_old_box_group_and_link_spellings_are_gone(db_path: Path) -> None:
+    """The commands moved; the old forms must fail rather than quietly work."""
+    assert invoke(db_path, "box", "add", "X").exit_code != 0
+    assert invoke(db_path, "link", "in", "X", "Y").exit_code != 0
+
+
+def test_ls_and_list_answer_the_same_question(db_path: Path) -> None:
+    invoke(db_path, "add", "Kitchen")
+    assert invoke(db_path, "ls").output == invoke(db_path, "list").output
 
 
 # -- the value of an mqtt sensor (MQTTResource) -------------------------------
@@ -582,7 +619,6 @@ def _broker(monkeypatch: pytest.MonkeyPatch, payloads: list[bytes]) -> None:
 def _add_cellar_sensor(db_path: Path) -> None:
     result = invoke(
         db_path,
-        "box",
         "add",
         "Cellar",
         "-t",
@@ -600,14 +636,14 @@ def test_box_value_prints_what_the_broker_sent(
 ) -> None:
     _add_cellar_sensor(db_path)
     _broker(monkeypatch, [b"21.4"])
-    result = invoke(db_path, "box", "value", "Cellar")
+    result = invoke(db_path, "value", "Cellar")
     assert result.exit_code == 0
     assert "21.4" in result.output
 
 
 def test_box_value_keeps_the_password_out_of_the_terminal(db_path: Path) -> None:
     _add_cellar_sensor(db_path)
-    shown = invoke(db_path, "box", "show", "Cellar")
+    shown = invoke(db_path, "show", "Cellar")
     assert shown.exit_code == 0
     assert "secretpass" not in shown.output
     assert "cellar.example" in shown.output
@@ -618,11 +654,11 @@ def test_box_value_fails_when_nothing_arrives(
 ) -> None:
     _add_cellar_sensor(db_path)
     _broker(monkeypatch, [])
-    result = invoke(db_path, "box", "value", "Cellar", "--wait", "0.2")
+    result = invoke(db_path, "value", "Cellar", "--wait", "0.2")
     assert result.exit_code == 1
 
 
 def test_box_value_refuses_a_box_that_listens_to_nothing(db_path: Path) -> None:
-    invoke(db_path, "box", "add", "Kitchen")
-    result = invoke(db_path, "box", "value", "Kitchen")
+    invoke(db_path, "add", "Kitchen")
+    result = invoke(db_path, "value", "Kitchen")
     assert result.exit_code == 1
