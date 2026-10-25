@@ -17,7 +17,8 @@ const state = {
   current: null, // the box on screen
   trail: [], // boxes walked through to get here, oldest first
   pendingCell: null, // cell the modal should place the new box in
-  mode: "icon", // "icon" | "content" for the current box
+  pendingPlace: null, // spot on a desktop the modal should place the new box at
+  searchExpanded: "", // what the last search widened the typed words into
 };
 
 /* ------------------------------------------------------------------ api ---- */
@@ -258,12 +259,6 @@ async function openBox(ref, options = {}) {
     // A child opened from a view extends the path; anything else starts a new one.
     state.trail = options.trail ? [...options.trail, box] : [box];
     state.current = box;
-    // Content first: what a box shows is its content, and its icon is the
-    // alternative. A saved preference wins, then the mode we are browsing in.
-    // The root box is always its content — it exists to hold what is inside it.
-    state.mode = isRootType(box)
-      ? "content"
-      : setting(box, "display", options.mode || "content");
     renderMain();
     renderBreadcrumb();
     markSelected();
@@ -284,15 +279,6 @@ async function saveSetting(key, value, { rerender = true } = {}) {
   }
 }
 
-async function setMode(mode) {
-  state.mode = mode;
-  document.querySelectorAll("#mode-toggle button").forEach((button) => {
-    button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
-  });
-  renderMain();
-  await saveSetting("display", mode, { rerender: false });
-}
-
 /* ------------------------------------------------------------ main pane ---- */
 
 const context = {
@@ -302,8 +288,7 @@ const context = {
   saveSection,
   newBox: openNewBoxModal,
   trail: () => state.trail,
-  mode: () => state.mode,
-  reload: () => openBox(state.current.uuid, { mode: state.mode }),
+  reload: () => openBox(state.current.uuid),
   showMenu,
   removeFrom,
   edit: openEditBoxModal,
@@ -319,21 +304,12 @@ function renderMain() {
     canvas.append(emptyMessage("Nothing selected. Pick a box on the left."));
     return;
   }
-  const forced = isRootType(box);
-  document.querySelectorAll("#mode-toggle button").forEach((button) => {
-    button.setAttribute("aria-pressed", String(button.dataset.mode === state.mode));
-    button.disabled = forced && button.dataset.mode === "icon";
-    button.title =
-      forced && button.dataset.mode === "icon"
-        ? "The root box always shows what is inside it"
-        : `Show the box as its ${button.dataset.mode}`;
-  });
   const view = viewFor(box);
   if (!view) {
     canvas.append(emptyMessage(`No view for type ${box.box_type}.`));
     return;
   }
-  view.render(canvas, box, context, state.mode, { embedded: false, depth: 0 });
+  view.render(canvas, box, context, "content", { embedded: false, depth: 0 });
 }
 
 /**
@@ -388,7 +364,7 @@ function canGoUp() {
 
 function openTo(index) {
   const target = state.trail[index];
-  openBox(target.uuid, { trail: state.trail.slice(0, index), mode: state.mode });
+  openBox(target.uuid, { trail: state.trail.slice(0, index) });
 }
 
 async function goUp() {
@@ -397,7 +373,7 @@ async function goUp() {
     return;
   }
   const parents = (state.current && state.current.parents) || [];
-  if (parents.length) await openBox(parents[0].uuid, { mode: state.mode });
+  if (parents.length) await openBox(parents[0].uuid);
 }
 
 /**
@@ -421,10 +397,34 @@ async function saveSection(section, patch, { rerender = true } = {}) {
 
 /* ------------------------------------------------------------ left pane ---- */
 
+/**
+ * The search field's answer, with the one thing a JSON body cannot carry: what the
+ * words were widened to on the way. A list that quietly also searched for synonyms
+ * and near-miss spellings would leave someone wondering why their box did not turn
+ * up, so the panel says what it looked for.
+ */
+async function searchBoxes(term) {
+  const response = await fetch(`/api/search?q=${encodeURIComponent(term)}`);
+  if (!response.ok) {
+    throw new Error(`search failed: HTTP ${response.status}`);
+  }
+  return {
+    boxes: await response.json(),
+    expanded: response.headers.get("X-Search-Expanded") || "",
+  };
+}
+
 async function refreshSide() {
   const term = el("search").value.trim();
   try {
-    state.boxes = term ? await api.search(term) : await api.boxes();
+    if (term) {
+      const answer = await searchBoxes(term);
+      state.boxes = answer.boxes;
+      state.searchExpanded = answer.expanded;
+    } else {
+      state.boxes = await api.boxes();
+      state.searchExpanded = "";
+    }
   } catch (error) {
     status(error.message, true);
     return;
@@ -454,8 +454,17 @@ function renderSide() {
     kind.className = "kind";
     kind.textContent = (state.types.get(box.box_type) || {}).is_root ? "root of the graph" : box.box_type;
     item.append(glyph, name, kind);
+    // A box found in its file says so, and shows the words that answered — otherwise
+    // it looks like the search got it wrong.
+    if (box.match && box.match.how === "content" && box.match.passage) {
+      const passage = document.createElement("span");
+      passage.className = "hit-passage muted";
+      passage.textContent = box.match.passage;
+      item.append(passage);
+      item.classList.add("content-hit");
+    }
     item.addEventListener("click", () => openBox(box.uuid));
-    item.addEventListener("dblclick", () => openBox(box.uuid, { mode: "content" }));
+    item.addEventListener("dblclick", () => openBox(box.uuid));
     item.addEventListener("dragstart", (event) => {
       event.dataTransfer.setData("text/plain", box.uuid);
       event.dataTransfer.effectAllowed = "move";
@@ -467,6 +476,14 @@ function renderSide() {
     list.append(item);
   });
   el("side-status").textContent = `${state.boxes.length} box${state.boxes.length === 1 ? "" : "es"}`;
+  const note = el("search-note");
+  if (note) {
+    // The server sends this only when it actually added something to the words, so a
+    // search that needed no widening says nothing — a note repeating the search back is
+    // noise, and noise teaches people to stop reading the notes.
+    note.hidden = !state.searchExpanded;
+    note.textContent = state.searchExpanded ? `searched: ${state.searchExpanded}` : "";
+  }
   markSelected();
 }
 
@@ -481,8 +498,7 @@ function markSelected() {
 /** The items every box gets, wherever it is shown, plus the caller's own. */
 function boxMenuItems(box, extra = []) {
   return [
-    { label: "Open", run: () => openBox(box.uuid, { mode: "content" }) },
-    { label: "Show as icon", run: () => openBox(box.uuid, { mode: "icon" }) },
+    { label: "Open", run: () => openBox(box.uuid) },
     { separator: true },
     { label: "Modify…", run: () => openEditBoxModal(box) },
     ...extra,
@@ -530,27 +546,116 @@ function hideMenu() {
 
 /* ------------------------------------------------------------- new box ----- */
 
-function fillTypeChoices() {
-  const selects = [el("nb-type"), el("eb-type")].filter(Boolean);
-  const selectable = [...state.types.values()].filter((type) => !type.abstract);
+/**
+ * The type menu, narrowed by what has been typed.
+ *
+ * Forty-one kinds do not fit a glance, so each dialog has a filter in front of its
+ * menu: a few letters cut the list to the types whose key, label, one-line summary
+ * or branch match. The select stays the source of truth — every other part of the
+ * dialog reads its value — so filtering can never desynchronise the form from what
+ * will be created. The type already chosen is always kept among the options even
+ * when the letters exclude it: narrowing the list is not a way to lose a choice.
+ */
+const TYPE_CONTROLS = [
+  { select: "nb-type", filter: "nb-type-filter", count: "nb-type-count" },
+  { select: "eb-type", filter: "eb-type-filter", count: "eb-type-count" },
+];
+
+function typeMatchesTerm(type, term) {
+  if (!term) return true;
+  const branch = ((type.ancestors || [])[0] || "box").toLowerCase();
+  return (
+    type.key.toLowerCase().includes(term) ||
+    type.label.toLowerCase().includes(term) ||
+    (type.summary || "").toLowerCase().includes(term) ||
+    branch.includes(term)
+  );
+}
+
+function renderTypeOptions(select, term) {
+  const chosen = select.value;
   const groups = new Map();
-  selectable.forEach((type) => {
-    const branch = (type.ancestors || [])[0] || "box";
-    if (!groups.has(branch)) groups.set(branch, []);
-    groups.get(branch).push(type);
+  let matches = 0;
+  [...state.types.values()]
+    .filter((type) => !type.abstract)
+    .forEach((type) => {
+      const hit = typeMatchesTerm(type, term);
+      if (hit) matches += 1;
+      // the chosen type rides along even when the letters reject it
+      if (!hit && type.key !== chosen) return;
+      const branch = (type.ancestors || [])[0] || "box";
+      if (!groups.has(branch)) groups.set(branch, []);
+      groups.get(branch).push(type);
+    });
+
+  select.replaceChildren();
+  groups.forEach((types, branch) => {
+    const group = document.createElement("optgroup");
+    group.label = branch;
+    types.forEach((type) => {
+      const option = document.createElement("option");
+      option.value = type.key;
+      option.textContent = `${type.icon} ${type.label}`;
+      group.append(option);
+    });
+    select.append(group);
   });
-  selects.forEach((select) => {
-    select.replaceChildren();
-    groups.forEach((types, branch) => {
-      const group = document.createElement("optgroup");
-      group.label = branch;
-      types.forEach((type) => {
-        const option = document.createElement("option");
-        option.value = type.key;
-        option.textContent = `${type.icon} ${type.label}`;
-        group.append(option);
-      });
-      select.append(group);
+  if (chosen) select.value = chosen;
+  return matches;
+}
+
+function fillTypeChoices() {
+  TYPE_CONTROLS.forEach(({ select: id, filter: filterId, count: countId }) => {
+    const select = el(id);
+    if (!select) return;
+    const filter = el(filterId);
+    const term = filter ? filter.value.trim().toLowerCase() : "";
+    const matches = renderTypeOptions(select, term);
+    const count = el(countId);
+    if (count) count.textContent = term ? `— ${matches} matching` : "";
+    // One kind left is the answer: take it, so typing a name lands on it and the
+    // summary and the per-type fields follow immediately.
+    if (term && matches === 1) {
+      const only = [...state.types.values()].find((type) => !type.abstract && typeMatchesTerm(type, term));
+      if (only && select.value !== only.key) {
+        select.value = only.key;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    }
+  });
+}
+
+/**
+ * Clear the letters so the whole menu is there again, and put a chosen type in the
+ * select. Opening a dialog must never inherit the leftovers of the last one.
+ */
+function resetTypeFilter(selectId) {
+  const control = TYPE_CONTROLS.find((entry) => entry.select === selectId);
+  if (!control) return;
+  const filter = el(control.filter);
+  if (filter) filter.value = "";
+  const count = el(control.count);
+  if (count) count.textContent = "";
+  renderTypeOptions(el(selectId), "");
+}
+
+function wireTypeFilters() {
+  TYPE_CONTROLS.forEach(({ select: selectId, filter: filterId }) => {
+    const filter = el(filterId);
+    const select = el(selectId);
+    if (!filter || !select) return;
+    filter.addEventListener("input", () => fillTypeChoices());
+    // Escape clears the letters, which brings the whole menu back.
+    filter.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && filter.value) {
+        event.stopPropagation();
+        filter.value = "";
+        fillTypeChoices();
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        select.focus();
+      }
     });
   });
 }
@@ -665,7 +770,10 @@ async function openNewBoxModal(options = {}) {
   // (`ctx.newBox(box.uuid)`) or an object of choices. Both mean the same thing, so
   // both preselect the parent: the user said where the box belongs.
   const choices = typeof options === "string" ? { parent: options } : options || {};
+  resetTypeFilter(CREATE_MODAL.type);
   state.pendingCell = choices.cell || null;
+  // A desktop menu hands over the spot its right-click fell on.
+  state.pendingPlace = choices.place || null;
   await fillParentChoices(choices.parent);
   if (choices.parent) el("nb-parent").value = choices.parent;
   if (choices.boxType) el(CREATE_MODAL.type).value = choices.boxType;
@@ -683,6 +791,7 @@ async function openNewBoxModal(options = {}) {
  */
 function openEditBoxModal(box) {
   state.editing = box.uuid;
+  resetTypeFilter(EDIT_MODAL.type);
   el(EDIT_MODAL.name).value = box.name;
   el(EDIT_MODAL.description).value = box.description || "";
   el(EDIT_MODAL.resource).value = box.resource_uri || "";
@@ -717,7 +826,7 @@ async function submitEditBox(event) {
     state.editing = null;
     await refreshSide();
     if (state.current && state.current.uuid === saved.uuid) {
-      await openBox(saved.uuid, { mode: state.mode });
+      await openBox(saved.uuid);
     } else {
       renderMain(); // a child in the current view may have been renamed or retyped
     }
@@ -904,6 +1013,7 @@ async function submitNewBox(event) {
     resource_uri: value("nb-resource") || null,
     parent: value("nb-parent") || null,
     cell: state.pendingCell || null,
+    place: state.pendingPlace || null,
     config: {},
   };
   try {
@@ -916,6 +1026,7 @@ async function submitNewBox(event) {
     const created = await api.create(payload);
     const filedIn = payload.parent;
     state.pendingCell = null;
+    state.pendingPlace = null;
     el("new-box-modal").close();
     el("new-box-form").reset();
     await refreshSide();
@@ -923,10 +1034,10 @@ async function submitNewBox(event) {
       // The box was made *from* another one, so the view stays on that one and the
       // new box appears inside it. Jumping to the child would leave the container
       // the user was working in, which is the place they wanted to see the result.
-      await openBox(filedIn, { mode: state.mode });
+      await openBox(filedIn);
       status(`created ${created.name} in it`);
     } else {
-      await openBox(created.uuid, { mode: "content" });
+      await openBox(created.uuid);
       status(`created ${created.name}`);
     }
   } catch (error) {
@@ -976,14 +1087,11 @@ async function init() {
   }
 
   fillTypeChoices();
+  wireTypeFilters();
   el("search").addEventListener("input", () => refreshSide());
   el("search-form").addEventListener("submit", (event) => {
     event.preventDefault();
     refreshSide();
-  });
-  el("mode-toggle").addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-mode]");
-    if (button && state.current) setMode(button.dataset.mode);
   });
   el("up").addEventListener("click", goUp);
   el("new-box").addEventListener("click", () => openNewBoxModal());
@@ -998,6 +1106,12 @@ async function init() {
     suggestTimer = setTimeout(() => checkResourceType(CREATE_MODAL), 300);
   });
   el("new-box-form").addEventListener("submit", submitNewBox);
+  // Cancelling the dialog is a second way out of the modal, and it must forget the
+  // pending spot too: a leftover one would drop the next unrelated box in its path.
+  el("new-box-modal").addEventListener("close", () => {
+    state.pendingCell = null;
+    state.pendingPlace = null;
+  });
   el(EDIT_MODAL.type).addEventListener("change", () => {
     renderConfigFields(EDIT_MODAL, {});
     checkResourceType(EDIT_MODAL);
@@ -1212,10 +1326,6 @@ function iconPane(box, note = "") {
 /* A plain box: its icon, or everything the row knows. */
 registerView("box", {
   render(canvas, box, ctx, mode, opts = {}) {
-    if (mode !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     // A cell or a root block is too small for the whole detail panel.
     canvas.append(opts.embedded ? iconPane(box) : detailPanel(box, ctx));
   },
@@ -1225,10 +1335,6 @@ registerView("box", {
 registerView("image", {
   render(canvas, box, ctx, mode, opts = {}) {
     const src = opts.src || api.rawUrl(box.uuid);
-    if (mode !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     const stage = document.createElement("div");
     stage.className = "image-view";
     const image = document.createElement("img");
@@ -1261,10 +1367,6 @@ function gridOptions(box) {
  */
 registerView("grid", {
   async render(canvas, box, ctx, mode, opts = {}) {
-    if (ctx.mode() !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     const token = paneGeneration;
     const options = gridOptions(box);
     let children = [];
@@ -1320,7 +1422,7 @@ function chipFor(child, ctx) {
     event.dataTransfer.setData("text/plain", child.uuid);
     event.dataTransfer.effectAllowed = "move";
   });
-  chip.addEventListener("dblclick", () => ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() }));
+  chip.addEventListener("dblclick", () => ctx.open(child.uuid, { trail: ctx.trail() }));
   return chip;
 }
 
@@ -1459,14 +1561,14 @@ function gridCell(box, ctx, row, column, child, depth) {
     }
   });
   cell.addEventListener("dblclick", () => {
-    if (child) ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() });
+    if (child) ctx.open(child.uuid, { trail: ctx.trail() });
   });
   cell.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
     const here = [row, column];
     ctx.showMenu(event.clientX, event.clientY, [
-      child && { label: `Open ${child.name}`, run: () => ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() }) },
+      child && { label: `Open ${child.name}`, run: () => ctx.open(child.uuid, { trail: ctx.trail() }) },
       child && {
         label: "Empty this cell",
         run: async () => {
@@ -1527,10 +1629,6 @@ function magnetise(value, options) {
  */
 registerView("desktop", {
   async render(canvas, box, ctx, mode, opts = {}) {
-    if (ctx.mode() !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     const token = paneGeneration;
     const options = desktopOptions(box);
     let children = [];
@@ -1706,11 +1804,22 @@ registerView("desktop", {
     surface.addEventListener("contextmenu", (event) => {
       if (event.target.closest(".desktop-icon")) return;
       event.preventDefault();
+      // Remember where on the canvas the click fell, so a box made from this menu
+      // lands there instead of wherever the next free spot happens to be. The
+      // canvas may be drawn smaller than it is, so the screen distance is divided
+      // back out; the tile is centred under the pointer, and the magnet, if the
+      // desktop has it on, still pulls the landing onto a line.
+      const frame = surface.getBoundingClientRect();
+      const scale = surfaceScale(surface);
+      const spot = {
+        x: Math.max(0, Math.round((event.clientX - frame.left) / scale - DESKTOP_DEFAULTS.tile / 2)),
+        y: Math.max(0, Math.round((event.clientY - frame.top) / scale - DESKTOP_DEFAULTS.tile / 2)),
+      };
       ctx.showMenu(
         event.clientX,
         event.clientY,
         boxMenuItems(box, [
-          { label: `New box on ${box.name}`, run: () => ctx.newBox({ parent: box.uuid }) },
+          { label: `New box on ${box.name}`, run: () => ctx.newBox({ parent: box.uuid, place: spot }) },
           { separator: true },
           { label: "\ud83d\uddbc Set a background image\u2026", run: () => chooseBackground(box, ctx) },
           box.resource_uri
@@ -1942,7 +2051,7 @@ function desktopIcon(box, child, rect, options, ctx) {
       .forEach((other) => other.classList.toggle("selected", other === tile));
   });
   tile.addEventListener("dblclick", () =>
-    ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() })
+    ctx.open(child.uuid, { trail: ctx.trail() })
   );
   tile.addEventListener("keydown", (event) => {
     const cell = Number(options.grid) || DESKTOP_DEFAULTS.grid;
@@ -1959,7 +2068,7 @@ function desktopIcon(box, child, rect, options, ctx) {
     }
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() });
+      ctx.open(child.uuid, { trail: ctx.trail() });
     }
   });
   tile.addEventListener("contextmenu", (event) => {
@@ -2131,10 +2240,6 @@ function folderOptions(box) {
  */
 const folderView = {
   async render(canvas, box, ctx, mode, opts = {}) {
-    if (ctx.mode() !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     const token = paneGeneration;
     const options = folderOptions(box);
     const kind = typeOf(box);
@@ -2398,7 +2503,7 @@ function childTile(child, parent, ctx) {
       .forEach((other) => other.classList.toggle("selected", other === item));
   });
   item.addEventListener("dblclick", () =>
-    ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() })
+    ctx.open(child.uuid, { trail: ctx.trail() })
   );
   item.addEventListener("dragstart", (event) => {
     event.dataTransfer.setData("text/plain", child.uuid);
@@ -2439,10 +2544,6 @@ const dirNav = new Map(); // box uuid -> { sub, preview }, so a re-render keeps 
  */
 const directoryView = {
   async render(canvas, box, ctx, opts = {}) {
-    if (ctx.mode() !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     const nav = dirNav.get(box.uuid) || { sub: "", preview: null };
     dirNav.set(box.uuid, nav);
 
@@ -2616,10 +2717,6 @@ function textOptions(box) {
 
 registerView("text", {
   async render(canvas, box, ctx, mode, opts = {}) {
-    if (ctx.mode() !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     const options = textOptions(box);
     const stage = document.createElement("div");
     stage.className = "text-view";
@@ -2673,10 +2770,6 @@ registerView("text", {
 registerView("pdf", {
   render(canvas, box, ctx, mode, opts = {}) {
     const src = opts.src || api.rawUrl(box.uuid);
-    if (mode !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     if (!box.resource_uri) {
       canvas.append(emptyMessage("This PDF box has no resource to open."));
       return;
@@ -2711,10 +2804,6 @@ registerView("pdf", {
 
 registerView("video", {
   render(canvas, box, ctx, mode, opts = {}) {
-    if (mode !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     const wrap = document.createElement("div");
     wrap.className = "video-view";
     const video = document.createElement("video");
@@ -2733,10 +2822,6 @@ registerView("video", {
 /** A zip or tar, listed like a folder. Members are read-only here. */
 registerView("archive", {
   async render(canvas, box, ctx, mode, opts = {}) {
-    if (mode !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     const token = paneGeneration;
     let payload;
     try {
@@ -2791,10 +2876,6 @@ function formatSize(bytes) {
 /** A file with no viewer: what it is, how big, and a link to take it away. */
 registerView("file", {
   render(canvas, box, ctx, mode, opts = {}) {
-    if (mode !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     canvas.append(
       unableMessage(box, opts, `Boxganizer has no viewer for ${box.name || "this file"}.`)
     );
@@ -2839,10 +2920,6 @@ function unableMessage(box, opts, reason) {
  */
 const browserView = {
   render(canvas, box, ctx, mode, opts = {}) {
-    if (mode !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
     if (!box.resource_uri) {
       canvas.append(emptyMessage("This browser box has no address to open."));
       return;
@@ -2959,10 +3036,6 @@ const MQTT_HISTORY = 8;
  */
 const mqttView = {
   async render(canvas, box, ctx, mode, opts = {}) {
-    if (mode !== "content") {
-      canvas.append(iconPane(box));
-      return;
-    }
 
     const token = paneGeneration;
 

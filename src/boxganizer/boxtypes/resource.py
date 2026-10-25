@@ -59,6 +59,8 @@ class TextResource(FileResource):
     summary: ClassVar[str] = "Plain text, shown as it is."
     planned: ClassVar[str] = "Sniff encoding and refuse binary files."
 
+    #: Read and indexed by the full-text search.
+    indexes_content: ClassVar[bool] = True
 
 class MarkdownResource(TextResource):
     """A Markdown file, rendered instead of dumped."""
@@ -111,6 +113,8 @@ class PDFResource(FileResource):
     thumbnail_kind: ClassVar[str | None] = "pdf-page"
     planned: ClassVar[str] = "Page count in the detail panel; an outside-click opens it elsewhere."
 
+    #: Read and indexed by the full-text search.
+    indexes_content: ClassVar[bool] = True
 
 class ArchiveResource(FileResource):
     """A compressed archive.

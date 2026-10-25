@@ -34,7 +34,10 @@ from boxganizer.models import DEFAULT_ICON, Box, canonical_name, new_uuid
 #: 4 = boxes gained ``uuid``: a permanent identifier for links and layouts.
 #: 5 = dynamic folders resolve their members into ``links``; an older library's
 #: cabinet is filled from its filter once, on the way in (see ``_migrate``).
-SCHEMA_VERSION = 5
+#: 6 = the full-text index tables (``box_text``). They are created with every other
+#: table when a database opens, but they are *filled* from the files, which is why
+#: ``box index`` exists: the confine and the reading belong to the caller, not here.
+SCHEMA_VERSION = 6
 
 _SCHEMA = f"""
 PRAGMA user_version = {SCHEMA_VERSION};
@@ -66,6 +69,28 @@ CREATE TABLE IF NOT EXISTS links (
 );
 
 CREATE INDEX IF NOT EXISTS links_child_idx ON links (child_id);
+
+/*
+ * The full-text index. `box_id` is the box's uuid, so a rename cannot orphan an
+ * entry, and deleting the box deletes its text (the row is dropped by the same
+ * calls that maintain the links, plus `remove`).
+ *
+ * Porter stemming is done by SQLite, so "running" finds "run" without any code of
+ * ours; the words a query was widened to are what `boxganizer.search` decides.
+ * Only boxes that point at a text or PDF file are ever written here.
+ */
+CREATE VIRTUAL TABLE IF NOT EXISTS box_text USING fts5(
+    box_id UNINDEXED,
+    body,
+    tokenize = 'porter unicode61'
+);
+
+/*
+ * The words the index has actually seen. FTS5 does not expose them by itself:
+ * `fts5vocab` is a second virtual table that reads the first one, and it is what
+ * makes fuzzy matching answer with "kitchen" rather than with every word in English.
+ */
+CREATE VIRTUAL TABLE IF NOT EXISTS box_text_vocab USING fts5vocab(box_text, row);
 """
 
 _INSERT_BOX = """
@@ -81,6 +106,21 @@ _SELECT_BY_TYPE = "SELECT * FROM boxes WHERE box_type = ? ORDER BY key"
 _SELECT_CHILD_IDS = "SELECT child_id FROM links WHERE parent_id = ?"
 
 _SELECT_ONE_LINK = "SELECT 1 FROM links WHERE parent_id = ? AND child_id = ?"
+
+_INSERT_DOC = "INSERT INTO box_text (box_id, body) VALUES (?, ?)"
+
+_DELETE_DOC = "DELETE FROM box_text WHERE box_id = ?"
+
+# snippet() addresses the body as column 1: column 0 is the unindexed box id.
+_SEARCH_DOCS = """
+SELECT box_id, bm25(box_text) AS score,
+       snippet(box_text, 1, '[', ']', ' … ', 12) AS passage
+  FROM box_text WHERE box_text MATCH ? ORDER BY score LIMIT ?
+"""
+
+_VOCAB_BY_PREFIX = "SELECT term FROM box_text_vocab WHERE term GLOB ? LIMIT 4000"
+
+_COUNT_DOCS = "SELECT count(*) AS n FROM box_text"
 
 _SELECT_BY_REF = "SELECT * FROM boxes WHERE key = ? OR uuid = ?"
 
@@ -399,6 +439,10 @@ class BoxStore:
         box = self.get(name)
         assert box.id is not None
         self._execute("DELETE FROM boxes WHERE id = ?", (box.id,))
+        # Links go with the row by the foreign keys; the full-text entry cannot, so
+        # it is taken out here. A search that keeps offering a deleted box's file is
+        # a broken promise, not a stale cache.
+        self._execute(_DELETE_DOC, (box.uuid,))
         return box
 
     def list_boxes(self, *, limit: int | None = None, offset: int = 0) -> list[Box]:
@@ -462,6 +506,72 @@ class BoxStore:
             "INSERT OR IGNORE INTO links (parent_id, child_id, added_at) VALUES (?, ?, ?)",
             (parent_id, child_id, _now()),
         )
+
+    # -- the full-text index ------------------------------------------------
+    #
+    # What is stored here is the text of a box's file, nothing else: which boxes are
+    # worth reading, how big a file may be and where the confine is, all belong to
+    # `boxganizer.search`. The store keeps the rows and answers from them.
+
+    def index_text(self, box_uuid: str, text: str) -> None:
+        """Replace what is indexed for one box. Empty text removes it entirely."""
+        self._execute(_DELETE_DOC, (box_uuid,))
+        if text.strip():
+            self._execute(_INSERT_DOC, (box_uuid, text))
+
+    def drop_text(self, box_uuid: str) -> None:
+        """Stop indexing a box, without touching the box."""
+        self._execute(_DELETE_DOC, (box_uuid,))
+
+    def content_search(self, match: str, *, limit: int = 100) -> list[tuple[str, float, str]]:
+        """Boxes whose indexed text answers *match*, best first.
+
+        Returns ``(uuid, score, passage)``. A malformed expression — a stray quote in
+        what someone typed — is not an error to show them: it answers with nothing,
+        and the name search still runs.
+        """
+        try:
+            rows = self._rows(_SEARCH_DOCS, (match, limit))
+        except StoreError:
+            return []
+        return [(str(row["box_id"]), float(row["score"]), str(row["passage"])) for row in rows]
+
+    def vocabulary(self, *, prefix: str = "") -> tuple[str, ...]:
+        """Distinct indexed words, optionally those starting with *prefix*.
+
+        Fuzzy matching compares a typed word against these rather than against a
+        dictionary: a near-miss is only useful if the library actually contains the
+        word it is close to.
+        """
+        head = (prefix or "").strip().lower()
+        try:
+            rows = self._rows(_VOCAB_BY_PREFIX, (f"{head}*",))
+        except StoreError:
+            # No vocabulary to compare against means no fuzzy widening. The rest of
+            # the search is untouched, which is the right way for an index that
+            # cannot answer to fail: less clever, not broken.
+            return ()
+        return tuple(str(row["term"]) for row in rows)
+
+    def boxes_by_uuid(self, uuids: Sequence[str]) -> dict[str, Box]:
+        """Several boxes at once, keyed by uuid, in the order asked for.
+
+        The full-text search finds uuids in the index and then needs the boxes behind
+        them; asking one at a time would be one query per hit.
+        """
+        found: dict[str, Box] = {}
+        for uuid in uuids:
+            if uuid in found:
+                continue
+            rows = self._rows(_SELECT_BY_REF, ("", uuid))
+            if rows:
+                found[uuid] = self._from_row(rows[0])
+        return found
+
+    def indexed_boxes(self) -> int:
+        """How many boxes have text in the index."""
+        rows = self._rows(_COUNT_DOCS)
+        return int(rows[0]["n"]) if rows else 0
 
     def root_box(self) -> Box | None:
         """The box the library starts from, or None when it holds none.

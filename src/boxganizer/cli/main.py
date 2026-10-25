@@ -26,7 +26,20 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from boxganizer import __version__, bootstrap, boxtypes, config, editing, infer, mqtt, thumbs
+from boxganizer import (
+    __version__,
+    bootstrap,
+    boxtypes,
+    config,
+    editing,
+    infer,
+    mqtt,
+    paths,
+    thumbs,
+)
+
+# The module, not the `box search` command: the two would be easy to confuse.
+from boxganizer import search as text_search
 from boxganizer.errors import BoxganizerError, EditError, MissingDependency, MqttError
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
@@ -235,10 +248,15 @@ def box_add(
     with _open(ctx, _db_of(ctx)) as store:
         container = _resolve_parent(store, box, parent=parent, no_parent=no_parent)
         saved = store.add(box)
+        # Read into the full-text index now, so a text or PDF box is findable by what
+        # it says without anyone remembering to rebuild.
+        unread = text_search.sync(store, saved)
         if container is not None:
             store.link(container, saved.name)
     note = f" in {container}" if container else ""
     say("added", f"{saved.icon} {saved.name} (#{saved.id}){note}")
+    if unread:
+        lit(f"  note: not indexed for text — {unread}")
     if proposal is not None and saved.box_type != proposal.key:
         lit(
             f"  tip: that resource {proposal.reason} — it would suit "
@@ -376,22 +394,95 @@ def box_edit(
             console.print("left unchanged")
             return
         updated = store.update(editing.load(written, original=box))
+        unread = text_search.sync(store, updated)
     say("saved", f"{updated.icon} {updated.name} (#{updated.id})")
+    if unread:
+        lit(f"  note: not indexed for text — {unread}")
 
 
 @app.command("search")
 def box_search(
     ctx: typer.Context,
     term: str,
-    limit: Annotated[int, typer.Option("--limit", "-n", min=1)] = 100,
+    limit: Annotated[int, typer.Option("--limit", "-n", min=1, max=1000)] = 100,
+    content: Annotated[
+        bool,
+        typer.Option(
+            "--content/--no-content",
+            help="Also search inside the text and PDF files. On by default.",
+        ),
+    ] = True,
 ) -> None:
-    """Search names, descriptions, resources and metadata."""
+    """Find boxes by their own fields, and by what their files say.
+
+    The words are widened before they are asked: the index stems, so "running" finds
+    "run"; the thesaurus adds the words that mean the same; and a word that looks like
+    one already indexed is asked too, which is what catches a mistyped spelling. What
+    was added to your words is printed afterwards, so nothing is quietly rewritten.
+    """
     with _open(ctx, _db_of(ctx)) as store:
-        found = store.search(term, limit=limit)
-    for box in found:
+        named = store.search(term, limit=limit)
+        shown = {box.name for box in named}
+        hits: list[tuple[str, str]] = []
+        if content:
+            planned = text_search.plan(term, lambda word: store.vocabulary(prefix=word[:1]))
+            if planned.worth_asking:
+                ordered = store.content_search(planned.content_match, limit=limit * 2)
+                boxes = store.boxes_by_uuid([uuid for uuid, _score, _p in ordered])
+                for uuid, _score, passage in ordered:
+                    box = boxes.get(uuid)
+                    if box is None or box.name in shown:
+                        continue
+                    shown.add(box.name)
+                    hits.append((f"{box.icon} {box.name}", " ".join(passage.split())))
+                    if len(hits) >= limit:
+                        break
+            widened = text_search.explain(planned) if planned.expanded else ""
+        else:
+            widened = ""
+    for box in named:
         lit(f"{box.icon} {box.name}")
-    if not found:
+    if hits:
+        if named:
+            lit("")
+        for label, passage in hits:
+            lit(f"{label}  [in the file: {passage}]")
+    if not shown:
         lit(f"nothing matches {term!r}")
+    if widened and (named or hits):
+        lit(f"  searched: {widened}")
+
+
+@app.command("index")
+def box_index(
+    ctx: typer.Context,
+    root: Annotated[
+        Path | None,
+        typer.Option(
+            "--root",
+            help="Directory file resources are read from. Defaults to "
+            "$BOXGANIZER_CONTENT_ROOT, then your home directory.",
+        ),
+    ] = None,
+    show_skipped: Annotated[int, typer.Option("--show-skipped", min=0, max=200)] = 10,
+) -> None:
+    """Read every text and PDF box again into the full-text index.
+
+    The index lives in the database and the files do not, so three ordinary things
+    empty it: a library copied to another machine, a database written before the index
+    existed, and a file edited outside Boxganizer. This makes the rows true again in
+    one go. Boxes created or edited afterwards are indexed on the spot.
+    """
+    confine = paths.content_root(root)
+    with _open(ctx, _db_of(ctx)) as store:
+        report = text_search.rebuild(store, root=confine)
+        say("indexed", report.summary())
+        lit(f"  reading inside {confine}")
+        for name, note in report.skipped[:show_skipped]:
+            lit(f"  {name}: {note}")
+        if len(report.skipped) > show_skipped:
+            lit(f"  … and {len(report.skipped) - show_skipped} more nothing-to-read")
+        lit(f"  {store.indexed_boxes()} boxes now in the index")
 
 
 @app.command("rm")

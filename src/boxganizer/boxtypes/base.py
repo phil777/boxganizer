@@ -71,6 +71,12 @@ class BoxType:
     #: True when such a folder asks for everything and has no filter to edit: the
     #: cabinet. Whatever its config holds is ignored.
     filter_is_fixed: ClassVar[bool] = False
+    #: True when the search index reads this box's file and keeps its text, so a
+    #: full-text search can find a box by what is *inside* it. See `boxganizer.search`.
+    indexes_content: ClassVar[bool] = False
+    #: True when the type places its children at coordinates of the user's choosing,
+    #: so a new child can be told where to land. See `boxganizer.desktop`.
+    arranges_icons: ClassVar[bool] = False
     #: What this type is meant to do once it is built. Empty means: already does all it claims.
     planned: ClassVar[str] = ""
 
@@ -148,6 +154,8 @@ class BoxType:
             "live_source": cls.live_source,
             "resolves_membership": cls.resolves_membership,
             "filter_is_fixed": cls.filter_is_fixed,
+            "arranges_icons": cls.arranges_icons,
+            "indexes_content": cls.indexes_content,
             "parent": parent.key if parent is not None else None,
             "ancestors": [ancestor.key for ancestor in registry.ancestors_of(cls)],
             "resource_uri_required": cls.resource_uri_required,

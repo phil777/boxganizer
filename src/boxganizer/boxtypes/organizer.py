@@ -31,6 +31,9 @@ class Desktop(OrganizerBox):
     summary: ClassVar[str] = "An open surface where each box goes where you put it."
     #: The resource is the wallpaper, so the interfaces may read it.
     serves_content: ClassVar[bool] = True
+    #: Children are placed at chosen coordinates, which is what makes "put the new
+    #: box where I right-clicked" a question this type can answer.
+    arranges_icons: ClassVar[bool] = True
 
 
 class Blueprint(Desktop):

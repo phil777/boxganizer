@@ -28,6 +28,10 @@ from boxganizer import (
     paths,
     thumbs,
 )
+
+# The endpoint below is called `search`, so the module that plans a query comes in
+# under a name that cannot be mistaken for it.
+from boxganizer import search as text_search
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -77,6 +81,18 @@ class BoxUpdate(BaseModel):
     config: dict[str, Any] | None = None
 
 
+class DesktopSpot(BaseModel):
+    """Where on a desktop an icon starts: canvas pixels from the top left.
+
+    The page sends the spot the surface was right-clicked at, already divided by
+    whatever scale that surface is drawn at, so a box created from a desktop shown
+    inside a grid cell lands under the pointer too.
+    """
+
+    x: int = Field(ge=0, le=8192)
+    y: int = Field(ge=0, le=8192)
+
+
 class BoxCreate(BaseModel):
     """Request body for creating a box."""
 
@@ -90,6 +106,9 @@ class BoxCreate(BaseModel):
     parent: str | None = Field(default=None, description="Name or uuid of the box to create it in.")
     cell: list[int] | None = Field(
         default=None, description="[row, column] when the parent is a grid."
+    )
+    place: DesktopSpot | None = Field(
+        default=None, description="{x, y} when the parent arranges its icons."
     )
 
 
@@ -400,7 +419,7 @@ def create_app(
     @app.post("/api/boxes/{ref}/desktop/move")
     def move_on_desktop(ref: str, payload: DesktopMove, store: StoreDep) -> dict[str, object]:
         """Place a child's icon. The magnetic grid has the last word on where it lands."""
-        box = store.resolve(ref)
+        box = _desktop_box(store, ref)
         child = _desktop_child(store, box, payload.child)
         saved = desktop.move(box.config, child.uuid, payload.x, payload.y)
         box.config = saved
@@ -409,7 +428,7 @@ def create_app(
     @app.post("/api/boxes/{ref}/desktop/resize")
     def resize_on_desktop(ref: str, payload: DesktopResize, store: StoreDep) -> dict[str, object]:
         """Change the size of one icon on the surface."""
-        box = store.resolve(ref)
+        box = _desktop_box(store, ref)
         child = _desktop_child(store, box, payload.child)
         box.config = desktop.resize(box.config, child.uuid, payload.width, payload.height)
         return _with_rect(store, box, child.uuid)
@@ -419,7 +438,7 @@ def create_app(
         ref: str, payload: DesktopSettingsUpdate, store: StoreDep
     ) -> dict[str, object]:
         """Engage or disengage the magnetic grid, and set its size."""
-        box = store.resolve(ref)
+        box = _desktop_box(store, ref)
         settings = desktop.Settings(grid=payload.grid, snap=payload.snap)
         box.config = desktop.to_config(box.config, settings=settings)
         return store.update(box).to_dict()
@@ -642,7 +661,9 @@ def create_app(
         return store.update(box).to_dict()
 
     @app.post("/api/boxes", status_code=201)
-    def create_box(payload: BoxCreate, store: StoreDep) -> dict[str, object]:
+    def create_box(
+        request: Request, payload: BoxCreate, store: StoreDep
+    ) -> dict[str, object]:
         box = Box(
             name=payload.name,
             description=payload.description,
@@ -656,14 +677,31 @@ def create_app(
             boxtypes.adopt_type_icon(box)
             thumbs.icon_from_resource(box)
         saved = store.add(box)
+        # A text or PDF box goes into the full-text index the moment it exists, so it
+        # is findable by what it says without anyone remembering to rebuild anything.
+        text_search.sync(store, saved, root=getattr(request.app.state, "content_root", None))
         if payload.parent:
             store.link(payload.parent, saved.uuid)
             if payload.cell is not None:
                 _grid_place(store, payload.parent, saved.uuid, payload.cell)
+            elif payload.place is not None:
+                _desktop_place(
+                    store, payload.parent, saved.uuid, payload.place.x, payload.place.y
+                )
+        elif payload.place is not None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "place_without_parent",
+                    "reason": "a spot on the surface needs a surface to put it on",
+                },
+            )
         return saved.to_dict()
 
     @app.put("/api/boxes/{ref}")
-    def update_box(ref: str, payload: BoxUpdate, store: StoreDep) -> dict[str, object]:
+    def update_box(
+        request: Request, ref: str, payload: BoxUpdate, store: StoreDep
+    ) -> dict[str, object]:
         """Change a box's own fields, including its type.
 
         Omitted fields stay as they are. Every write goes through the type's
@@ -691,7 +729,11 @@ def create_app(
             box.metadata = dict(data["metadata"])
         if "config" in data and data["config"] is not None:
             box.config = dict(data["config"])
-        return store.update(box).to_dict()
+        saved = store.update(box)
+        # The same rule as on creation, in both directions: a box retyped away from
+        # text, or pointed at another file, has its indexed text replaced or removed.
+        text_search.sync(store, saved, root=getattr(request.app.state, "content_root", None))
+        return saved.to_dict()
 
     @app.delete("/api/boxes/{ref}", status_code=204)
     def delete_box(ref: str, store: StoreDep) -> None:
@@ -705,11 +747,48 @@ def create_app(
 
     @app.get("/api/search")
     def search(
+        request: Request,
         store: StoreDep,
         q: Annotated[str, Query(min_length=1)],
+        response: Response,
         limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     ) -> list[dict[str, object]]:
-        return _dump(store.search(q, limit=limit))
+        """Find boxes: by their own fields first, then by what their files say.
+
+        Every answer carries `match` — how this box came up, and a passage of the file
+        when the file is what matched — so "why is this in my results" has an answer on
+        the screen instead of being a guess. What the words were widened to (synonyms,
+        near-misses) comes back in the `X-Search-Expanded` header, because it belongs
+        to the query as a whole and not to any one box.
+        """
+        named = store.search(q, limit=limit)
+        found: list[dict[str, object]] = [
+            box.to_dict() | {"match": {"how": "box", "passage": ""}} for box in named
+        ]
+        seen = {str(entry["uuid"]) for entry in found}
+
+        planned = text_search.plan(q, lambda term: store.vocabulary(prefix=term[:1]))
+        # Only say something when something was actually added: "searched: kitchen"
+        # under a search for "kitchen" is noise, and noise trains people to ignore it.
+        if planned.expanded:
+            response.headers["X-Search-Expanded"] = text_search.explain(planned)
+        if planned.worth_asking:
+            hits = [
+                hit
+                for hit in store.content_search(planned.content_match, limit=limit * 2)
+                if hit[0] not in seen
+            ]
+            order = [hit[0] for hit in hits][:limit]
+            boxes = store.boxes_by_uuid(order)
+            for uuid, _score, passage in hits:
+                box = boxes.get(uuid)
+                if box is None:  # deleted between the index and now: offer nothing
+                    continue
+                seen.add(uuid)
+                found.append(box.to_dict() | {"match": {"how": "content", "passage": passage}})
+                if len(found) >= limit:
+                    break
+        return found
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
@@ -725,6 +804,33 @@ def create_app(
 
 def _dump(boxes: Sequence[Box]) -> list[dict[str, object]]:
     return [box.to_dict() for box in boxes]
+
+
+def _desktop_box(store: BoxStore, ref: str) -> Box:
+    """A box whose type places its children at chosen coordinates.
+
+    Asked of the type rather than compared with the string `"desktop"`, so a
+    blueprint — which places icons the same way — answers to the same endpoints.
+    """
+    box = store.resolve(ref)
+    if not boxtypes.get(box.box_type).arranges_icons:
+        raise HTTPException(
+            status_code=415,
+            detail={"error": "not_a_desktop", "type": box.box_type},
+        )
+    return box
+
+
+def _desktop_place(store: BoxStore, parent_ref: str, child_uuid: str, x: int, y: int) -> Box:
+    """Land a new child's icon on the spot the surface was right-clicked at.
+
+    The magnetic grid still gets the last word, because it is the desktop's rule
+    and a right-click is no exception to it: an icon dropped on a snapped desktop
+    arrives on a line, which is what the user asked the desktop to do.
+    """
+    parent = _desktop_box(store, parent_ref)
+    parent.config = desktop.move(parent.config, child_uuid, x, y)
+    return store.update(parent)
 
 
 def _grid_place(

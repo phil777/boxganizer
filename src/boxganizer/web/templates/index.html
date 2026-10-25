@@ -11,27 +11,29 @@
     <div class="app">
       <!-- Left pane: search, the box list, and the way in to create one. -->
       <aside id="side" aria-label="Boxes">
-        <div class="side-head">
+        <!-- The name on its own line, the two ways in below it. -->
+        <div class="side-brand">
+          <span class="brand-glyph" aria-hidden="true">📦</span>
+          <span class="brand-name">boxganizer</span>
+        </div>
+        <div class="side-actions">
           <button id="go-root" type="button" title="Show the root box">🌲 Root</button>
-          <span class="brand">📦 Boxganizer</span>
           <button id="new-box" type="button" title="Create a new box">＋ New box</button>
         </div>
         <form id="search-form" autocomplete="off">
-          <input id="search" type="search" placeholder="search boxes" />
+          <input id="search" type="search" placeholder="search boxes and their files" />
         </form>
+        <!-- What the words were widened to: stems, synonyms, near-miss spellings. -->
+        <p id="search-note" class="muted" hidden></p>
         <ul id="box-list" role="listbox" aria-label="Boxes"></ul>
         <p id="side-status" class="muted"></p>
       </aside>
 
-      <!-- Main pane: the selected box, as its icon or as its content. -->
+      <!-- Main pane: the selected box, as its content. -->
       <main id="main">
         <header class="main-head">
           <button id="up" type="button" title="Go to the parent box">↑</button>
           <nav id="breadcrumb" aria-label="Path"></nav>
-          <div id="mode-toggle" role="group" aria-label="Display mode">
-            <button type="button" data-mode="icon" title="Show the box as its icon">Icon</button>
-            <button type="button" data-mode="content" title="Show the content of the box">Content</button>
-          </div>
           <span id="status" class="muted"></span>
         </header>
         <section id="canvas" tabindex="-1"></section>
@@ -43,9 +45,18 @@
       <form id="new-box-form" method="dialog">
         <h2>New box</h2>
         <label>Name <input id="nb-name" name="name" required /></label>
-        <label>Type
+        <div class="type-field">
+          <label for="nb-type">Type <span id="nb-type-count" class="muted"></span></label>
+          <input
+            id="nb-type-filter"
+            class="type-filter"
+            type="search"
+            placeholder="type a few letters to narrow the list"
+            aria-label="Filter the list of box types"
+            autocomplete="off"
+          />
           <select id="nb-type" name="box_type"></select>
-        </label>
+        </div>
         <p id="nb-summary" class="muted"></p>
         <label>Description <input id="nb-description" name="description" /></label>
         <div class="resource-field">
@@ -70,9 +81,18 @@
       <form id="edit-box-form" method="dialog">
         <h2>Modify box</h2>
         <label>Name <input id="eb-name" name="name" required /></label>
-        <label>Type
+        <div class="type-field">
+          <label for="eb-type">Type <span id="eb-type-count" class="muted"></span></label>
+          <input
+            id="eb-type-filter"
+            class="type-filter"
+            type="search"
+            placeholder="type a few letters to narrow the list"
+            aria-label="Filter the list of box types"
+            autocomplete="off"
+          />
           <select id="eb-type" name="box_type"></select>
-        </label>
+        </div>
         <p id="eb-summary" class="muted"></p>
         <p id="eb-suggest" class="suggest" hidden></p>
         <label>Icon <input id="eb-icon" name="icon" maxlength="4" /></label>

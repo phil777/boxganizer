@@ -107,7 +107,9 @@ def test_the_page_is_an_application_shell(client: TestClient) -> None:
         'id="box-list"',
         'id="canvas"',
         'id="breadcrumb"',
-        'id="mode-toggle"',
+        'class="side-brand"',
+        'class="side-actions"',
+        'id="nb-type-filter"',
         'id="new-box-modal"',
         'id="context-menu"',
     ):
@@ -418,21 +420,63 @@ def test_the_folder_view_is_registered_for_containers(client: TestClient) -> Non
 def test_a_child_opens_over_its_parent(client: TestClient) -> None:
     script = client.get("/static/app.js").text
     assert 'item.addEventListener("dblclick"' in script
-    assert "ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() })" in script
+    # it takes the path with it, so the trail still says how the user got there
+    assert "ctx.open(child.uuid, { trail: ctx.trail() })" in script
 
 
-def test_content_is_the_default_and_a_saved_setting_still_wins(client: TestClient) -> None:
-    """A box shows its content first; a saved preference beats the browsing mode."""
+def test_no_display_preference_is_read_any_more(client: TestClient) -> None:
+    """With one way to view a box, the `display` setting has nothing to decide."""
     script = client.get("/static/app.js").text
-    assert 'setting(box, "display", options.mode || "content")' in script
+    assert '"display"' not in script
     assert '|| "icon"' not in script
 
 
-def test_the_root_box_is_always_its_content(client: TestClient) -> None:
+def test_there_is_no_icon_mode_left_to_choose(client: TestClient) -> None:
+    """The Icon/Content toggle is gone, and with it the second way to look at a box."""
+    page = client.get("/").text
     script = client.get("/static/app.js").text
-    assert "const isRootType = (box) =>" in script
-    assert "state.mode = isRootType(box)" in script
-    assert 'button.disabled = forced && button.dataset.mode === "icon"' in script
+    css = client.get("/static/app.css").text
+    for gone in ("mode-toggle", 'data-mode="icon"', "Show as icon", "setMode", "state.mode"):
+        assert gone not in page, gone
+        assert gone not in script, gone
+        assert gone not in css, gone
+    # the pane renders the box as its content, with nothing to ask first
+    assert 'view.render(canvas, box, context, "content", { embedded: false, depth: 0 });' in script
+    # ...and the impossible branch is not left behind in the views
+    assert 'if (mode !== "content")' not in script
+    assert "ctx.mode()" not in script
+
+
+def test_the_panel_leads_with_the_name_then_the_two_ways_in(client: TestClient) -> None:
+    page = client.get("/").text
+    brand = page.index('class="side-brand"')
+    actions = page.index('class="side-actions"')
+    search = page.index('id="search"')
+    assert brand < actions < search, "name first, then Root / New box, then the search"
+    assert "boxganizer" in page[brand:actions]
+    assert 'id="go-root"' in page[actions:search]
+    assert 'id="new-box"' in page[actions:search]
+
+
+def test_the_type_menu_narrows_to_what_is_typed(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    for needle in (
+        "function typeMatchesTerm(type, term)",
+        "function renderTypeOptions(select, term)",
+        "function fillTypeChoices()",
+        "function resetTypeFilter(selectId)",
+    ):
+        assert needle in script, needle
+    page = client.get("/").text
+    assert 'id="nb-type-filter"' in page
+    assert 'id="eb-type-filter"' in page
+    # the letters filter the menu; the select stays what the form reads
+    assert "select.value = chosen;" in script
+    assert "el(modal.type).value" in script
+    # a single match is the answer, so typing a kind takes it
+    assert "if (term && matches === 1)" in script
+    # and a choice is never lost by filtering it out of sight
+    assert "if (!hit && type.key !== chosen) return;" in script
 
 
 def test_the_root_view_shows_its_one_child_content(client: TestClient) -> None:
@@ -1831,10 +1875,10 @@ def test_a_box_made_from_another_starts_with_that_parent(client: TestClient) -> 
 def test_creating_from_a_box_leaves_the_view_on_that_box(client: TestClient) -> None:
     script = client.get("/static/app.js").text
     assert "const filedIn = payload.parent;" in script
-    assert "await openBox(filedIn, { mode: state.mode });" in script
+    assert "await openBox(filedIn);" in script
     assert 'status(`created ${created.name} in it`);' in script
     # ...and only jumps to the child when there was no container to stay on
-    assert "await openBox(created.uuid, { mode: \"content\" });" in script
+    assert "await openBox(created.uuid);" in script
 
 
 # -- the folder box: drop, search, history ------------------------------------
@@ -1937,3 +1981,79 @@ def test_a_gesture_in_a_scaled_canvas_divides_the_pointer_by_the_scale(
     assert "(next.clientY - origin.y) / origin.scale" in script
     # a drop from the panel is a screen distance too
     assert "(event.clientX - frame.left) / scale" in script
+
+
+# -- a box created from the desktop lands where the click was ------------------
+
+
+def _icon_rect(client: TestClient, surface: str, child_uuid: str) -> dict[str, int]:
+    """One icon's rectangle, as the desktop's own config records it."""
+    return client.get(f"/api/boxes/{surface}").json()["config"]["desktop"]["positions"][child_uuid]
+
+
+def test_creating_from_the_desktop_places_the_icon_at_the_spot(
+    client: TestClient, desk: Box
+) -> None:
+    created = client.post(
+        "/api/boxes",
+        json={
+            "name": "Where I clicked",
+            "parent": "Surface",
+            "place": {"x": 250, "y": 130},
+        },
+    )
+    assert created.status_code == 201
+    uuid = created.json()["uuid"]
+    spot = _icon_rect(client, "Surface", uuid)
+    assert (spot["x"], spot["y"]) == (250, 130)
+    # and it really is the desktop's child, not merely placed
+    assert uuid in [child["uuid"] for child in client.get("/api/boxes/Surface").json()["children"]]
+
+
+def test_a_spotted_box_on_a_snapped_desktop_lands_on_a_line(
+    client: TestClient, desk: Box
+) -> None:
+    client.post("/api/boxes/Surface/desktop/settings", json={"grid": 32, "snap": True})
+    created = client.post(
+        "/api/boxes",
+        json={"name": "Near a line", "parent": "Surface", "place": {"x": 35, "y": 47}},
+    )
+    uuid = created.json()["uuid"]
+    spot = _icon_rect(client, "Surface", uuid)
+    assert spot["x"] % 32 == 0 and spot["y"] % 32 == 0, spot
+
+
+def test_a_spot_is_refused_when_the_parent_has_no_surface(client: TestClient) -> None:
+    client.post("/api/boxes", json={"name": "Basket", "box_type": "folder"})
+    response = client.post(
+        "/api/boxes",
+        json={"name": "Nowhere", "parent": "Basket", "place": {"x": 10, "y": 10}},
+    )
+    assert response.status_code == 415
+    assert response.json()["detail"]["error"] == "not_a_desktop"
+
+
+def test_a_spot_without_a_parent_is_refused(client: TestClient) -> None:
+    response = client.post("/api/boxes", json={"name": "Adrift", "place": {"x": 5, "y": 5}})
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "place_without_parent"
+
+
+def test_a_desktop_endpoint_refuses_a_box_that_is_not_one(client: TestClient) -> None:
+    client.post("/api/boxes", json={"name": "Plain folder", "box_type": "folder"})
+    response = client.post(
+        "/api/boxes/Plain folder/desktop/move", json={"child": "Plain folder", "x": 1, "y": 1}
+    )
+    assert response.status_code == 415
+    assert response.json()["detail"]["error"] == "not_a_desktop"
+
+
+def test_the_page_sends_the_right_click_spot_of_the_canvas(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    # the spot is in canvas pixels: the screen distance divided by the drawn scale
+    assert "const scale = surfaceScale(surface);" in script
+    assert '(event.clientX - frame.left) / scale - DESKTOP_DEFAULTS.tile / 2' in script
+    assert "ctx.newBox({ parent: box.uuid, place: spot })" in script
+    assert "place: state.pendingPlace || null," in script
+    # and leaving the modal forgets it, so it cannot land in the next box's path
+    assert 'el("new-box-modal").addEventListener("close"' in script

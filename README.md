@@ -42,7 +42,9 @@ box link "Kitchen" root                        # take the root's slot from cabin
 box ls                                         # same command as `box list`
 box list
 box show Kitchen
-box search cooking
+box search cooking                           # names, fields, and what the files say
+box search "basement NOT pump"               # quotes and and/or/not are understood
+box index                                    # read every text and PDF file again
 box tree                                       # starts at the root box
 box tree Kitchen                               # or wherever you say
 box types                                      # the box type hierarchy
@@ -56,6 +58,41 @@ again adds nothing.
 
 Every command is one word after `box`. `box link CHILD PARENT` files the box named
 first inside the one named second, and `box ls` is `box list` said shorter.
+
+`box search` looks in two places. First the box itself — name, description, resource,
+metadata. Then, for boxes that hold a **text**, **markdown** or **PDF** file, inside
+that file, and it answers with the words that matched:
+
+```
+$ box search basement
+🔤 Pump log  [in the file: [Cellar] pump service log … The sump under the kitchen]
+  searched: basement; also: basement -> cellar/vault
+```
+
+The second line is the point of the whole thing: the file never said "basement". Three
+things widen a query, and all three are reported rather than done quietly —
+
+| Widening | Where it comes from | Example |
+| -------- | ------------------- | ------- |
+| Stems | SQLite's porter tokenizer, at index time and again on the words you type | "paint" finds "painted" |
+| Synonyms | a list in the code, plus your own `thesaurus.json` | "cellar" finds "basement" |
+| Near-miss spellings | compared only against words your library already contains | "cellrr" finds "cellar" |
+
+A name is never widened — a box called *Cellar Plans* should not turn up just because
+you asked for a basement. Nothing outside the content confine is read (see
+`BOXGANIZER_CONTENT_ROOT` below), files over 2 MB are left alone as are the last pages
+of a PDF past page 200, and a scan with no text layer is reported as such.
+
+`thesaurus.json` sits next to the database and is plain JSON, a list of lists or a
+word-to-synonyms object, and is merged with the words that ship with Boxganizer:
+
+```json
+{"annex": ["outbuilding", "wing"], "soho": ["london office"]}
+```
+
+The index lives in the database while the files do not, so three ordinary things empty
+it: a library copied to another machine, a database written before the index existed,
+and a file edited outside Boxganizer. `box index` makes the rows true again.
 
 `box edit` writes the whole row to a temporary YAML file, opens `$EDITOR` (or
 `--editor "nano"`), then reads it back and saves. `metadata` and `config` are
@@ -73,8 +110,11 @@ box tui                                      # browse, filter (type), drill in (
 
 ### The web app
 
-A left pane to search and pick (with a **Root** button above it), a main pane to
-show one box — **its content first**, its icon as the alternative. **New box** opens a modal where you choose the type and configure
+A left pane to search and pick — **Root** above it, the search field below, which
+finds boxes by their own fields and by the words inside their text and PDF files,
+showing the passage that answered and what your words were widened to — and a main
+pane to show one box, **its content first**. **New box** opens a modal where you
+choose the type (the list is searchable, because there are 41 of them) and configure
 it. What a box shows depends on what it is:
 
 | Box                | Content view                                              |
