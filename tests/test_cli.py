@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -232,6 +233,10 @@ def test_types_json_carries_the_rules(db_path: Path) -> None:
     assert by_key["pdf"]["extensions"] == [".pdf"]
     assert by_key["mqtt"]["required_metadata"] == ["topic"]
     assert by_key["image"]["allows_children"] is False
+    # Which live source a box reads is asked of its type, never guessed from a string.
+    assert by_key["mqtt"]["live_source"] == "mqtt"
+    assert by_key["sensor"]["live_source"] is None
+    assert by_key["image"]["live_source"] is None
 
 
 def test_types_selectable_leaves_out_the_grouping_levels(
@@ -556,3 +561,68 @@ def test_tree_without_a_root_still_prints_something(
     shown = invoke(db_path, "tree")
     assert shown.exit_code == 0
     assert "X" in shown.output and "Y" in shown.output
+
+
+# -- the value of an mqtt sensor (MQTTResource) -------------------------------
+
+
+def _broker(monkeypatch: pytest.MonkeyPatch, payloads: list[bytes]) -> None:
+    """The broker replaced by a script: it sends what a test wrote, then hangs up."""
+    from boxganizer import mqtt
+
+    async def scripted(target: mqtt.Target) -> AsyncIterator[mqtt.Event]:
+        yield mqtt.Event("connecting")
+        yield mqtt.Event("live")
+        for payload in payloads:
+            yield mqtt.Event("value", mqtt.reading_from(target.topic, payload))
+
+    monkeypatch.setattr(mqtt, "aiomqtt_events", scripted)
+
+
+def _add_cellar_sensor(db_path: Path) -> None:
+    result = invoke(
+        db_path,
+        "box",
+        "add",
+        "Cellar",
+        "-t",
+        "mqtt",
+        "-r",
+        "mqtt://watcher:secretpass@cellar.example:1883",
+        "-m",
+        "topic=cellar/temp",
+    )
+    assert result.exit_code == 0
+
+
+def test_box_value_prints_what_the_broker_sent(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_cellar_sensor(db_path)
+    _broker(monkeypatch, [b"21.4"])
+    result = invoke(db_path, "box", "value", "Cellar")
+    assert result.exit_code == 0
+    assert "21.4" in result.output
+
+
+def test_box_value_keeps_the_password_out_of_the_terminal(db_path: Path) -> None:
+    _add_cellar_sensor(db_path)
+    shown = invoke(db_path, "box", "show", "Cellar")
+    assert shown.exit_code == 0
+    assert "secretpass" not in shown.output
+    assert "cellar.example" in shown.output
+
+
+def test_box_value_fails_when_nothing_arrives(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_cellar_sensor(db_path)
+    _broker(monkeypatch, [])
+    result = invoke(db_path, "box", "value", "Cellar", "--wait", "0.2")
+    assert result.exit_code == 1
+
+
+def test_box_value_refuses_a_box_that_listens_to_nothing(db_path: Path) -> None:
+    invoke(db_path, "box", "add", "Kitchen")
+    result = invoke(db_path, "box", "value", "Kitchen")
+    assert result.exit_code == 1

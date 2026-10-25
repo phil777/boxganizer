@@ -10,6 +10,7 @@ the CLI works when the optional extra is not installed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -25,8 +26,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from boxganizer import __version__, bootstrap, boxtypes, config, editing, infer, thumbs
-from boxganizer.errors import BoxganizerError, EditError, MissingDependency
+from boxganizer import __version__, bootstrap, boxtypes, config, editing, infer, mqtt, thumbs
+from boxganizer.errors import BoxganizerError, EditError, MissingDependency, MqttError
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
@@ -297,13 +298,56 @@ def box_show(
     if box.description:
         lit(f"  {box.description}")
     if box.resource_uri:
-        lit(f"  resource : {box.resource_uri}")
+        # A sensor keeps the way in inside its own address; the terminal shows where
+        # it listens, not the password.
+        shown = mqtt.redact(box.resource_uri) if _listens_mqtt(box) else box.resource_uri
+        lit(f"  resource : {shown}")
     for key, value in sorted(box.metadata.items()):
         lit(f"  {key} = {value}")
     if box.config:
         lit(f"  config   : {json.dumps(box.config, sort_keys=True)}")
     lit(f"  parents  : {', '.join(p.name for p in folks) or '-'}")
     lit(f"  children : {', '.join(c.name for c in kids) or '-'}")
+
+
+@boxes_app.command("value")
+def box_value(
+    ctx: typer.Context,
+    name: str,
+    wait: Annotated[
+        float,
+        typer.Option("--wait", help="Seconds to wait for a message to arrive."),
+    ] = 5.0,
+) -> None:
+    """Print the next value an MQTT box hears on its topic, once, and exit.
+
+    The web page keeps listening and updates itself; this answers one message for
+    a script or a shell. A broker that sends nothing within `--wait` is a failure,
+    because the caller asked for a value and got none.
+    """
+    with _open(ctx, _db_of(ctx)) as store:
+        box = store.get(name)
+    if not _listens_mqtt(box):
+        _fail(f"{box.name} is a {box.box_type} box; it does not listen to an MQTT topic")
+        raise typer.Exit(code=1)
+    target = mqtt.parse_target(box.resource_uri, box.metadata.get("topic"))
+    try:
+        reading = asyncio.run(mqtt.read_once(target, wait_s=wait))
+    except MqttError as exc:
+        _fail(str(exc))
+        raise typer.Exit(code=1) from exc
+    if reading is None:
+        _fail(f"nothing arrived on {target.topic} within {wait:g}s")
+        raise typer.Exit(code=1)
+    if reading.encoding == "utf-8":
+        console.print(Text(reading.value))
+    else:
+        console.print(Text(f"{reading.value} (base64, {len(reading.value)} characters)"))
+
+
+def _listens_mqtt(box: Box) -> bool:
+    """Whether this box reads an MQTT broker — asked of its type, not its string."""
+    return boxtypes.get(box.box_type).live_source == "mqtt"
 
 
 @boxes_app.command("edit")
