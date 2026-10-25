@@ -1090,9 +1090,12 @@ def test_the_file_selector_starts_at_home_when_unconfined(client: TestClient) ->
 @pytest.fixture
 def picker_client(tmp_path: Path) -> Iterator[TestClient]:
     """A server whose content root is the test directory, so the picker may walk it."""
-    store = BoxStore(tmp_path / "picker.db")
-    with TestClient(create_app(store, content_root=tmp_path)) as test_client:
-        yield test_client
+    picker_store = BoxStore(tmp_path / "picker.db")
+    try:
+        with TestClient(create_app(picker_store, content_root=tmp_path)) as test_client:
+            yield test_client
+    finally:
+        picker_store.close()
 
 
 def test_the_file_selector_walks_and_filters(picker_client: TestClient, tree: Path) -> None:
@@ -1178,3 +1181,40 @@ def test_the_picker_opens_on_what_the_field_already_holds(client: TestClient) ->
         "error.detail && error.detail.error ===",
     ):
         assert needle in script, needle
+
+
+# -- the browser pane (BrowserResource) --------------------------------------
+
+
+def test_the_browser_view_frames_the_address_it_is_given(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    for needle in (
+        "const browserView",
+        'registerView("browser", browserView)',
+        'registerView("web", browserView)',
+        'frame.className = "browser-frame"',
+        "allow-scripts allow-same-origin allow-forms allow-popups",
+        "refuses to be shown inside another page",
+    ):
+        assert needle in script, needle
+    # the frame may not push the app itself somewhere else: check the sandbox
+    # value itself, not the whole file, since the comment about it names the flag
+    sandbox_line = next(
+        line for line in script.splitlines() if "allow-scripts allow-same-origin" in line
+    )
+    assert "allow-top-navigation" not in sandbox_line, sandbox_line
+    assert ".browser-frame" in client.get("/static/app.css").text
+
+
+def test_the_browser_box_can_keep_a_new_address(client: TestClient) -> None:
+    created = client.post(
+        "/api/boxes",
+        json={"name": "Docs", "box_type": "browser", "resource_uri": "https://a.test/"},
+    )
+    assert created.status_code == 201
+    moved = client.put("/api/boxes/Docs", json={"resource_uri": "https://b.test/page"}).json()
+    assert moved["resource_uri"] == "https://b.test/page"
+    # the type still insists on http(s)
+    refused = client.put("/api/boxes/Docs", json={"resource_uri": "ftp://nope/"})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["error"] == "invalid_for_type"

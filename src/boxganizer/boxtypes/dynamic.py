@@ -44,7 +44,7 @@ class BrowserResource(WebResource):
     label: ClassVar[str] = "Browser"
     icon: ClassVar[str] = "\U0001f9ed"  # 🧭
     summary: ClassVar[str] = "The page, browsable inside Boxganizer."
-    planned: ClassVar[str] = "Embed a view; keep the current URL back into the box."
+    planned: ClassVar[str] = "Remember the address you navigated to between sessions."
 
 
 class SnapshotResource(WebResource):

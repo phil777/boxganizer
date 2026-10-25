@@ -1964,6 +1964,115 @@ function unableMessage(box, opts, reason) {
   return card;
 }
 
+/* ------------------------------------------------------------- browser ---- */
+
+/**
+ * A `browser` (or plain `web`) box: the page, framed.
+ *
+ * The frame is sandboxed to scripts, forms, popups and its own origin — enough
+ * for a normal page, and it has no `allow-top-navigation`, so a framed site
+ * cannot send the boxganizer window somewhere else. Cross-origin means it cannot
+ * read this page either.
+ *
+ * Framing is not always allowed: a site that sends `X-Frame-Options` or a CSP
+ * `frame-ancestors` shows nothing, and no script can tell from outside. So the
+ * URL is always said out loud under the frame, with a link that opens it for real.
+ */
+const browserView = {
+  render(canvas, box, ctx, mode, opts = {}) {
+    if (mode !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    if (!box.resource_uri) {
+      canvas.append(emptyMessage("This browser box has no address to open."));
+      return;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "browser-view";
+    let current = box.resource_uri;
+
+    const bar = document.createElement("div");
+    bar.className = "browser-bar";
+    const address = document.createElement("input");
+    address.type = "url";
+    address.className = "browser-url";
+    address.value = current;
+    address.setAttribute("aria-label", "Address");
+    const go = document.createElement("button");
+    go.type = "button";
+    go.textContent = "Go";
+    const reload = document.createElement("button");
+    reload.type = "button";
+    reload.textContent = "\u27f3";
+    reload.title = "Reload this frame";
+    const openTab = document.createElement("a");
+    openTab.textContent = "\u2197 new tab";
+    openTab.href = current;
+    openTab.target = "_blank";
+    openTab.rel = "noreferrer";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.textContent = "Save address";
+    save.hidden = true;
+    bar.append(reload, address, go, save, openTab);
+
+    const frame = document.createElement("iframe");
+    frame.className = "browser-frame";
+    frame.setAttribute(
+      "sandbox",
+      "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+    );
+    frame.src = current;
+
+    const note = document.createElement("p");
+    note.className = "browser-note muted";
+    note.textContent = "If the frame stays blank, the site refuses to be shown inside another page.";
+
+    function navigate(to) {
+      const url = String(to || "").trim();
+      if (!url) return;
+      current = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+      address.value = current;
+      openTab.href = current;
+      frame.src = current;
+      save.hidden = current === (box.resource_uri || "").trim();
+    }
+
+    go.addEventListener("click", () => navigate(address.value));
+    address.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        navigate(address.value);
+      }
+    });
+    address.addEventListener("input", () => {
+      save.hidden = address.value.trim() === (box.resource_uri || "").trim();
+    });
+    reload.addEventListener("click", () => {
+      frame.src = current;
+    });
+    save.addEventListener("click", async () => {
+      try {
+        await api.updateBox(box.uuid, { resource_uri: address.value.trim() });
+        box.resource_uri = address.value.trim();
+        save.hidden = true;
+        ctx.status(`address saved on ${box.name}`);
+        refreshSide();
+      } catch (error) {
+        ctx.status(error.message, true);
+      }
+    });
+
+    wrap.append(bar, frame, note);
+    canvas.append(wrap);
+    if (opts.embedded) note.remove(); // a cell is too small for the disclaimer
+  },
+};
+
+registerView("browser", browserView);
+registerView("web", browserView);
+
 /* The fallback for every type that has nothing better yet. */
 registerView("*", {
   render(canvas, box, ctx, mode, opts = {}) {
