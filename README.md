@@ -78,6 +78,8 @@ it. What a box shows depends on what it is:
 | folder, directory, cabinet | its children, as a list or as icons; double-click opens one in place |
 | grid               | rows and columns you set (type them or step them), one child per cell, drag to move, drop on an occupied cell to swap, right-click to create a box in a cell |
 | desktop            | icons anywhere on the surface: drag them with the pointer, drag a corner to size them, arrow-key them about, and let a magnetic grid of the size you chose pull them onto its lines. The resource, when it is a picture, is the wallpaper. Double-click opens a box in place of the desktop |
+| browser, web       | the page, framed; the address bar saves back to the box |
+| mqtt               | the last message on its topic, and every one after it, as the broker sends them. The address is shown with its password hidden, which the box keeps for itself. In a grid cell it is the last value alone: the cell does not listen, the opened box does |
 | anything else      | its icon, and a detail panel with description, resource, metadata and config |
 
 Display mode, list-or-icons, text appearance, the grid layout and the desktop
@@ -86,6 +88,12 @@ another browser. A grid remembers cells by box **uuid**, and a desktop its icon
 positions, so renaming a box does not scramble either; shrinking a grid leaves
 children linked and shows them as "Not placed", and so does a desktop whose icons
 nobody has placed yet.
+
+An MQTT box is the one kind that talks to something outside the machine: while
+its page is open the server subscribes to `mqtt://` or `mqtts://host[:port]/topic`
+and pushes every message to the page. That needs the `live` extra —
+`pip install 'boxganizer[live]'` — and without it the box says so instead of
+failing silently. `box box value NAME` reads one message and exits, for scripts.
 
 `box serve` and `box tui` import their own framework, so `box --help` works
 even when only the core is installed; asking for one without its extra prints
@@ -137,13 +145,15 @@ with its validation, the CLI, the web API with a minimal HTML browser, and the
 text UI all work and are covered by tests.
 
 In the web app these kinds render as themselves: image, text, markdown, pdf,
-video, archive, file, folder, cabinet, directory, grid, desktop, root, web and
-browser. The rest still show their icon and their detail panel.
+video, archive, file, folder, cabinet, directory, grid, desktop, root, web,
+browser and mqtt. The rest still show their icon and their detail panel.
 
-Most box types are **declared, not built**: they enforce their rules, but none of
-them fetches, indexes or talks to anything outside the machine — that is what the
-`planned` line of each type describes. Also not built: import/export, full-text
-search, authentication, and multi-user access.
+Most box types are **declared, not built**: they enforce their rules, but do not
+fetch, index or talk to anything outside the machine — that is what the `planned`
+line of each type describes. MQTT is the first that does, and only while a page
+shows the box: a subscription nobody is watching is still `planned`, as is keeping
+a value across a restart. Also not built: import/export, full-text search,
+authentication, and multi-user access.
 
 See [doc/architecture.md](doc/architecture.md) for the design and
 [doc/development.md](doc/development.md) for the workflow.
