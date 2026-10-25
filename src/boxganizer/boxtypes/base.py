@@ -62,6 +62,9 @@ class BoxType:
     #: True when `resource_uri` points at a local file the interfaces may read —
     #: which is not the same as existing: a directory or a URL is not served raw.
     serves_content: ClassVar[bool] = False
+    #: Which live source the box reads outside this machine — "mqtt", "ssh" — or
+    #: None. A frontend asks this instead of comparing `box_type` with a string.
+    live_source: ClassVar[str | None] = None
     #: What this type is meant to do once it is built. Empty means: already does all it claims.
     planned: ClassVar[str] = ""
 
@@ -136,6 +139,7 @@ class BoxType:
             "allows_children": cls.allows_children,
             "thumbnail_kind": cls.thumbnail_kind,
             "is_root": cls.is_root,
+            "live_source": cls.live_source,
             "parent": parent.key if parent is not None else None,
             "ancestors": [ancestor.key for ancestor in registry.ancestors_of(cls)],
             "resource_uri_required": cls.resource_uri_required,

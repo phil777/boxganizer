@@ -95,6 +95,10 @@ class PlacementError(BoxganizerError):
     """A coordinate, a tile size, or a grid size the desktop cannot accept."""
 
 
+class MqttError(BoxganizerError):
+    """An MQTT address that cannot be connected to, or a broker that refused."""
+
+
 class StoreError(BoxganizerError):
     """The database could not be opened or written."""
 

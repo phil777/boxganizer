@@ -27,7 +27,10 @@ web = [
 tui = [
     "textual>=0.80",
 ]
-all = ["boxganizer[web,tui]"]
+live = [
+    "aiomqtt>=2.0",
+]
+all = ["boxganizer[web,tui,live]"]
 dev = [
     "boxganizer[all]",
     "pytest>=8.0",

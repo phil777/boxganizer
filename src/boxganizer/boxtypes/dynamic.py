@@ -99,9 +99,15 @@ class MQTTResource(SensorResource):
     label: ClassVar[str] = "MQTT Sensor"
     icon: ClassVar[str] = "\U0001f4f6"  # 📶
     summary: ClassVar[str] = "Subscribes to one topic."
+    live_source: ClassVar[str] = "mqtt"
     required_metadata: ClassVar[frozenset[str]] = frozenset({"topic"})
     resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"mqtt", "mqtts"})
-    planned: ClassVar[str] = "Subscribe and cache the last message per topic."
+    # The page subscribes while it shows the box and the server remembers the last
+    # message. What is left is to listen when nobody is looking, and to keep the
+    # value across a restart.
+    planned: ClassVar[str] = (
+        "Hold the subscription when no page is open; keep readings across a restart."
+    )
 
 
 class HTTPResource(SensorResource):
