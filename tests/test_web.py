@@ -710,7 +710,7 @@ def test_the_modal_offers_the_proposal(client: TestClient) -> None:
     script = client.get("/static/app.js").text
     assert "accept-suggestion" in script
     assert "api.suggestType" in script
-    assert 'el("nb-type").value = suggestion.key' in script
+    assert "el(modal.type).value = suggestion.key" in script  # both dialogs share it
 
 
 def test_a_hidden_element_stays_hidden_under_display_flex(client: TestClient) -> None:
@@ -974,3 +974,104 @@ def test_the_explorer_front_end_navigates_and_previews(client: TestClient) -> No
     ):
         assert needle in script, needle
     assert "fs-row" in client.get("/static/app.css").text
+
+
+# -- modify a box (UI 1) and remove a child from a folder (FolderResource) ----
+
+
+def test_a_box_can_be_modified_through_the_api(client: TestClient, tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("# hi")
+    created = client.post(
+        "/api/boxes",
+        json={"name": "Note", "box_type": "text", "resource_uri": str(tmp_path / "note.txt")},
+    ).json()
+    retyped = client.put(
+        f"/api/boxes/{created['uuid']}", json={"resource_uri": str(note), "box_type": "markdown"}
+    )
+    assert retyped.status_code == 200
+    assert retyped.json()["box_type"] == "markdown"
+
+
+def test_retyping_respects_the_new_types_rules(client: TestClient) -> None:
+    created = client.post("/api/boxes", json={"name": "Loose", "box_type": "box"}).json()
+    refused = client.put(f"/api/boxes/{created['uuid']}", json={"box_type": "pdf"})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["error"] == "invalid_for_type"
+
+
+def test_retyping_a_parent_that_holds_boxes_is_refused(client: TestClient) -> None:
+    parent = client.post("/api/boxes", json={"name": "Holding", "box_type": "folder"}).json()
+    child = client.post("/api/boxes", json={"name": "Held", "box_type": "box"}).json()
+    client.post(f"/api/boxes/{parent['uuid']}/children", json={"child": child["uuid"]})
+    png = parent["uuid"][:4] + ".png"  # a valid extension is not enough to earn children
+    refused = client.put(
+        f"/api/boxes/{parent['uuid']}", json={"box_type": "image", "resource_uri": f"/tmp/{png}"}
+    )
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"] == "children_not_allowed"
+
+
+def test_renaming_onto_another_box_is_refused_by_name(client: TestClient) -> None:
+    client.post("/api/boxes", json={"name": "Occupied", "box_type": "box"})
+    created = client.post("/api/boxes", json={"name": "Renamable", "box_type": "box"}).json()
+    response = client.put(f"/api/boxes/{created['uuid']}", json={"name": "occupied"})
+    assert response.status_code == 409
+    assert response.json()["detail"] == {"error": "duplicate_name", "name": "occupied"}
+
+
+def test_an_emptied_description_and_icon_do_not_become_null(
+    client: TestClient, tmp_path: Path
+) -> None:
+    note = tmp_path / "spaced.txt"
+    note.write_text("x")
+    created = client.post(
+        "/api/boxes",
+        json={
+            "name": "Spaced",
+            "box_type": "text",
+            "resource_uri": str(note),
+            "description": "hello",
+            "icon": "⭐",
+        },
+    ).json()
+    assert "uuid" in created, f"create failed: {created}"
+    saved = client.put(
+        f"/api/boxes/{created['uuid']}", json={"description": "   ", "icon": "  "}
+    ).json()
+    assert saved["description"] == ""
+    assert saved["icon"] == "🔤"  # the text type's own glyph
+
+
+def test_the_modify_dialog_cannot_forge_a_uuid(client: TestClient) -> None:
+    """`uuid` is not a writable field: it is not even accepted."""
+    created = client.post("/api/boxes", json={"name": "Forged", "box_type": "box"}).json()
+    response = client.put(
+        f"/api/boxes/{created['uuid']}", json={"name": "Forged", "uuid": "someone-elses"}
+    )
+    assert response.status_code in (200, 422)  # ignored or refused, never applied
+    assert client.get(f"/api/boxes/{created['uuid']}").json()["uuid"] == created["uuid"]
+
+
+def test_the_dialog_can_modify_a_box(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    html = client.get("/").text
+    for needle in (
+        'id="edit-box-modal"',
+        'id="eb-type"',
+        'id="eb-icon"',
+        "function openEditBoxModal(box)",
+        "async function submitEditBox(event)",
+        "api.updateBox(",
+        'label: "Modify…"',
+    ):
+        assert needle in (script + html), needle
+    # the two dialogs share one field machine, so create still works unchanged
+    assert "const CREATE_MODAL" in script and "const EDIT_MODAL" in script
+
+
+def test_a_folder_child_can_be_removed_from_its_folder(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "async function removeFrom(parent, child)" in script
+    assert "Remove from ${parent.name}" in script
+    assert "removeFrom," in script  # handed to views through ctx

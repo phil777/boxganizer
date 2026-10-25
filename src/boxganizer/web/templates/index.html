@@ -61,6 +61,26 @@
       </form>
     </dialog>
 
+    <dialog id="edit-box-modal" aria-label="Modify box">
+      <form id="edit-box-form" method="dialog">
+        <h2>Modify box</h2>
+        <label>Name <input id="eb-name" name="name" required /></label>
+        <label>Type
+          <select id="eb-type" name="box_type"></select>
+        </label>
+        <p id="eb-summary" class="muted"></p>
+        <p id="eb-suggest" class="suggest" hidden></p>
+        <label>Icon <input id="eb-icon" name="icon" maxlength="4" /></label>
+        <label>Description <input id="eb-description" name="description" /></label>
+        <label>Resource <input id="eb-resource" name="resource_uri" placeholder="/path or https://…" /></label>
+        <div id="eb-config" class="config-fields"></div>
+        <footer>
+          <button type="button" id="eb-cancel">Cancel</button>
+          <button type="submit" id="eb-save" class="primary">Save</button>
+        </footer>
+      </form>
+    </dialog>
+
     <!-- One context menu, filled in by the view that was clicked. -->
     <ul id="context-menu" role="menu" hidden></ul>
 

@@ -72,6 +72,12 @@ const api = {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.text();
   },
+  updateBox: (ref, payload) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
   unlink: (ref, child) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/children/${encodeURIComponent(child)}`, {
       method: "DELETE",
@@ -226,6 +232,8 @@ const context = {
   mode: () => state.mode,
   reload: () => openBox(state.current.uuid, { mode: state.mode }),
   showMenu,
+  removeFrom,
+  edit: openEditBoxModal,
 };
 
 function renderMain() {
@@ -372,10 +380,7 @@ function renderSide() {
     });
     item.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      showMenu(event.clientX, event.clientY, [
-        { label: "Open", run: () => openBox(box.uuid, { mode: "content" }) },
-        { label: "Show as icon", run: () => openBox(box.uuid, { mode: "icon" }) },
-      ]);
+      showMenu(event.clientX, event.clientY, boxMenuItems(box));
     });
     list.append(item);
   });
@@ -390,6 +395,30 @@ function markSelected() {
 }
 
 /* ---------------------------------------------------------- context menu --- */
+
+/** The items every box gets, wherever it is shown, plus the caller's own. */
+function boxMenuItems(box, extra = []) {
+  return [
+    { label: "Open", run: () => openBox(box.uuid, { mode: "content" }) },
+    { label: "Show as icon", run: () => openBox(box.uuid, { mode: "icon" }) },
+    { separator: true },
+    { label: "Modify…", run: () => openEditBoxModal(box) },
+    ...extra,
+  ];
+}
+
+/** Unlink a child from one parent. The box itself and its other parents survive. */
+async function removeFrom(parent, child) {
+  try {
+    await api.unlink(parent.uuid, child.uuid);
+    await refreshSide();
+    renderMain();
+    status(`removed ${child.name} from ${parent.name}`);
+  } catch (error) {
+    status(error.message, true);
+  }
+}
+
 
 function showMenu(x, y, items) {
   const menu = el("context-menu");
@@ -420,8 +449,7 @@ function hideMenu() {
 /* ------------------------------------------------------------- new box ----- */
 
 function fillTypeChoices() {
-  const select = el("nb-type");
-  select.replaceChildren();
+  const selects = [el("nb-type"), el("eb-type")].filter(Boolean);
   const selectable = [...state.types.values()].filter((type) => !type.abstract);
   const groups = new Map();
   selectable.forEach((type) => {
@@ -429,16 +457,19 @@ function fillTypeChoices() {
     if (!groups.has(branch)) groups.set(branch, []);
     groups.get(branch).push(type);
   });
-  groups.forEach((types, branch) => {
-    const group = document.createElement("optgroup");
-    group.label = branch;
-    types.forEach((type) => {
-      const option = document.createElement("option");
-      option.value = type.key;
-      option.textContent = `${type.icon} ${type.label}`;
-      group.append(option);
+  selects.forEach((select) => {
+    select.replaceChildren();
+    groups.forEach((types, branch) => {
+      const group = document.createElement("optgroup");
+      group.label = branch;
+      types.forEach((type) => {
+        const option = document.createElement("option");
+        option.value = type.key;
+        option.textContent = `${type.icon} ${type.label}`;
+        group.append(option);
+      });
+      select.append(group);
     });
-    select.append(group);
   });
 }
 
@@ -461,13 +492,40 @@ function fillParentChoices() {
 
 let suggestTimer = null;
 
+/* The two dialogs share their field machinery; only the element ids differ. */
+const CREATE_MODAL = {
+  id: "new-box-modal",
+  form: "new-box-form",
+  name: "nb-name",
+  type: "nb-type",
+  summary: "nb-summary",
+  description: "nb-description",
+  resource: "nb-resource",
+  suggest: "nb-suggest",
+  config: "nb-config",
+  icon: null,
+};
+
+const EDIT_MODAL = {
+  id: "edit-box-modal",
+  form: "edit-box-form",
+  name: "eb-name",
+  type: "eb-type",
+  summary: "eb-summary",
+  description: "eb-description",
+  resource: "eb-resource",
+  suggest: "eb-suggest",
+  config: "eb-config",
+  icon: "eb-icon",
+};
+
 /**
  * Ask the server whether the resource suits a more specific type than the one
  * picked, and offer it. A proposal only: nothing changes until it is clicked.
  */
-async function checkResourceType() {
-  const resource = el("nb-resource").value.trim();
-  const holder = el("nb-suggest");
+async function checkResourceType(modal = CREATE_MODAL) {
+  const resource = el(modal.resource).value.trim();
+  const holder = el(modal.suggest);
   if (!resource) {
     holder.hidden = true;
     holder.replaceChildren();
@@ -475,7 +533,7 @@ async function checkResourceType() {
   }
   let payload;
   try {
-    payload = await api.suggestType(resource, el("nb-type").value);
+    payload = await api.suggestType(resource, el(modal.type).value);
   } catch (error) {
     ctx_free_status(`cannot check the resource type: ${error.message}`, true);
     return;
@@ -494,8 +552,8 @@ async function checkResourceType() {
   accept.dataset.action = "accept-suggestion";
   accept.textContent = `Use ${suggestion.icon} ${suggestion.label}`;
   accept.addEventListener("click", () => {
-    el("nb-type").value = suggestion.key;
-    renderConfigFields();
+    el(modal.type).value = suggestion.key;
+    renderConfigFields(modal);
     holder.hidden = true;
   });
   holder.append(accept);
@@ -507,23 +565,74 @@ function openNewBoxModal(options = {}) {
   state.pendingCell = options.cell || null;
   fillParentChoices();
   if (options.parent) el("nb-parent").value = options.parent;
-  if (options.boxType) el("nb-type").value = options.boxType;
-  renderConfigFields();
-  if (options.name) el("nb-name").value = options.name;
-  if (options.resource) el("nb-resource").value = options.resource;
-  el("new-box-modal").showModal();
-  el("nb-name").focus();
+  if (options.boxType) el(CREATE_MODAL.type).value = options.boxType;
+  renderConfigFields(CREATE_MODAL);
+  if (options.name) el(CREATE_MODAL.name).value = options.name;
+  if (options.resource) el(CREATE_MODAL.resource).value = options.resource;
+  el(CREATE_MODAL.id).showModal();
+  el(CREATE_MODAL.name).focus();
+}
+
+/**
+ * Open the modify dialog for an existing box. Everything the box owns is here,
+ * including its type: the type select is prefilled and a resource that fits a
+ * more specific type offers to switch to it.
+ */
+function openEditBoxModal(box) {
+  state.editing = box.uuid;
+  el(EDIT_MODAL.name).value = box.name;
+  el(EDIT_MODAL.description).value = box.description || "";
+  el(EDIT_MODAL.resource).value = box.resource_uri || "";
+  if (EDIT_MODAL.icon) el(EDIT_MODAL.icon).value = box.icon || "";
+  el(EDIT_MODAL.type).value = box.box_type;
+  renderConfigFields(EDIT_MODAL, box.config || {});
+  el(EDIT_MODAL.suggest).hidden = true;
+  checkResourceType(EDIT_MODAL);
+  el(EDIT_MODAL.id).showModal();
+  el(EDIT_MODAL.name).focus();
+}
+
+async function submitEditBox(event) {
+  event.preventDefault();
+  if (!state.editing) return;
+  const payload = {
+    name: el(EDIT_MODAL.name).value.trim(),
+    description: el(EDIT_MODAL.description).value.trim() || null,
+    box_type: el(EDIT_MODAL.type).value,
+    resource_uri: el(EDIT_MODAL.resource).value.trim() || null,
+  };
+  if (EDIT_MODAL.icon) payload.icon = el(EDIT_MODAL.icon).value.trim() || null;
+  try {
+    payload.config = collectConfig(EDIT_MODAL);
+  } catch (error) {
+    ctx_free_status(error.message, true);
+    return;
+  }
+  try {
+    const saved = await api.updateBox(state.editing, payload);
+    el(EDIT_MODAL.id).close();
+    state.editing = null;
+    await refreshSide();
+    if (state.current && state.current.uuid === saved.uuid) {
+      await openBox(saved.uuid, { mode: state.mode });
+    } else {
+      renderMain(); // a child in the current view may have been renamed or retyped
+    }
+    status(`saved ${saved.name}`);
+  } catch (error) {
+    status(error.message, true);
+  }
 }
 
 function registerConfigForm(typeKey, form) {
   configForms.set(typeKey, form);
 }
 
-function renderConfigFields() {
-  const holder = el("nb-config");
+function renderConfigFields(modal = CREATE_MODAL, values = {}) {
+  const holder = el(modal.config);
   holder.replaceChildren();
-  const typeKey = el("nb-type").value;
-  el("nb-summary").textContent = (state.types.get(typeKey) || {}).summary || "";
+  const typeKey = el(modal.type).value;
+  if (modal.summary) el(modal.summary).textContent = (state.types.get(typeKey) || {}).summary || "";
   const form = formFor(typeKey);
   if (form) {
     form.fields.forEach((field) => {
@@ -532,7 +641,8 @@ function renderConfigFields() {
       const input = document.createElement("input");
       input.name = `config:${field.key}`;
       input.type = field.type || "number";
-      if (field.default !== undefined) input.value = field.default;
+      const preset = values[field.key];
+      input.value = preset !== undefined ? preset : field.default !== undefined ? field.default : "";
       label.append(input);
       holder.append(label);
     });
@@ -541,21 +651,23 @@ function renderConfigFields() {
   extra.textContent = "More config (JSON)";
   const area = document.createElement("textarea");
   area.name = "config:json";
-  area.value = "{}";
+  const rest = { ...values };
+  (form ? form.keys : []).forEach((key) => delete rest[key]);
+  area.value = JSON.stringify(rest, null, 2).replace("{}", "{}");
   extra.append(area);
   holder.append(extra);
 }
 
-function collectConfig() {
+function collectConfig(modal = CREATE_MODAL) {
   const config = {};
-  const form = formFor(el("nb-type").value);
+  const form = formFor(el(modal.type).value);
   (form ? form.keys : []).forEach((key) => {
-    const input = el("nb-config").querySelector(`[name="config:${key}"]`);
+    const input = el(modal.config).querySelector(`[name="config:${key}"]`);
     if (input && input.value !== "") {
       config[key] = input.type === "number" ? Number(input.value) : input.value;
     }
   });
-  const json = el("nb-config").querySelector('[name="config:json"]').value.trim();
+  const json = el(modal.config).querySelector('[name="config:json"]').value.trim();
   if (json) {
     let parsed;
     try {
@@ -639,15 +751,25 @@ async function init() {
   el("new-box").addEventListener("click", () => openNewBoxModal());
   el("go-root").addEventListener("click", goToRoot);
   el("nb-cancel").addEventListener("click", () => el("new-box-modal").close());
-  el("nb-type").addEventListener("change", () => {
-    renderConfigFields();
-    checkResourceType();
+  el(CREATE_MODAL.type).addEventListener("change", () => {
+    renderConfigFields(CREATE_MODAL);
+    checkResourceType(CREATE_MODAL);
   });
   el("nb-resource").addEventListener("input", () => {
     clearTimeout(suggestTimer);
-    suggestTimer = setTimeout(checkResourceType, 300);
+    suggestTimer = setTimeout(() => checkResourceType(CREATE_MODAL), 300);
   });
   el("new-box-form").addEventListener("submit", submitNewBox);
+  el(EDIT_MODAL.type).addEventListener("change", () => {
+    renderConfigFields(EDIT_MODAL, {});
+    checkResourceType(EDIT_MODAL);
+  });
+  el(EDIT_MODAL.resource).addEventListener("input", () => {
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(() => checkResourceType(EDIT_MODAL), 300);
+  });
+  el("edit-box-form").addEventListener("submit", submitEditBox);
+  el("eb-cancel").addEventListener("click", () => el("edit-box-modal").close());
   document.addEventListener("click", hideMenu);
   window.addEventListener("blur", hideMenu);
   document.addEventListener("keydown", (event) => {
@@ -1088,6 +1210,7 @@ function gridCell(box, ctx, row, column, child, depth) {
           ctx.reload();
         },
       },
+      child && { label: "Modify…", run: () => ctx.edit(child) },
       child && { separator: true },
       {
         label: child ? "New box in this cell" : "New box here",
@@ -1147,7 +1270,11 @@ registerView("root", {
           ctx.status(error.message, true);
         }
       });
-      bar.append(open, remove);
+      const modify = document.createElement("button");
+      modify.type = "button";
+      modify.textContent = "Modify…";
+      modify.addEventListener("click", () => ctx.edit(child));
+      bar.append(open, modify, remove);
     }
     holder.append(bar);
 
@@ -1290,12 +1417,19 @@ function childTile(child, parent, ctx) {
   item.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    ctx.showMenu(event.clientX, event.clientY, [
-      { label: "Open", run: () => ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() }) },
-      { label: "Show as icon", run: () => ctx.open(child.uuid, { mode: "icon" }) },
-      { separator: true },
-      { label: "New box in " + parent.name, run: () => ctx.newBox(parent.uuid) },
-    ]);
+    ctx.showMenu(
+      event.clientX,
+      event.clientY,
+      boxMenuItems(
+        { ...child, uuid: child.uuid },
+        [
+          { label: "New box in " + parent.name, run: () => ctx.newBox({ parent: parent.uuid }) },
+          { separator: true },
+          // work_to_do.md § FolderResource: drop the parent/child link, keep the box.
+          { label: `Remove from ${parent.name}`, run: () => ctx.removeFrom(parent, child) },
+        ]
+      )
+    );
   });
   return item;
 }
@@ -1713,6 +1847,7 @@ const boxganizer = {
   api,
   state,
   checkResourceType,
+  openEditBoxModal,
   registerView,
   registerConfigForm,
   addStyle,
