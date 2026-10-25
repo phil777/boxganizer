@@ -136,7 +136,7 @@ needs no advice.
 
 Proposals are never applied on their own:
 
-* `box box add -t file -r report.pdf` creates the box and prints
+* `box add -t file -r report.pdf` creates the box and prints
   `tip: that resource ends with .pdf — it would suit 📕 PDF (-t pdf, or --infer)`.
 * `--infer` accepts on the command line, but **only when `-t` was not typed**: an
   explicit choice is respected even with `--infer` (detected via Click's parameter

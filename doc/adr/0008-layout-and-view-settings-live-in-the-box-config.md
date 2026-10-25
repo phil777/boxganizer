@@ -38,7 +38,7 @@ view without saying so, and `markdown` gets the text view from `text`.
 * A layout follows the box: export the row, open it elsewhere, the grid is still
   arranged. No extra table, no migration per view added.
 * Renaming a box cannot scramble a layout, because cells hold uuids. Names would
-  have made `box box edit` a destructive operation.
+  have made `box edit` a destructive operation.
 * Two sources of truth for the same children — `links` and `config.grid.cells` —
   can disagree. The rule is that `links` wins: a child with no cell is still a
   child, is still shown, and the UI says "Not placed" rather than hiding it.

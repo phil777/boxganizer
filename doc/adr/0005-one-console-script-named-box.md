@@ -25,7 +25,11 @@ command is short.
 ## Consequences
 
 * One help system, one completion target, one muscle memory: `box serve`,
-  `box tree`, `box box show`.
+  `box tree`, `box show`.
+* The commands were later flattened to one level (`box add`, not `box box add`)
+  and `box link in` / `box link out` became `box link` / `box unlink`. This
+  strengthens the decision rather than changing it: fewer words between `box`
+  and the thing you mean.
 * Framework imports happen at command time, so an import error surfaces as a
   message about a missing extra rather than a traceback at `box --help`.
 * The web runner is now a plain function (`boxganizer.web.server.run`) instead
