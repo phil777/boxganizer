@@ -189,7 +189,7 @@ class BoxStore:
                 box.uuid,
                 box.name,
                 box.key,
-                box.description,
+                box.description or "",
                 box.icon,
                 box.box_type,
                 box.resource_uri,
@@ -199,10 +199,24 @@ class BoxStore:
                 now,
             ),
             lastrowid=True,
+            duplicate_name=box.name,
         )
         box.id = row_id
         box.updated_at = datetime.now(UTC)
         return box
+
+    def _check_still_holds_children(self, box: Box, kind: type[boxtypes.BoxType]) -> None:
+        """Refuse a retype that would leave a leaf box holding children.
+
+        Box A may sit inside three parents; retyping A is fine. Retyping a
+        *parent* that holds boxes into a resource type is not — the children
+        would be stranded inside something that cannot contain them.
+        """
+        if kind.allows_children:
+            return
+        held = self.children(box.uuid)
+        if held:
+            raise ChildrenNotAllowed(box.name, kind.key, held[0].name)
 
     def _check_singleton(self, box: Box, kind: type[boxtypes.BoxType]) -> None:
         """Refuse a second box of a type that only allows one."""
@@ -251,6 +265,7 @@ class BoxStore:
         kind = boxtypes.get(box.box_type)
         self._check_singleton(box, kind)
         kind.validate(box)
+        self._check_still_holds_children(box, kind)
         box.touch()
         self._execute(
             """
@@ -262,8 +277,8 @@ class BoxStore:
             (
                 box.name,
                 box.key,
-                box.description,
-                box.icon,
+                box.description or "",
+                box.icon or DEFAULT_ICON,
                 box.box_type,
                 box.resource_uri,
                 json.dumps(box.metadata, sort_keys=True),
@@ -271,6 +286,7 @@ class BoxStore:
                 box.updated_at.isoformat(timespec="seconds"),
                 box.id,
             ),
+            duplicate_name=box.name,
         )
         return box
 
@@ -393,13 +409,25 @@ class BoxStore:
             except sqlite3.Error as exc:
                 raise StoreError(f"query failed: {exc}") from exc
 
-    def _execute(self, sql: str, params: Sequence[object] = (), *, lastrowid: bool = False) -> int:
+    def _execute(
+        self,
+        sql: str,
+        params: Sequence[object] = (),
+        *,
+        lastrowid: bool = False,
+        duplicate_name: str | None = None,
+    ) -> int:
         with self._lock:
             try:
                 cursor = self._conn.execute(sql, params)
             except sqlite3.IntegrityError as exc:
                 self._conn.rollback()
-                raise DuplicateBoxName(str(params[0] if params else "?")) from exc
+                # Only the unique-name index is a duplicate box. Anything else —
+                # a NOT NULL column, a broken foreign key — says what actually
+                # happened instead of blaming the name.
+                if duplicate_name is not None and "boxes.key" in str(exc):
+                    raise DuplicateBoxName(duplicate_name) from exc
+                raise StoreError(f"write refused: {exc}") from exc
             except sqlite3.Error as exc:
                 self._conn.rollback()
                 raise StoreError(f"write failed: {exc}") from exc

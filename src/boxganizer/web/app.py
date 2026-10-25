@@ -13,7 +13,7 @@ import zipfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from boxganizer import __version__, boxtypes, fslist, grid, infer, paths, thumbs
 from boxganizer.errors import (
@@ -49,6 +49,18 @@ CONTENT_ROOT_ENV = "BOXGANIZER_CONTENT_ROOT"
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 _STATIC_DIR = Path(__file__).parent / "static"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
+
+
+class BoxUpdate(BaseModel):
+    """Any subset of a box's own fields. `uuid` and the id are never writable."""
+
+    name: Annotated[str | None, Field(min_length=1, max_length=200)] = None
+    description: Annotated[str | None, Field(max_length=4000)] = None
+    icon: Annotated[str | None, Field(max_length=8)] = None
+    box_type: Annotated[str | None, Field(max_length=60)] = None
+    resource_uri: Annotated[str | None, Field(max_length=2000)] = None
+    metadata: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None
 
 
 class BoxCreate(BaseModel):
@@ -384,6 +396,37 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
             if payload.cell is not None:
                 _grid_place(store, payload.parent, saved.uuid, payload.cell)
         return saved.to_dict()
+
+    @app.put("/api/boxes/{ref}")
+    def update_box(ref: str, payload: BoxUpdate, store: StoreDep) -> dict[str, object]:
+        """Change a box's own fields, including its type.
+
+        Omitted fields stay as they are. Every write goes through the type's
+        validation, so retyping is refused when the resource, metadata, or the
+        boxes inside it no longer fit.
+        """
+        box = store.resolve(ref)
+        data = payload.model_dump(exclude_unset=True)
+        for field in ("name", "description", "icon", "box_type", "resource_uri"):
+            if data.get(field) is None:
+                continue
+            value = str(data[field]).strip()
+            # An emptied description, icon or resource means "unset". A name is left
+            # as typed so the store rejects it with its own message, not silently.
+            if field in {"name", "box_type"}:
+                setattr(box, field, value)
+            elif field == "description":
+                box.description = value  # a column that is never NULL
+            elif field == "icon":
+                # Clearing a custom icon returns the box to its type's glyph.
+                box.icon = value or boxtypes.get(box.box_type).icon or DEFAULT_ICON
+            else:
+                setattr(box, field, value or None)
+        if "metadata" in data and data["metadata"] is not None:
+            box.metadata = dict(data["metadata"])
+        if "config" in data and data["config"] is not None:
+            box.config = dict(data["config"])
+        return store.update(box).to_dict()
 
     @app.delete("/api/boxes/{ref}", status_code=204)
     def delete_box(ref: str, store: StoreDep) -> None:

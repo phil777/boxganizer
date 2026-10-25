@@ -557,3 +557,41 @@ def test_a_file_box_may_not_point_at_a_directory(store: BoxStore, tmp_path: Path
     # the same path is fine as a directory box
     store.add(Box(name="Right", box_type="directory", resource_uri=str(a_directory)))
     assert store.get("Right").box_type == "directory"
+
+
+def test_retyping_a_box_that_holds_boxes_is_refused(store: BoxStore) -> None:
+    """A resource type cannot contain other boxes, so it cannot be retyped into one."""
+    from boxganizer.errors import ChildrenNotAllowed
+
+    parent = store.add(Box(name="holder", box_type="folder"))
+    store.add(Box(name="held", box_type="box"))
+    store.link(parent.uuid, "held")
+    parent.box_type = "image"
+    parent.resource_uri = "/tmp/pic.png"
+    with pytest.raises(ChildrenNotAllowed):
+        store.update(parent)
+    assert store.get("holder").box_type == "folder"
+
+
+def test_retyping_a_leaf_box_that_happens_to_have_parents_is_fine(store: BoxStore) -> None:
+    """Three parents is legal; retyping the *child* is still allowed."""
+    from boxganizer.models import Box as _Box
+
+    store.add(_Box(name="one", box_type="folder"))
+    store.add(_Box(name="two", box_type="folder"))
+    leaf = store.add(_Box(name="leaf", box_type="box"))
+    store.link("one", leaf.uuid)
+    store.link("two", leaf.uuid)
+    leaf.box_type = "text"
+    leaf.resource_uri = "/tmp/a.txt"
+    assert store.update(leaf).box_type == "text"
+
+
+def test_an_integrity_error_that_is_not_a_name_clash_says_so(store: BoxStore) -> None:
+    """The blanket mapping used to blame the name for every integrity failure."""
+    from boxganizer.errors import StoreError
+
+    with pytest.raises(StoreError) as caught:
+        store._execute("INSERT INTO boxes (uuid, name, key) VALUES ('u', NULL, 'k')")
+    assert "NOT NULL" in str(caught.value)
+    assert "already exists" not in str(caught.value)
