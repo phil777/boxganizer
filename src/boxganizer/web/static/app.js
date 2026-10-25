@@ -68,6 +68,14 @@ const api = {
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
   thumbnailUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/thumbnail`,
   root: () => request("/api/root"),
+  filter: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/filter`),
+  setFilter: (ref, value) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/filter`, {
+      method: "PUT",
+      body: JSON.stringify({ filter: value }),
+    }),
+  resolveFolder: (ref) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/resolve`, { method: "POST" }),
   mqtt: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/mqtt`),
   mqttStreamUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/mqtt/stream`,
   contentUrl: (ref, sub) =>
@@ -397,7 +405,7 @@ async function goUp() {
  * Each view owns a namespace, so the grid's cells never collide with a text
  * view's font size.
  */
-async function saveSection(section, patch) {
+async function saveSection(section, patch, { rerender = true } = {}) {
   const current = { ...(state.current.config || {}) };
   current[section] = { ...(current[section] || {}), ...patch };
   state.current = { ...state.current, config: current };
@@ -406,7 +414,9 @@ async function saveSection(section, patch) {
   } catch (error) {
     status(`could not save ${section}: ${error.message}`, true);
   }
-  renderMain();
+  // Some settings belong to a control the page is still holding — a search box
+  // mid-word — and redrawing the pane would rebuild it and lose what is in it.
+  if (rerender) renderMain();
 }
 
 /* ------------------------------------------------------------ left pane ---- */
@@ -545,19 +555,36 @@ function fillTypeChoices() {
   });
 }
 
-function fillParentChoices() {
+function parentOption(select, box) {
+  const option = document.createElement("option");
+  option.value = box.uuid;
+  option.textContent = `${box.icon} ${box.name}`;
+  select.append(option);
+  return option;
+}
+
+async function fillParentChoices(preferred) {
   const select = el("nb-parent");
   select.replaceChildren();
   const none = document.createElement("option");
   none.value = "";
   none.textContent = "(no parent)";
   select.append(none);
-  state.boxes.forEach((box) => {
-    const option = document.createElement("option");
-    option.value = box.uuid;
-    option.textContent = `${box.icon} ${box.name}`;
-    select.append(option);
-  });
+  state.boxes.forEach((box) => parentOption(select, box));
+
+  // The panel holds one page of the library, and may be narrowed by a search, so
+  // the box someone said "New box in" is not necessarily among these. Asking for
+  // that one is what makes the preselection mean something in a big library: setting
+  // a select to a value it has never heard of does nothing at all, and the new box
+  // would quietly be filed somewhere else.
+  if (preferred && !state.boxes.some((box) => box.uuid === preferred)) {
+    try {
+      parentOption(select, await api.box(preferred));
+    } catch {
+      /* the value will not stick; the status line says where the box went */
+    }
+  }
+
   const root = state.boxes.find((box) => box.box_type === "root");
   if (root) select.value = root.uuid;
 }
@@ -633,14 +660,18 @@ async function checkResourceType(modal = CREATE_MODAL) {
 
 /** Type-specific fields. Views add theirs with `registerConfigForm`. */
 /** Open the create-box modal; `parentUuid` presets where the new box goes. */
-function openNewBoxModal(options = {}) {
-  state.pendingCell = options.cell || null;
-  fillParentChoices();
-  if (options.parent) el("nb-parent").value = options.parent;
-  if (options.boxType) el(CREATE_MODAL.type).value = options.boxType;
+async function openNewBoxModal(options = {}) {
+  // A container may ask for a box to be filed in it by handing over its uuid
+  // (`ctx.newBox(box.uuid)`) or an object of choices. Both mean the same thing, so
+  // both preselect the parent: the user said where the box belongs.
+  const choices = typeof options === "string" ? { parent: options } : options || {};
+  state.pendingCell = choices.cell || null;
+  await fillParentChoices(choices.parent);
+  if (choices.parent) el("nb-parent").value = choices.parent;
+  if (choices.boxType) el(CREATE_MODAL.type).value = choices.boxType;
   renderConfigFields(CREATE_MODAL);
-  if (options.name) el(CREATE_MODAL.name).value = options.name;
-  if (options.resource) el(CREATE_MODAL.resource).value = options.resource;
+  if (choices.name) el(CREATE_MODAL.name).value = choices.name;
+  if (choices.resource) el(CREATE_MODAL.resource).value = choices.resource;
   el(CREATE_MODAL.id).showModal();
   el(CREATE_MODAL.name).focus();
 }
@@ -883,12 +914,21 @@ async function submitNewBox(event) {
   }
   try {
     const created = await api.create(payload);
+    const filedIn = payload.parent;
     state.pendingCell = null;
     el("new-box-modal").close();
     el("new-box-form").reset();
     await refreshSide();
-    await openBox(created.uuid, { mode: "content" });
-    status(`created ${created.name}`);
+    if (filedIn) {
+      // The box was made *from* another one, so the view stays on that one and the
+      // new box appears inside it. Jumping to the child would leave the container
+      // the user was working in, which is the place they wanted to see the result.
+      await openBox(filedIn, { mode: state.mode });
+      status(`created ${created.name} in it`);
+    } else {
+      await openBox(created.uuid, { mode: "content" });
+      status(`created ${created.name}`);
+    }
   } catch (error) {
     status(error.message, true);
   }
@@ -1452,7 +1492,22 @@ function gridCell(box, ctx, row, column, child, depth) {
 const DESKTOP_DEFAULTS = { grid: 32, snap: false, tile: 96 };
 
 function desktopOptions(box) {
+  // `canvas` is the size the icons were arranged on, recorded by a full-size view.
+  // It has no default: until a desktop has been seen at full size there is nothing
+  // to scale relative to, and a smaller pane shows it as it is.
   return { ...DESKTOP_DEFAULTS, ...((box.config || {}).desktop || {}) };
+}
+
+/**
+ * How large the canvas under this node is being drawn: 1 when the desktop fills its
+ * pane, less when a grid cell shows the whole of it shrunk. A pointer moves in screen
+ * pixels while an icon is placed in canvas pixels, so a gesture has to divide by this
+ * or the icon runs ahead of the finger and lands off the picture it was sitting on.
+ */
+function surfaceScale(node) {
+  const holder = node && node.closest ? node.closest(".desktop-surface") : null;
+  const value = Number(holder ? holder.dataset.scale : 1);
+  return Number.isFinite(value) && value > 0 ? value : 1;
 }
 
 /** The same rounding the core applies in `boxganizer.desktop`, so the icon the
@@ -1497,27 +1552,36 @@ registerView("desktop", {
     wrap.style.setProperty("--desk-grid", `${Number(options.grid) || DESKTOP_DEFAULTS.grid}px`);
     canvas.append(wrap);
 
-    // The resource field may point at a picture to work on. It is tried before
-    // it is announced, so a resource that is not an image leaves a plain desktop
-    // rather than a broken one.
-    if (box.resource_uri) {
-      // Never put in the page: it exists only to ask whether the file is a
-      // picture, so a resource that is not one leaves a plain desktop.
-      const probe = new Image();
-      probe.onload = () => {
-        wrap.classList.add("has-background");
-        wrap.style.setProperty("--desk-bg", `url(${JSON.stringify(api.rawUrl(box.uuid))})`);
-      };
-      probe.src = api.rawUrl(box.uuid);
-    }
-
     const surface = document.createElement("div");
     surface.className = "desktop-surface";
     wrap.append(surface);
 
-    // Absolutely placed icons do not grow the surface, and the grid lines are
-    // painted on it, so the surface is asked to be big enough for everything on
-    // it plus one cell of breathing room.
+    // The resource field may point at a picture to work on. It is tried before it
+    // is announced, so a resource that is not an image leaves a plain desktop.
+    // The picture is painted on the surface, not on the pane around it: the surface
+    // is what gets scaled, and a picture that scales with its pane while the icons
+    // do not is how an icon ends up somewhere else on the wallpaper.
+    if (box.resource_uri) {
+      const probe = new Image();
+      probe.onload = () => {
+        surface.classList.add("has-background");
+        surface.style.setProperty("--desk-bg", `url(${JSON.stringify(api.rawUrl(box.uuid))})`);
+      };
+      probe.src = api.rawUrl(box.uuid);
+    }
+
+    /*
+     * The surface is a canvas of one fixed size, and the pane showing it can be any
+     * size at all — the main pane, or one square of a grid. So the whole canvas is
+     * scaled by a single factor: the picture on it and every icon on it together.
+     * That is the only way an icon stays on the same spot of the picture when the
+     * desktop is shown small; scaling the two apart is what let them drift.
+     *
+     * The size the canvas was laid out at is kept in the box (`desktop.canvas`),
+     * recorded when the desktop is shown at full size. A cell cannot guess it: the
+     * desktop was arranged in the main pane, and that is the scale the positions are
+     * written in.
+     */
     const cell = Number(options.grid) || DESKTOP_DEFAULTS.grid;
     let widest = 0;
     let tallest = 0;
@@ -1525,8 +1589,67 @@ registerView("desktop", {
       widest = Math.max(widest, (rect.x || 0) + (rect.width || DESKTOP_DEFAULTS.tile));
       tallest = Math.max(tallest, (rect.y || 0) + (rect.height || DESKTOP_DEFAULTS.tile));
     });
-    if (widest) surface.style.minWidth = `${widest + cell}px`;
-    if (tallest) surface.style.minHeight = `${tallest + cell}px`;
+    const extent = { width: widest ? widest + cell : 0, height: tallest ? tallest + cell : 0 };
+    const recorded = options.canvas || {};
+    let laidOut =
+      Number(recorded.width) > 0 && Number(recorded.height) > 0
+        ? { width: Number(recorded.width), height: Number(recorded.height) }
+        : null;
+
+    function fitSurface() {
+      const availW = wrap.clientWidth;
+      const availH = wrap.clientHeight;
+      if (!availW || !availH) return;
+      const target = laidOut || {
+        width: Math.max(availW, extent.width),
+        height: Math.max(availH, extent.height),
+      };
+      const ratio = Math.min(availW / target.width, availH / target.height);
+      // Never enlarged — a desktop with three icons does not blow them up to fill
+      // the window — and never shrunk past the point where an icon's label is
+      // unreadable, which a grid cell can otherwise reach.
+      const scale = Math.max(0.2, Math.min(1, ratio));
+      surface.style.width = `${target.width}px`;
+      surface.style.height = `${target.height}px`;
+      surface.style.transform = scale === 1 ? "" : `scale(${scale})`;
+      surface.dataset.scale = String(scale);
+    }
+
+    fitSurface();
+    // The pane changes size when a grid gets more rows, when the window is dragged,
+    // when the left panel is resized: the canvas follows it, asking nothing of the
+    // server. The observer is released with the pane, like any other live thing.
+    const watcher = new ResizeObserver(() => fitSurface());
+    watcher.observe(wrap);
+    holdLive(() => watcher.disconnect());
+
+    if (!opts.embedded) {
+      // Record the size this desktop is arranged at, so a smaller pane can scale the
+      // same canvas instead of inventing one. Only when it really changed: writing
+      // the config on every paint would keep the database busy for nothing.
+      const wanted = {
+        width: Math.round(surface.getBoundingClientRect().width),
+        height: Math.round(surface.getBoundingClientRect().height),
+      };
+      if (
+        wanted.width > 0 &&
+        wanted.height > 0 &&
+        (Math.abs(wanted.width - Number(recorded.width || 0)) > 2 ||
+          Math.abs(wanted.height - Number(recorded.height || 0)) > 2)
+      ) {
+        const config = box.config || {};
+        const next = { ...config, desktop: { ...(config.desktop || {}), canvas: wanted } };
+        api
+          .setConfig(box.uuid, next)
+          .then(() => {
+            box.config = next;
+          })
+          .catch(() => {
+            /* the desktop still shows; the next full-size view asks again */
+          });
+        laidOut = wanted;
+      }
+    }
 
     children.forEach((child) => {
       const rect = positions[child.uuid];
@@ -1565,7 +1688,16 @@ registerView("desktop", {
       const dragged = event.dataTransfer.getData("text/plain");
       if (!dragged) return;
       const frame = surface.getBoundingClientRect();
-      await placeOnDesktop(box, ctx, dragged, event.clientX - frame.left, event.clientY - frame.top);
+      // The rect is the scaled box; the position the server keeps is in canvas
+      // pixels, so the pointer's distance from the corner is divided back out.
+      const scale = surfaceScale(surface);
+      await placeOnDesktop(
+        box,
+        ctx,
+        dragged,
+        (event.clientX - frame.left) / scale,
+        (event.clientY - frame.top) / scale
+      );
     });
 
     // Right-clicking the desktop itself — not one of its icons, which answer for
@@ -1733,6 +1865,10 @@ function desktopIcon(box, child, rect, options, ctx) {
       top: tile.offsetTop,
       width: tile.offsetWidth,
       height: tile.offsetHeight,
+      // The surface may be drawn smaller than the canvas it is. The pointer travels
+      // in screen pixels; the tile is placed in canvas pixels, so the two are only
+      // the same when the canvas is drawn at one.
+      scale: surfaceScale(tile),
     };
     let latest = null;
     tile.setPointerCapture(event.pointerId);
@@ -1759,8 +1895,8 @@ function desktopIcon(box, child, rect, options, ctx) {
     follow(
       event,
       (origin, next) => ({
-        x: Math.max(0, magnetise(origin.left + next.clientX - origin.x, options)),
-        y: Math.max(0, magnetise(origin.top + next.clientY - origin.y, options)),
+        x: Math.max(0, magnetise(origin.left + (next.clientX - origin.x) / origin.scale, options)),
+        y: Math.max(0, magnetise(origin.top + (next.clientY - origin.y) / origin.scale, options)),
       }),
       (where) => {
         tile.style.left = `${where.x}px`;
@@ -1778,8 +1914,14 @@ function desktopIcon(box, child, rect, options, ctx) {
     follow(
       event,
       (origin, next) => ({
-        width: Math.min(4096, Math.max(32, Math.round(origin.width + next.clientX - origin.x))),
-        height: Math.min(4096, Math.max(32, Math.round(origin.height + next.clientY - origin.y))),
+        width: Math.min(
+          4096,
+          Math.max(32, Math.round(origin.width + (next.clientX - origin.x) / origin.scale))
+        ),
+        height: Math.min(
+          4096,
+          Math.max(32, Math.round(origin.height + (next.clientY - origin.y) / origin.scale))
+        ),
       }),
       (size) => {
         tile.style.width = `${size.width}px`;
@@ -1960,16 +2102,32 @@ registerView("root", {
 
 /* -------------------------------------------------------------- folders ---- */
 
-const FOLDER_DEFAULTS = { layout: "list" };
+const FOLDER_DEFAULTS = { layout: "list", history: [] };
+
+/** How many searches a folder remembers. Long enough to be useful, short enough to read. */
+const FOLDER_HISTORY = 8;
 
 function folderOptions(box) {
-  return { ...FOLDER_DEFAULTS, ...((box.config || {}).folder || {}) };
+  const saved = (box.config || {}).folder || {};
+  // A config written by hand or by an older build may hold anything under `history`.
+  const history = Array.isArray(saved.history)
+    ? saved.history
+        .filter((entry) => typeof entry === "string" && entry.trim() !== "")
+        .slice(0, FOLDER_HISTORY)
+    : [];
+  return { ...FOLDER_DEFAULTS, ...saved, history };
 }
 
 /**
- * A container: its children as a list or as icons in a grid, like a file
- * explorer. Double-click opens a child in this pane, replacing the box that
- * contained it.
+ * A container: its children as a list or as icons, like a file explorer. Double-click
+ * opens a child in this pane, replacing the box that contained it.
+ *
+ * Three things live above the list. A search box, which narrows what is shown by
+ * name or by type — it starts empty every time the folder is opened, because it is a
+ * look at the shelf, not a saved view; what is kept is the list of searches already
+ * tried. A drop target, so a box dragged out of the left panel lands in this folder.
+ * And, for a dynamic folder, the filter that decides its members: membership is the
+ * filter's doing, so the folder says what it asks for and lets you change it.
  */
 const folderView = {
   async render(canvas, box, ctx, mode, opts = {}) {
@@ -1979,6 +2137,10 @@ const folderView = {
     }
     const token = paneGeneration;
     const options = folderOptions(box);
+    const kind = typeOf(box);
+    const dynamic = !!kind.resolves_membership;
+    const fixed = !!kind.filter_is_fixed;
+
     const wrap = document.createElement("div");
     wrap.className = "children-view";
     wrap.dataset.layout = options.layout;
@@ -1991,6 +2153,17 @@ const folderView = {
     title.textContent = `${box.icon} ${box.name}`;
     const count = document.createElement("span");
     count.className = "muted";
+
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "child-search";
+    search.placeholder = "name or type";
+    search.setAttribute("aria-label", `Filter the boxes inside ${box.name}`);
+    const historyId = `folder-history-${box.uuid}`;
+    search.setAttribute("list", historyId);
+    const datalist = document.createElement("datalist");
+    datalist.id = historyId;
+
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.dataset.action = "toggle-layout";
@@ -2002,14 +2175,38 @@ const folderView = {
     const add = document.createElement("button");
     add.type = "button";
     add.textContent = "＋ New box here";
-    add.addEventListener("click", () => ctx.newBox(box.uuid));
+    add.addEventListener("click", () => ctx.newBox({ parent: box.uuid }));
     // Inside a cell or a root block there is no room, and no reason, to change
-    // what the contained folder is showing.
-    toolbar.append(title, count, ...(opts.embedded ? [] : [toggle, add]));
+    // what the contained folder is showing. The search box is shown everywhere:
+    // finding one child among many is exactly what a small pane needs.
+    toolbar.append(title, count, search, ...(opts.embedded ? [] : [toggle, add]));
 
     const holder = document.createElement("div");
     holder.className = "children";
-    wrap.append(toolbar, holder);
+    wrap.append(toolbar, holder, datalist);
+
+    // Anything dropped in this folder is filed in it. Preventing the default is
+    // also what claims the drop: without it the root, whose holder wraps this
+    // view, would take the box as its own child instead.
+    wrap.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      wrap.classList.add("drop-target");
+    });
+    wrap.addEventListener("dragleave", () => wrap.classList.remove("drop-target"));
+    wrap.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      wrap.classList.remove("drop-target");
+      const dragged = event.dataTransfer.getData("text/plain");
+      if (!dragged || dragged === box.uuid) return;
+      try {
+        await api.link(box.uuid, dragged);
+        ctx.status(`filed in ${box.name}`);
+        ctx.reload();
+      } catch (error) {
+        ctx.status(`cannot file it in ${box.name}: ${error.message}`, true);
+      }
+    });
 
     let children = [];
     try {
@@ -2019,14 +2216,167 @@ const folderView = {
       return;
     }
     if (!stillOnScreen(token)) return;
-    count.textContent = ` ${children.length} inside`;
-    if (!children.length) {
-      holder.append(emptyMessage("Nothing in here yet."));
-      return;
+
+    function childMatches(child, term) {
+      if (!term) return true;
+      const childKind = state.types.get(child.box_type) || {};
+      return (
+        child.name.toLowerCase().includes(term) ||
+        String(child.box_type).toLowerCase().includes(term) ||
+        String(childKind.label || "").toLowerCase().includes(term)
+      );
     }
-    children.forEach((child) => holder.append(childTile(child, box, ctx)));
+
+    function draw() {
+      const term = search.value.trim().toLowerCase();
+      const shown = children.filter((child) => childMatches(child, term));
+      count.textContent = term
+        ? ` ${shown.length} of ${children.length} inside`
+        : ` ${children.length} inside`;
+      holder.replaceChildren();
+      if (!children.length) {
+        holder.append(emptyMessage("Nothing in here yet — drag a box from the panel on the left."));
+        return;
+      }
+      if (!shown.length) {
+        holder.append(emptyMessage(`Nothing inside matches “${search.value.trim()}”.`));
+        return;
+      }
+      shown.forEach((child) => holder.append(childTile(child, box, ctx)));
+    }
+
+    function paintHistory() {
+      datalist.replaceChildren();
+      options.history.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry;
+        datalist.append(option);
+      });
+    }
+
+    function rememberSearch() {
+      const term = search.value.trim();
+      if (!term) return;
+      const rest = options.history.filter(
+        (entry) => entry.toLowerCase() !== term.toLowerCase()
+      );
+      options.history = [term, ...rest].slice(0, FOLDER_HISTORY);
+      paintHistory();
+      // Saved without redrawing the pane: a redraw would rebuild this search box
+      // empty, and the term being typed would vanish under the fingers.
+      ctx.saveSection("folder", { history: options.history }, { rerender: false });
+    }
+
+    search.addEventListener("input", draw);
+    search.addEventListener("change", rememberSearch);
+    search.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        rememberSearch();
+      }
+      // Escape empties the box, which is the way out of a filter.
+      if (event.key === "Escape" && search.value) {
+        event.stopPropagation();
+        search.value = "";
+        draw();
+      }
+    });
+    paintHistory();
+    draw();
+
+    if (dynamic) {
+      const bar = document.createElement("div");
+      bar.className = "filter-bar";
+      const says = document.createElement("span");
+      says.className = "filter-says";
+      bar.append(says);
+      wrap.prepend(bar);
+
+      if (fixed) {
+        // A cabinet is defined as the whole library: no filter to read, none to set.
+        says.textContent = "holds every box in the library, and this one";
+      } else {
+        await renderFilterEditor(bar, says, box, ctx, token);
+      }
+    }
   },
 };
+
+/**
+ * The line above a dynamic folder's list: what its filter asks for, in the words
+ * the server uses, and the way to change it. The wording comes from the API because
+ * which types count as which belongs to the type hierarchy, not to this page.
+ */
+async function renderFilterEditor(bar, says, box, ctx, token) {
+  let info = null;
+  try {
+    info = await api.filter(box.uuid);
+  } catch (error) {
+    says.textContent = `filter could not be read: ${error.message}`;
+    return;
+  }
+  if (!stillOnScreen(token)) return;
+
+  says.textContent = info.usable ? `holds every box where ${info.describes}` : info.describes;
+  says.dataset.usable = String(info.usable);
+
+  const nameInput = document.createElement("input");
+  nameInput.type = "search";
+  nameInput.placeholder = "name contains";
+  nameInput.value = info.filter.name || "";
+  nameInput.setAttribute("aria-label", "Names must contain");
+
+  const typeSelect = document.createElement("select");
+  typeSelect.setAttribute("aria-label", "Type must be");
+  const anyType = document.createElement("option");
+  anyType.value = "";
+  anyType.textContent = "any type";
+  typeSelect.append(anyType);
+  [...state.types.values()]
+    .filter((entry) => !entry.abstract)
+    .forEach((entry) => {
+      const option = document.createElement("option");
+      option.value = entry.key;
+      option.textContent = `${entry.icon} ${entry.label}`;
+      typeSelect.append(option);
+    });
+  typeSelect.value = info.filter.type || "";
+
+  const apply = document.createElement("button");
+  apply.type = "button";
+  apply.dataset.action = "apply-filter";
+  apply.textContent = "Apply filter";
+  apply.addEventListener("click", async () => {
+    const wanted = {};
+    if (nameInput.value.trim()) wanted.name = nameInput.value.trim();
+    if (typeSelect.value) wanted.type = typeSelect.value;
+    try {
+      const answer = await api.setFilter(box.uuid, wanted);
+      ctx.status(`filter set: ${answer.describes}`);
+      ctx.reload();
+    } catch (error) {
+      ctx.status(`filter refused: ${error.message}`, true);
+    }
+  });
+
+  const again = document.createElement("button");
+  again.type = "button";
+  again.dataset.action = "resolve-folder";
+  again.textContent = "Re-apply now";
+  again.title =
+    "Write this folder's members again from its filter. Needed after a box was filed in here by hand.";
+  again.addEventListener("click", async () => {
+    try {
+      const answer = await api.resolveFolder(box.uuid);
+      ctx.status(`filter re-applied: ${answer.members} box${answer.members === 1 ? "" : "es"}`);
+      ctx.reload();
+    } catch (error) {
+      ctx.status(`could not re-apply the filter: ${error.message}`, true);
+    }
+  });
+
+  bar.append(nameInput, typeSelect, apply, again);
+}
 
 function childTile(child, parent, ctx) {
   const item = document.createElement("div");

@@ -313,6 +313,30 @@ pre.text {
 .children-view[data-layout="grid"] .child-icon { font-size: 2.2rem; }
 .child-name { overflow-wrap: anywhere; font-size: 0.9rem; }
 
+/* The search box takes the room the toolbar has left, so a long name does not push
+   the layout buttons off the pane. */
+.child-search { flex: 1; min-width: 6rem; max-width: 18rem; }
+.children-toolbar.compact .child-search { max-width: none; }
+
+/* A folder accepts a drop anywhere in its own area, including the empty part of an
+   empty folder — which is the moment someone most wants to drop something. */
+.children-view { min-height: 3.5rem; border: 1px dashed transparent; border-radius: 0.35rem; padding: 0.25rem; }
+.children-view.drop-target { border-color: var(--accent); background: var(--panel); }
+
+/* What a dynamic folder asks for, and the controls to change it. */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--line);
+}
+.filter-says { font-size: 0.82rem; opacity: 0.8; }
+.filter-says[data-usable="false"] { color: var(--accent); opacity: 1; }
+.filter-bar input, .filter-bar select { font: inherit; max-width: 12rem; }
+
 /* ---------- grid view ---------- */
 
 .grid-toolbar {
@@ -692,24 +716,33 @@ pre.text {
 .desktop-view {
   height: calc(100% - 3.5rem);
   min-height: 14rem;
-  overflow: auto;
+  overflow: hidden;
+  position: relative; /* the canvas inside it is taken out of the flow */
   border: 1px solid var(--line);
   border-radius: 0.3rem;
+}
+
+/*
+ * The surface is the canvas: one fixed size, whatever pane shows it. It carries the
+ * wallpaper and the grid, and it is the thing that gets scaled, so the picture, the
+ * lines and the icons keep their places relative to one another at any size. The
+ * width, height and transform come from the view, which knows the pane.
+ */
+.desktop-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
   background-repeat: no-repeat;
 }
 
-/* The resource field, when it holds a picture, is the wallpaper. */
-.desktop-view.has-background {
+/* The resource field, when it holds a picture, is the wallpaper. `cover` is resolved
+   against the canvas rather than the pane, which is what keeps an icon on the same
+   feature of the picture when the desktop is drawn small. */
+.desktop-surface.has-background {
   background-image: var(--desk-bg);
   background-size: cover;
   background-position: center;
-}
-
-/* Icons are placed inside it, so it carries the grid lines too. */
-.desktop-surface {
-  position: relative;
-  min-height: 100%;
-  min-width: 100%;
 }
 
 .desktop-view[data-snap="true"] .desktop-surface {
@@ -717,6 +750,18 @@ pre.text {
     linear-gradient(to right, var(--line) 1px, transparent 1px),
     linear-gradient(to bottom, var(--line) 1px, transparent 1px);
   background-size: var(--desk-grid) var(--desk-grid);
+}
+
+/* Grid over wallpaper: both, the lines on top, each with its own size. */
+.desktop-view[data-snap="true"] .desktop-surface.has-background {
+  background-image:
+    linear-gradient(to right, var(--line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line) 1px, transparent 1px),
+    var(--desk-bg);
+  background-size:
+    var(--desk-grid) var(--desk-grid),
+    var(--desk-grid) var(--desk-grid),
+    cover;
 }
 
 .desktop-surface.drop-target { outline: 2px dashed var(--accent); outline-offset: -4px; }
@@ -772,9 +817,12 @@ pre.text {
   flex-wrap: wrap;
 }
 
-/* A desktop drawn inside a cell keeps its proportions and loses its toolbar. */
-.cell-content .desktop-view,
-.cell-content .desktop-surface { height: 100%; }
+/* A desktop drawn inside a cell keeps its proportions and loses its toolbar. Only the
+   pane is sized here: the canvas inside it is sized by the view, which scales it. */
+/* The desktop's canvas is out of the flow, so the pane around it must be sized by
+   the cell rather than by what is inside it: with nothing to hold it open, a flex
+   item shrinks to its own border and there is no room to fit a canvas into. */
+.cell-content .desktop-view { width: 100%; height: 100%; }
 
 /* The root's slot holds the child itself, and a child that is shown as itself
    brings its own toolbar. So the slot is a column: the toolbar keeps the height

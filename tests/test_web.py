@@ -1812,3 +1812,128 @@ def test_a_dynamic_folder_says_so_in_the_type_list(client: TestClient) -> None:
     assert described["cabinet"]["resolves_membership"] is True
     assert described["cabinet"]["filter_is_fixed"] is True
     assert described["folder"]["resolves_membership"] is False
+
+
+# -- creating a box from a box -----------------------------------------------
+
+
+def test_a_box_made_from_another_starts_with_that_parent(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    # a container may hand over its uuid or an object; both mean "file it here"
+    assert '"string" ? { parent: options } : options' in script
+    assert "await fillParentChoices(choices.parent);" in script
+    assert "if (choices.parent) el(\"nb-parent\").value = choices.parent;" in script
+    # the panel is one page, so the parent asked for is fetched when it is not on it
+    assert "if (preferred && !state.boxes.some((box) => box.uuid === preferred))" in script
+    assert "parentOption(select, await api.box(preferred));" in script
+
+
+def test_creating_from_a_box_leaves_the_view_on_that_box(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "const filedIn = payload.parent;" in script
+    assert "await openBox(filedIn, { mode: state.mode });" in script
+    assert 'status(`created ${created.name} in it`);' in script
+    # ...and only jumps to the child when there was no container to stay on
+    assert "await openBox(created.uuid, { mode: \"content\" });" in script
+
+
+# -- the folder box: drop, search, history ------------------------------------
+
+
+def test_a_folder_takes_a_box_dropped_from_the_panel(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    start = script.index("const folderView = {")
+    end = script.index("function childTile(")
+    folder_block = script[start:end]
+    assert 'wrap.addEventListener("drop"' in folder_block
+    assert "await api.link(box.uuid, dragged);" in folder_block
+    # preventing the default is what claims the drop from the root's holder
+    assert "event.preventDefault();" in folder_block
+    css = client.get("/static/app.css").text
+    assert ".children-view.drop-target" in css
+
+
+def test_a_folder_filters_its_children_by_name_and_type(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    for needle in (
+        'search.className = "child-search"',
+        "function childMatches(child, term)",
+        'String(childKind.label || "").toLowerCase().includes(term)',
+        "search.addEventListener(\"input\", draw);",
+    ):
+        assert needle in script, needle
+    assert ".child-search" in client.get("/static/app.css").text
+
+
+def test_a_search_starts_empty_and_its_history_is_kept_in_the_box(client: TestClient) -> None:
+    """The box is a look at the shelf; the list of things searched for is the memory."""
+    script = client.get("/static/app.js").text
+    # the input is built with no value, so every opening starts clean
+    assert 'search.placeholder = "name or type";' in script
+    # nothing hands the input a saved value: the term is typed, never restored
+    assert "search.value = options." not in script
+    assert "search.value = saved" not in script
+    assert "search.value = folderOptions" not in script
+    # history: deduplicated, newest first, capped, saved into config.folder
+    assert "const FOLDER_HISTORY = 8;" in script
+    assert "function rememberSearch()" in script
+    assert "options.history = [term, ...rest].slice(0, FOLDER_HISTORY);" in script
+    assert 'ctx.saveSection("folder", { history: options.history }, { rerender: false });' in script
+    # and saving it must not redraw the pane, which would clear the term mid-word
+    assert "async function saveSection(section, patch, { rerender = true } = {})" in script
+    assert "if (rerender) renderMain();" in script
+
+
+# -- the dynamic folder and the cabinet, in the page --------------------------
+
+
+def test_a_dynamic_folder_shows_its_filter_and_the_way_to_change_it(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    for needle in (
+        "async function renderFilterEditor(",
+        "await api.filter(box.uuid)",
+        'apply.dataset.action = "apply-filter"',
+        'again.dataset.action = "resolve-folder"',
+        "await api.setFilter(box.uuid, wanted)",
+        "await api.resolveFolder(box.uuid)",
+    ):
+        assert needle in script, needle
+    # a cabinet is everything by definition, so it is said and not edited
+    assert 'says.textContent = "holds every box in the library, and this one";' in script
+    assert ".filter-bar" in client.get("/static/app.css").text
+
+
+def test_the_desktop_is_one_scaled_canvas_so_icons_stay_on_the_picture(
+    client: TestClient,
+) -> None:
+    script = client.get("/static/app.js").text
+    for needle in (
+        "function fitSurface()",
+        'surface.dataset.scale = String(scale);',
+        "const scale = Math.max(0.2, Math.min(1, ratio));",
+        "new ResizeObserver(() => fitSurface())",
+        "holdLive(() => watcher.disconnect());",
+        # the size it was arranged at is recorded for smaller panes to scale by
+        "canvas: wanted }",
+    ):
+        assert needle in script, needle
+    # the wallpaper is painted on the canvas, not on the pane around it
+    assert 'surface.classList.add("has-background");' in script
+    assert 'wrap.classList.add("has-background");' not in script
+    css = client.get("/static/app.css").text
+    assert ".desktop-surface.has-background" in css
+    assert "transform-origin: top left;" in css
+    # a canvas out of the flow needs its pane sized by the cell, not by its content
+    assert ".cell-content .desktop-view { width: 100%; height: 100%; }" in css
+
+
+def test_a_gesture_in_a_scaled_canvas_divides_the_pointer_by_the_scale(
+    client: TestClient,
+) -> None:
+    script = client.get("/static/app.js").text
+    assert "function surfaceScale(node)" in script
+    assert "scale: surfaceScale(tile)," in script
+    assert "(next.clientX - origin.x) / origin.scale" in script
+    assert "(next.clientY - origin.y) / origin.scale" in script
+    # a drop from the panel is a screen distance too
+    assert "(event.clientX - frame.left) / scale" in script
