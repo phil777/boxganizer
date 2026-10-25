@@ -104,8 +104,14 @@ def icon_for(path: Path, kind: str) -> str:
     return "\U0001f4c4" if kind == "file" else (kind_cls or boxtypes.FileResource).icon
 
 
-def list_directory(root: Path, sub: str | None = None) -> list[Entry]:
-    """The entries of `root / sub`, directories first, then by name."""
+def list_directory(
+    root: Path, sub: str | None = None, *, include_hidden: bool = False
+) -> list[Entry]:
+    """The entries of `root / sub`, directories first, then by name.
+
+    Dot files are skipped unless asked for — or unless the directory being listed
+    is itself a dot directory, where hiding everything would hide the point.
+    """
     target = safe_join(root, sub)
     if not target.is_dir():
         return []
@@ -116,7 +122,7 @@ def list_directory(root: Path, sub: str | None = None) -> list[Entry]:
     except OSError:
         return []
     for child in children[:MAX_ENTRIES]:
-        if child.name.startswith(".") and not _show_hidden(target):
+        if child.name.startswith(".") and not (include_hidden or _show_hidden(target)):
             continue
         kind = kind_of(child)
         entries.append(

@@ -58,3 +58,9 @@ def test_a_symlink_out_of_the_tree_is_refused(tree: Path) -> None:
 
 def test_listing_a_file_instead_of_a_directory_is_empty(tree: Path) -> None:
     assert fslist.list_directory(tree, "notes.md") == []
+
+
+def test_hidden_entries_can_be_asked_for(tree: Path) -> None:
+    hidden = [e.name for e in fslist.list_directory(tree, include_hidden=True)]
+    assert ".private" in hidden
+    assert ".private" not in [e.name for e in fslist.list_directory(tree)]

@@ -131,8 +131,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             store.close()
 
 
-def create_app(store: BoxStore | None = None) -> FastAPI:
-    """Build the web app. Pass a store to reuse one (tests, embedding)."""
+def create_app(store: BoxStore | None = None, *, content_root: Path | str | None = None) -> FastAPI:
+    """Build the web app. Pass a store to reuse one (tests, embedding).
+
+    `content_root` overrides `$BOXGANIZER_CONTENT_ROOT`, the directory every file
+    read and every picker browse is confined to.
+    """
     app = FastAPI(
         title="Boxganizer",
         version=__version__,
@@ -140,8 +144,8 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         lifespan=_lifespan,
     )
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-    confine = os.environ.get(CONTENT_ROOT_ENV)
-    app.state.content_root = Path(confine).expanduser() if confine else None
+    effective_root = content_root if content_root is not None else os.environ.get(CONTENT_ROOT_ENV)
+    app.state.content_root = Path(effective_root).expanduser() if effective_root else None
     app.state.store = store if store is not None else BoxStore()
     app.state.owns_store = store is None
 
@@ -306,6 +310,50 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         """Delete the parent/child link. Both boxes stay in the library."""
         parent = store.resolve(ref)
         store.unlink(parent.uuid, child)
+
+    @app.get("/api/fs/browse")
+    def browse_filesystem(
+        request: Request,
+        path: Annotated[str, Query(description="Directory to list.")] = "",
+        show_hidden: Annotated[bool, Query(description="Include dot files.")] = False,
+    ) -> dict[str, object]:
+        """A file selector for the resource field.
+
+        Browsers will not hand out real paths from `<input type=file>`, so the
+        picker walks the server's filesystem. What it may walk is the same rule
+        as everywhere else: `$BOXGANIZER_CONTENT_ROOT` when set, otherwise the
+        user's home directory, and never above that.
+        """
+        confine = _browse_root(request)
+        # A relative path or a leading `~` is read against the confine, never
+        # against the process working directory, and the resolved result must
+        # still be inside it.
+        requested = Path(path).expanduser() if path else confine
+        target = (requested if requested.is_absolute() else confine / requested).resolve()
+        if not _inside(target, confine):
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "path_out_of_range", "root": str(confine)},
+            )
+        if not target.exists():
+            raise HTTPException(
+                status_code=404, detail={"error": "no_such_path", "path": str(target)}
+            )
+        if not target.is_dir():
+            raise HTTPException(
+                status_code=409, detail={"error": "not_a_directory", "path": str(target)}
+            )
+        entries = [
+            entry.as_dict() for entry in fslist.list_directory(target, include_hidden=show_hidden)
+        ]
+        parent = target.parent
+        return {
+            "path": str(target),
+            "parent": str(parent) if parent != target and _inside(parent, confine) else None,
+            "root": str(confine),
+            "home": str(Path.home()),
+            "entries": entries,
+        }
 
     @app.get("/api/boxes/{ref}/listing")
     def read_listing(
@@ -482,6 +530,12 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _browse_root(request: Request) -> Path:
+    """How far the file selector may wander."""
+    confine = getattr(request.app.state, "content_root", None)
+    return Path(confine) if confine is not None else Path.home()
 
 
 def _box_file(

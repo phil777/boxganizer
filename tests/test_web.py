@@ -1075,3 +1075,106 @@ def test_a_folder_child_can_be_removed_from_its_folder(client: TestClient) -> No
     assert "async function removeFrom(parent, child)" in script
     assert "Remove from ${parent.name}" in script
     assert "removeFrom," in script  # handed to views through ctx
+
+
+# -- the resource file selector (UI 2) ---------------------------------------
+
+
+def test_the_file_selector_starts_at_home_when_unconfined(client: TestClient) -> None:
+    payload = client.get("/api/fs/browse").json()
+    assert Path(payload["path"]) == Path.home()
+    assert payload["parent"] is None  # nothing above the confine
+    assert payload["root"] == str(Path.home())
+
+
+@pytest.fixture
+def picker_client(tmp_path: Path) -> Iterator[TestClient]:
+    """A server whose content root is the test directory, so the picker may walk it."""
+    store = BoxStore(tmp_path / "picker.db")
+    with TestClient(create_app(store, content_root=tmp_path)) as test_client:
+        yield test_client
+
+
+def test_the_file_selector_walks_and_filters(picker_client: TestClient, tree: Path) -> None:
+    sub = picker_client.get("/api/fs/browse", params={"path": str(tree / "photos")}).json()
+    assert [entry["name"] for entry in sub["entries"]] == ["a.png"]
+    assert sub["parent"] == str(tree)
+
+
+def test_the_file_selector_hides_dot_files_unless_asked(
+    picker_client: TestClient, tree: Path
+) -> None:
+    names = [
+        e["name"]
+        for e in picker_client.get("/api/fs/browse", params={"path": str(tree)}).json()["entries"]
+    ]
+    assert ".hidden" not in names
+    shown = [
+        e["name"]
+        for e in picker_client.get(
+            "/api/fs/browse", params={"path": str(tree), "show_hidden": "true"}
+        ).json()["entries"]
+    ]
+    assert ".hidden" in shown
+
+
+def test_the_file_selector_refuses_to_climb_above_its_confine(client: TestClient) -> None:
+    for attempt in ("/etc", "../../etc", str(Path.home().parent)):
+        response = client.get("/api/fs/browse", params={"path": attempt})
+        assert response.status_code == 403, attempt
+        assert response.json()["detail"]["error"] == "path_out_of_range"
+
+
+def test_the_file_selector_reads_tilde_and_relative_paths_against_the_confine(
+    client: TestClient,
+) -> None:
+    assert client.get("/api/fs/browse", params={"path": "~"}).json()["path"] == str(Path.home())
+
+
+def test_a_missing_or_non_directory_path_is_an_honest_error(
+    picker_client: TestClient, tree: Path
+) -> None:
+    missing = picker_client.get("/api/fs/browse", params={"path": str(tree / "nope")})
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["error"] == "no_such_path"
+    not_a_dir = picker_client.get("/api/fs/browse", params={"path": str(tree / "notes.md")})
+    assert not_a_dir.status_code == 409
+    assert not_a_dir.json()["detail"]["error"] == "not_a_directory"
+
+
+def test_the_picker_is_confined_to_the_content_root(
+    picker_client: TestClient, tmp_path: Path
+) -> None:
+    response = picker_client.get("/api/fs/browse", params={"path": str(tmp_path.parent)})
+    assert response.status_code == 403
+    assert response.json()["detail"]["root"] == str(tmp_path)
+
+
+def test_the_resource_field_offers_the_selector(client: TestClient) -> None:
+    html = client.get("/").text
+    script = client.get("/static/app.js").text
+    assert 'id="file-picker"' in html
+    # both dialogs offer it, and it writes back into the field that asked
+    assert html.count('class="browse" data-resource="nb-resource"') == 1
+    assert html.count('class="browse" data-resource="eb-resource"') == 1
+    for needle in (
+        "async function openFilePicker(inputId)",
+        "async function showIn(path)",
+        "function pick(chosen)",
+        "api.browse(",
+        'dispatchEvent(new Event("input"',
+    ):
+        assert needle in script, needle
+
+
+def test_the_picker_opens_on_what_the_field_already_holds(client: TestClient) -> None:
+    """A directory resource opens on itself, a file on its folder, a refusal falls back."""
+    script = client.get("/static/app.js").text
+    for needle in (
+        "if (start && (await showIn(start))) return;",
+        'const parent = start.replace(/\\/[^/]*\\/?$/, "");',
+        'await showIn("");',
+        "the picker is confined to",
+        "error.detail && error.detail.error ===",
+    ):
+        assert needle in script, needle

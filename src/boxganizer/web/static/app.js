@@ -29,14 +29,21 @@ async function request(path, options = {}) {
   });
   if (!response.ok) {
     let reason = `HTTP ${response.status}`;
+    let detail;
     try {
       const body = await response.json();
-      const detail = body && body.detail;
-      reason = (detail && (detail.reason || detail.error)) || (typeof detail === "string" ? detail : reason);
+      detail = body && body.detail;
+      reason =
+        (detail && (detail.reason || detail.error)) ||
+        (typeof detail === "string" ? detail : reason);
     } catch {
       /* a body that is not JSON says nothing more useful than the status */
     }
-    throw new Error(reason);
+    const error = new Error(reason);
+    // Callers that can say more (the file picker names the confine) read this.
+    error.status = response.status;
+    error.detail = typeof detail === "string" ? { error: detail } : detail;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -67,6 +74,10 @@ const api = {
   archive: (ref, sub) => request(api.archiveUrl(ref, sub)),
   archiveUrl: (ref, sub) =>
     `/api/boxes/${encodeURIComponent(ref)}/archive?sub=${encodeURIComponent(sub || "")}`,
+  browse: (path, showHidden) =>
+    request(
+      `/api/fs/browse?path=${encodeURIComponent(path || "")}&show_hidden=${showHidden ? "true" : "false"}`
+    ),
   textAt: async (url) => {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -624,6 +635,106 @@ async function submitEditBox(event) {
   }
 }
 
+/* --------------------------------------------------------- file picker ---- */
+
+const picker = { target: null, path: "", root: null, selected: null };
+
+/**
+ * A selector over the machine the server runs on. This cannot be
+ * `<input type=file>`: a browser hands back a blob and hides the real path, and
+ * a resource URI has to be the path the server will read. What is browsable is
+ * the same confine the file endpoints use.
+ */
+async function openFilePicker(inputId) {
+  picker.target = inputId;
+  picker.selected = null;
+  picker.path = "";
+  el("fp-show-hidden").checked = false;
+  el("fp-filter").value = "";
+  el("fp-path").value = "";
+  el("fp-note").textContent = "opening\u2026";
+  el("file-picker").showModal();
+
+  // Start where the field points. A directory resource opens on itself; a file
+  // opens on the folder holding it; a path the confine refuses falls back to the
+  // confine, with the refusal said out loud rather than left as a stale listing.
+  const start = (el(inputId).value || "").trim();
+  if (start && (await showIn(start))) return;
+  if (start.includes("/")) {
+    const parent = start.replace(/\/[^/]*\/?$/, "");
+    if (parent && (await showIn(parent))) return;
+  }
+  await showIn("");
+}
+
+async function showIn(path) {
+  let payload;
+  try {
+    payload = await api.browse(path, el("fp-show-hidden").checked);
+  } catch (error) {
+    const outside =
+      error.detail && error.detail.error === "path_out_of_range"
+        ? ` \u2014 the picker is confined to ${error.detail.root || "its root"}`
+        : "";
+    el("fp-note").textContent = `cannot list ${path || "here"}: ${error.message}${outside}`;
+    return false;
+  }
+  picker.path = payload.path;
+  picker.root = payload.root;
+  picker.selected = null;
+  el("fp-path").value = payload.path;
+  el("fp-note").textContent =
+    payload.root === payload.path
+      ? `browsing from ${payload.root}`
+      : `within ${payload.root}`;
+  el("fp-up").disabled = payload.parent === null;
+  el("fp-choose").textContent = "Choose this folder";
+  const filter = el("fp-filter").value.trim().toLowerCase();
+  const list = el("fp-list");
+  list.replaceChildren();
+  const entries = payload.entries.filter(
+    (entry) => !filter || entry.name.toLowerCase().includes(filter)
+  );
+  if (!entries.length) {
+    list.append(emptyMessage(filter ? "Nothing here matches the filter." : "No files here."));
+    return true;
+  }
+  entries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = `fp-row ${entry.kind === "dir" ? "dir" : "file"}`;
+    row.setAttribute("role", "option");
+    const glyph = document.createElement("span");
+    glyph.textContent = entry.kind === "dir" ? "📁" : entry.icon || "\u{1f4c4}";
+    const name = document.createElement("span");
+    name.className = "fp-name";
+    name.textContent = entry.name;
+    const size = document.createElement("span");
+    size.className = "fp-size";
+    size.textContent = entry.kind === "dir" ? "" : formatSize(entry.size);
+    row.append(glyph, name, size);
+    row.addEventListener("click", () => {
+      list.querySelectorAll(".fp-row").forEach((other) => other.classList.toggle("selected", other === row));
+      picker.selected = entry;
+      el("fp-choose").textContent =
+        entry.kind === "dir" ? `Choose ${entry.name}/` : `Choose ${entry.name}`;
+    });
+    row.addEventListener("dblclick", () =>
+      entry.kind === "dir" ? showIn(`${entry.path}/`) : pick(entry.path)
+    );
+    list.append(row);
+  });
+  return true;
+}
+
+/** Put the chosen path in the resource field and let the type check react. */
+function pick(chosen) {
+  const input = el(picker.target);
+  input.value = chosen;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  el("file-picker").close();
+  status(`resource set to ${chosen}`);
+}
+
 function registerConfigForm(typeKey, form) {
   configForms.set(typeKey, form);
 }
@@ -770,6 +881,28 @@ async function init() {
   });
   el("edit-box-form").addEventListener("submit", submitEditBox);
   el("eb-cancel").addEventListener("click", () => el("edit-box-modal").close());
+
+  document.querySelectorAll(".browse").forEach((button) =>
+    button.addEventListener("click", () => openFilePicker(button.dataset.resource))
+  );
+  el("fp-go").addEventListener("click", () => showIn(el("fp-path").value.trim()));
+  el("fp-path").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      showIn(el("fp-path").value.trim());
+    }
+  });
+  el("fp-up").addEventListener("click", () => {
+    const parent = picker.path.replace(/\/[^/]*\/?$/, "");
+    showIn(parent || "");
+  });
+  el("fp-home").addEventListener("click", () => showIn(""));
+  el("fp-filter").addEventListener("input", () => showIn(picker.path));
+  el("fp-show-hidden").addEventListener("change", () => showIn(picker.path));
+  el("fp-cancel").addEventListener("click", () => el("file-picker").close());
+  el("fp-choose").addEventListener("click", () =>
+    pick(picker.selected ? picker.selected.path : picker.path)
+  );
   document.addEventListener("click", hideMenu);
   window.addEventListener("blur", hideMenu);
   document.addEventListener("keydown", (event) => {

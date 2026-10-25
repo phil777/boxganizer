@@ -48,7 +48,12 @@
         </label>
         <p id="nb-summary" class="muted"></p>
         <label>Description <input id="nb-description" name="description" /></label>
-        <label>Resource <input id="nb-resource" name="resource_uri" placeholder="/path or https://…" /></label>
+        <div class="resource-field">
+          <label>Resource <input id="nb-resource" name="resource_uri" placeholder="/path or https://…" /></label>
+          <button type="button" class="browse" data-resource="nb-resource" title="Pick a file from the server">
+            Browse…
+          </button>
+        </div>
         <p id="nb-suggest" class="suggest" hidden></p>
         <label>Put it in
           <select id="nb-parent" name="parent"></select>
@@ -72,13 +77,41 @@
         <p id="eb-suggest" class="suggest" hidden></p>
         <label>Icon <input id="eb-icon" name="icon" maxlength="4" /></label>
         <label>Description <input id="eb-description" name="description" /></label>
-        <label>Resource <input id="eb-resource" name="resource_uri" placeholder="/path or https://…" /></label>
+        <div class="resource-field">
+          <label>Resource <input id="eb-resource" name="resource_uri" placeholder="/path or https://…" /></label>
+          <button type="button" class="browse" data-resource="eb-resource" title="Pick a file from the server">
+            Browse…
+          </button>
+        </div>
         <div id="eb-config" class="config-fields"></div>
         <footer>
           <button type="button" id="eb-cancel">Cancel</button>
           <button type="submit" id="eb-save" class="primary">Save</button>
         </footer>
       </form>
+    </dialog>
+
+    <!-- A file selector over the server's filesystem, for the resource field. -->
+    <dialog id="file-picker" aria-label="Choose a file">
+      <div class="picker-head">
+        <input id="fp-path" placeholder="/path" aria-label="Path" />
+        <button type="button" id="fp-go">Go</button>
+        <button type="button" id="fp-up" title="Up one folder">↑</button>
+        <button type="button" id="fp-home" title="Home">⌂</button>
+      </div>
+      <p id="fp-note" class="muted"></p>
+      <div class="picker-filter">
+        <input id="fp-filter" placeholder="Filter names" aria-label="Filter names" />
+        <label class="fp-hidden">
+          <input id="fp-show-hidden" type="checkbox" />
+          show hidden
+        </label>
+      </div>
+      <div id="fp-list" class="picker-list" role="listbox" aria-label="Files"></div>
+      <footer>
+        <button type="button" id="fp-cancel">Cancel</button>
+        <button type="button" id="fp-choose" class="primary">Choose this folder</button>
+      </footer>
     </dialog>
 
     <!-- One context menu, filled in by the view that was clicked. -->

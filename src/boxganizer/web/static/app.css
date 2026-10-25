@@ -549,3 +549,37 @@ pre.text {
 
 .unable { display: flex; flex-direction: column; align-items: center; gap: 0.4rem; }
 .unable a { color: var(--accent); }
+
+/* ---------- the file selector ---------- */
+
+.resource-field { display: flex; align-items: end; gap: 0.4rem; }
+.resource-field label { flex: 1; }
+.resource-field .browse { flex: none; }
+
+.picker-head { display: flex; gap: 0.3rem; }
+.picker-head input { flex: 1; }
+.picker-filter { display: flex; align-items: center; gap: 0.5rem; margin: 0.4rem 0; }
+.picker-filter input[type="text"],
+.picker-filter > input:not([type]) { flex: 1; }
+.fp-hidden { display: flex; align-items: center; gap: 0.25rem; font-size: 0.8rem; }
+.picker-list {
+  height: 18rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  margin: 0.2rem 0 0.6rem;
+  padding: 0.2rem;
+}
+.fp-row {
+  display: grid;
+  grid-template-columns: 1.6em 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.15rem 0.35rem;
+  border-radius: 0.2rem;
+  cursor: pointer;
+}
+.fp-row:hover { background: var(--line); }
+.fp-row.selected { outline: 1px solid var(--accent); }
+.fp-row.dir .fp-name { font-weight: 600; }
+.fp-size { font-size: 0.75rem; opacity: 0.65; font-variant-numeric: tabular-nums; }
