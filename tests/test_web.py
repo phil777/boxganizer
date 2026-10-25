@@ -2057,3 +2057,63 @@ def test_the_page_sends_the_right_click_spot_of_the_canvas(client: TestClient) -
     assert "place: state.pendingPlace || null," in script
     # and leaving the modal forgets it, so it cannot land in the next box's path
     assert 'el("new-box-modal").addEventListener("close"' in script
+
+
+def test_the_mindmap_view_is_registered_and_draws_a_map(client: TestClient) -> None:
+    """The picture is nodes, curves and a keyboard — the three the type promises."""
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    assert 'registerView("mindmap"' in script
+    assert "mindmapLayout" in script
+    # the lines are real SVG paths, and they are curved rather than ruled
+    assert 'createElementNS(SVG_NS, "path")' in script
+    assert " C " in script
+    # a node is a rounded tile carrying the box's own icon and name
+    assert "mindmap-node" in script
+    assert ".mindmap-node" in css
+    assert "border-radius" in css
+
+
+def test_the_mindmap_answers_the_keys_the_type_promises(client: TestClient) -> None:
+    """Insert, Enter, the arrows, and Ctrl doing the two things Ctrl does here."""
+    script = client.get("/static/app.js").text
+    for key in ('"Insert"', '"Enter"', '"ArrowUp"', '"ArrowDown"', '"ArrowLeft"', '"ArrowRight"'):
+        assert key in script, key
+    assert "ctrlKey" in script
+    # Insert hangs a node under the one in hand; Enter beside it, not under it
+    assert "addNode(row || drawn.centre, null)" in script
+    assert "addNode(row.parent, row.node.uuid)" in script
+    # Ctrl is read against the side the branch grows on, so it always means
+    # away-from-the-centre or towards-it whichever way the map is facing
+    assert 'const away = (key === "ArrowRight" && row.sign === 1)' in script
+    # and a name is written where the node stands
+    assert 'contentEditable = "plaintext-only"' in script
+
+
+def test_a_branch_keeps_one_colour_from_the_centre_down(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "MINDMAP.palette[index % MINDMAP.palette.length]" in script
+    # a child is walked with its parent's colour, not with a fresh one
+    assert "walk(child, depth + 1, colour, sign, row)" in script
+
+
+def test_the_page_asks_the_map_endpoints_it_needs(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    for path in (
+        "/mindmap",
+        "/mindmap/side",
+        "/mindmap/order",
+        "/mindmap/hierarchy",
+        "/mindmap/node",
+        "/mindmap/fill",
+    ):
+        assert path in script, path
+
+
+def test_a_map_shown_in_a_cell_is_scaled_rather_than_cropped(client: TestClient) -> None:
+    """In a grid square, the whole map is drawn smaller: the shape is the point."""
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    assert "mindmap-fitted" in script
+    assert "new ResizeObserver(fit)" in script
+    assert ".cell-content .mindmap-view" in css

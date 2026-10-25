@@ -78,13 +78,20 @@ class Grid(OrganizerBox):
 
 
 class Mindmap(OrganizerBox):
-    """Children radiate from the centre."""
+    """Children radiate from the centre as nodes of a map.
+
+    The map *is* the containment graph: a node is a box, a branch is that box's
+    children, and everything the page does to the picture — a new node, a box dragged
+    onto one, a branch sent to the other side — is an ordinary link and an ordinary
+    box. Only which side a branch grows on, and the order of siblings, are the map's
+    own business, and they live in `config.mindmap` (see :mod:`boxganizer.mindmap`).
+    """
 
     key: ClassVar[str] = "mindmap"
     label: ClassVar[str] = "Mindmap"
     icon: ClassVar[str] = "\U0001f578️"  # 🕸️
-    summary: ClassVar[str] = "One idea in the middle, branches around it."
-    planned: ClassVar[str] = "Radial layout, branches sorted by name."
+    summary: ClassVar[str] = "One idea in the middle, branches of thought around it."
+    maps_nodes: ClassVar[bool] = True
 
 
 class Graph(OrganizerBox):

@@ -24,6 +24,7 @@ from boxganizer import (
     fslist,
     grid,
     infer,
+    mindmap,
     mqtt,
     paths,
     thumbs,
@@ -155,6 +156,57 @@ class DesktopSettingsUpdate(BaseModel):
     snap: bool
 
 
+class MindmapSide(BaseModel):
+    """Which side of the centre a branch grows on."""
+
+    child: str = Field(description="Name or uuid of the node.")
+    side: str | None = Field(default=None, description='"left" or "right".')
+    flip: bool = Field(default=False, description="Send it to the other side instead.")
+
+
+class MindmapOrder(BaseModel):
+    """Slide a node among its siblings."""
+
+    child: str
+    parent: str | None = Field(
+        default=None, description="The node it hangs from; the map itself when omitted."
+    )
+    delta: int = Field(description="-1 towards the first node of the branch, +1 towards the last.")
+
+
+class MindmapHierarchy(BaseModel):
+    """Move a node deeper into the map, or out towards the centre."""
+
+    child: str
+    direction: str = Field(
+        description='"out" hangs it off the sibling above; "in" off the grandparent.'
+    )
+
+
+class MindmapNode(BaseModel):
+    """A new node: a box, filed where the map wants it."""
+
+    parent: str | None = Field(
+        default=None, description="Node to hang it under; the centre by default."
+    )
+    after: str | None = Field(
+        default=None, description="Sibling to place it after; last by default."
+    )
+    name: str | None = Field(default=None, description='Defaults to the next unused "new idea".')
+    box_type: str | None = Field(
+        default=None, description="A container by default; any type that holds boxes."
+    )
+
+
+class MindmapFill(BaseModel):
+    """What was dragged onto a node, and which node caught it."""
+
+    node: str
+    with_box: str = Field(alias="with", description="Name or uuid of the box being dropped.")
+
+    model_config = {"populate_by_name": True}
+
+
 class ConfigUpdate(BaseModel):
     """Request body for replacing a box's config."""
 
@@ -274,9 +326,14 @@ def create_app(
         )
 
     @app.exception_handler(PlacementError)
-    async def _bad_desktop_move(request: Request, exc: PlacementError) -> JSONResponse:
+    async def _bad_placement(request: Request, exc: PlacementError) -> JSONResponse:
+        """A layout the type does not do, or a node not in the map it was asked about.
+
+        Named for placement rather than for any one surface: the desktop, the grid and
+        the mindmap all answer to it, and the reason says which.
+        """
         return JSONResponse(
-            status_code=422, content={"detail": {"error": "bad_desktop_move", "reason": str(exc)}}
+            status_code=422, content={"detail": {"error": "bad_placement", "reason": str(exc)}}
         )
 
     @app.exception_handler(MqttError)
@@ -442,6 +499,180 @@ def create_app(
         settings = desktop.Settings(grid=payload.grid, snap=payload.snap)
         box.config = desktop.to_config(box.config, settings=settings)
         return store.update(box).to_dict()
+
+    @app.get("/api/boxes/{ref}/mindmap")
+    def read_mindmap(ref: str, store: StoreDep) -> dict[str, object]:
+        """The map: the tree below this box, each node carrying its side and children.
+
+        One call rather than one per node, because a mindmap is drawn as a whole and
+        the walk down is where cycles and the size limit have to be caught.
+        """
+        box = _mindmap_box(store, ref)
+        return {"map": mindmap.node(store, box.uuid)}
+
+    @app.post("/api/boxes/{ref}/mindmap/side")
+    def set_mindmap_side(ref: str, payload: MindmapSide, store: StoreDep) -> dict[str, object]:
+        """Put a branch on the other side of the centre, or on a named one."""
+        box = _mindmap_box(store, ref)
+        child = store.resolve(payload.child)
+        if payload.flip and payload.side is not None:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "side_or_flip", "reason": "give a side, or ask to flip, not both"},
+            )
+        box.config = mindmap.pin_sides(
+            box.config, [kid.uuid for kid in mindmap.children_of(store, box, box.config)]
+        )
+        tree = mindmap.node(store, box.uuid)
+        parents = mindmap.parent_index(tree)
+        parent_uuid = parents.get(child.uuid)
+        if parent_uuid is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "not_a_node", "reason": "that box is not part of this map"},
+            )
+        branch = mindmap.line_up(mindmap.find(tree, parent_uuid) or {})
+        index = branch.index(child.uuid) if child.uuid in branch else 0
+        box.config = (
+            mindmap.set_side(box.config, child.uuid, payload.side)
+            if payload.side is not None
+            else mindmap.flip_side(box.config, child.uuid, index=index)
+        )
+        store.update(box)
+        return {"map": mindmap.node(store, box.uuid)}
+
+    @app.post("/api/boxes/{ref}/mindmap/order")
+    def move_mindmap_sibling(
+        ref: str, payload: MindmapOrder, store: StoreDep
+    ) -> dict[str, object]:
+        """Move a node up or down among the children it hangs among.
+
+        The order is the map's, not the links': what arrived first is rarely the order
+        someone wants a branch drawn in, and the links table answers containment only.
+        """
+        box = _mindmap_box(store, ref)
+        parent = store.resolve(payload.parent) if payload.parent else box
+        child = store.resolve(payload.child)
+        if parent.uuid == box.uuid:
+            # pinned against the order the map actually draws, not the order the rows
+            # come back from the database in
+            box.config = mindmap.pin_sides(
+                box.config, [kid.uuid for kid in mindmap.children_of(store, box, box.config)]
+            )
+        if parent.uuid != box.uuid and not _is_in_map(store, box, parent.uuid):
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "not_a_node", "reason": "that parent is not part of this map"},
+            )
+        box.config = mindmap.move_sibling(
+            box.config, parent.uuid, child.uuid, store.children(parent.uuid), payload.delta
+        )
+        store.update(box)
+        return {"map": mindmap.node(store, box.uuid)}
+
+    @app.post("/api/boxes/{ref}/mindmap/hierarchy")
+    def move_mindmap_node(
+        ref: str, payload: MindmapHierarchy, store: StoreDep
+    ) -> dict[str, object]:
+        """Change how deep a node sits: a detail of the thought above it, or not.
+
+        The two directions are named for the centre rather than for the keyboard,
+        because which arrow means which depends on which side the branch grows on;
+        the page does that translation, and the map keeps the meaning.
+        """
+        box = _mindmap_box(store, ref)
+        child = store.resolve(payload.child)
+        if payload.direction == "in":
+            tree, note = mindmap.move_towards_centre(store, box.uuid, child.uuid)
+        elif payload.direction == "out":
+            tree, note = mindmap.move_away_from_centre(store, box.uuid, child.uuid)
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "unknown_direction", "direction": payload.direction},
+            )
+        return {"map": tree, "note": note}
+
+    @app.post("/api/boxes/{ref}/mindmap/node", status_code=201)
+    def add_mindmap_node(
+        request: Request, ref: str, payload: MindmapNode, store: StoreDep
+    ) -> dict[str, object]:
+        """A new node on the map, in the place the keys left it.
+
+        A node is a box, filed under the node it hangs from. Nothing about this is
+        private to mindmaps — the map is how those links are drawn.
+        """
+        box = _mindmap_box(store, ref)
+        parent = store.resolve(payload.parent) if payload.parent else box
+        kind = payload.box_type or mindmap.NODE_TYPE
+        saved = _add_unique(store, Box(name=mindmap.NEW_NODE_NAME, box_type=kind), payload.name)
+        store.link(parent.uuid, saved.uuid)
+        text_search.sync(store, saved, root=getattr(request.app.state, "content_root", None))
+        line = [child.uuid for child in mindmap.children_of(store, parent, box.config)]
+        if saved.uuid in line:
+            line.remove(saved.uuid)
+        at = line.index(payload.after) + 1 if payload.after in line else len(line)
+        holder = store.resolve(box.uuid)
+        holder.config = mindmap.set_order(
+            holder.config, parent.uuid, [*line[:at], saved.uuid, *line[at:]]
+        )
+        if parent.uuid == holder.uuid:
+            # A branch off the centre gets its side written down at once. Left to the
+            # default it would inherit its position, and the first time a sibling was
+            # reordered past it the branch would jump to the other half of the map.
+            holder.config = mindmap.set_side(
+                holder.config, saved.uuid, mindmap.default_side(at)
+            )
+        store.update(holder)
+        return {"map": mindmap.node(store, holder.uuid), "node": saved.to_dict()}
+
+    @app.post("/api/boxes/{ref}/mindmap/fill")
+    def fill_mindmap_node(ref: str, payload: MindmapFill, store: StoreDep) -> dict[str, object]:
+        """Drop a box onto a node.
+
+        On a node Insert made and nobody wrote into, the dropped box takes its place in
+        the picture and the empty node goes away — that is what the node was waiting
+        for. On any other node the box is filed inside it, because a thought that has
+        been written down is not thrown away to make room.
+        """
+        box = _mindmap_box(store, ref)
+        target = store.resolve(payload.node)
+        filler = store.resolve(payload.with_box)
+        tree = mindmap.node(store, box.uuid)
+        parents = mindmap.parent_index(tree)
+        parent_uuid = parents.get(target.uuid)
+        if parent_uuid is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "not_a_node", "reason": "that box is not part of this map"},
+            )
+        under = len(store.children(target.uuid))
+        if not mindmap.placeholder(target, siblings=under):
+            store.link(target.uuid, filler.uuid)
+            return {"map": mindmap.node(store, box.uuid), "replaced": False}
+
+        parent = store.resolve(parent_uuid)
+        # Where the placeholder stood, with the placeholder itself taken out: the box
+        # that lands here takes that place in the branch, and the dropped box keeps
+        # whatever place it already had among its own parents' siblings elsewhere.
+        line = [child.uuid for child in mindmap.children_of(store, parent, box.config)]
+        kept = [uuid for uuid in line if uuid != target.uuid]
+        at = min(line.index(target.uuid) if target.uuid in line else len(kept), len(kept))
+        if filler.uuid in kept:
+            kept.remove(filler.uuid)
+            at = min(at, len(kept))
+        holder = store.resolve(box.uuid)
+        holder.config = mindmap.set_order(
+            holder.config, parent_uuid, [*kept[:at], filler.uuid, *kept[at:]]
+        )
+        store.update(holder)
+        store.link(parent_uuid, filler.uuid)
+        store.remove(target.name)
+        return {
+            "map": mindmap.node(store, holder.uuid),
+            "replaced": True,
+            "removed": target.name,
+        }
 
     @app.delete("/api/boxes/{ref}/children/{child}", status_code=204)
     def remove_child(ref: str, child: str, store: StoreDep) -> None:
@@ -853,6 +1084,52 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _mindmap_box(store: BoxStore, ref: str) -> Box:
+    """A box whose type draws its children as a map of nodes.
+
+    Asked of the type, as every other layout endpoint does, so a kind of map added
+    later answers to these routes without anything here changing.
+    """
+    box = store.resolve(ref)
+    kind = boxtypes.get(box.box_type)
+    if not kind.maps_nodes:
+        raise HTTPException(
+            status_code=415,
+            detail={"error": "not_a_mindmap", "type": kind.key},
+        )
+    return box
+
+
+def _add_unique(store: BoxStore, box: Box, name: str | None) -> Box:
+    """Add a box, under a given name or under the next free one of its own.
+
+    A name that is taken is refused to the caller in the ordinary way when they asked
+    for it; when nobody asked, the numbering just moves on, because three presses of
+    one key should make three nodes rather than two nodes and an error message.
+    """
+    if name and name.strip():
+        box.name = name.strip()
+        return store.add(box)
+    box.name = mindmap.NEW_NODE_NAME
+    refused: set[str] = set()
+    for _attempt in range(50):
+        try:
+            return store.add(box)
+        except DuplicateBoxName:
+            # Each name the store says is taken has to be kept in mind, or the next
+            # attempt lands on the same one and the loop walks in circles.
+            refused.add(box.name)
+            box.name = mindmap.next_name(refused)
+    raise DuplicateBoxName(box.name)  # pragma: no cover - 50 ideas taken is a different problem
+
+
+def _is_in_map(store: BoxStore, box: Box, uuid: str) -> bool:
+    """Whether a box is drawn somewhere in this mindmap, the centre itself included."""
+    if uuid == box.uuid:
+        return True
+    return mindmap.find(mindmap.node(store, box.uuid), uuid) is not None
 
 
 def _resolving_box(store: BoxStore, ref: str) -> Box:

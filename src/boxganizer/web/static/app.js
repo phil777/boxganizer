@@ -129,6 +129,32 @@ const api = {
       method: "POST",
       body: JSON.stringify({ child, x, y }),
     }),
+  mindmap: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/mindmap`),
+  mindmapSide: (ref, child, body) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/mindmap/side`, {
+      method: "POST",
+      body: JSON.stringify({ child, ...body }),
+    }),
+  mindmapOrder: (ref, child, delta) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/mindmap/order`, {
+      method: "POST",
+      body: JSON.stringify({ child, delta }),
+    }),
+  mindmapHierarchy: (ref, child, direction) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/mindmap/hierarchy`, {
+      method: "POST",
+      body: JSON.stringify({ child, direction }),
+    }),
+  mindmapNode: (ref, parent, after) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/mindmap/node`, {
+      method: "POST",
+      body: JSON.stringify({ parent: parent || null, after: after || null }),
+    }),
+  mindmapFill: (ref, node, withBox) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/mindmap/fill`, {
+      method: "POST",
+      body: JSON.stringify({ node, with: withBox }),
+    }),
   desktopResize: (ref, child, width, height) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/desktop/resize`, {
       method: "POST",
@@ -3172,6 +3198,631 @@ const mqttView = {
 };
 
 registerView("mqtt", mqttView);
+
+/* -- mindmap -------------------------------------------------------------------
+ *
+ * One box in the middle, its children as branches growing left and right, and every
+ * branch a thought that can be broken into sub-branches. The nodes are boxes and the
+ * lines between them are the ordinary links: nothing here is a private idea that only
+ * this view knows about. What the map keeps for itself, in `config.mindmap`, is which
+ * side a branch grows on and the order of the children in a branch — see
+ * `boxganizer.mindmap`.
+ *
+ * The keys are the point of it. Click once into the picture and then: Insert makes a
+ * node under the one in hand, Enter makes one beside it, the arrows walk the map,
+ * Ctrl+up and down shuffle a node among its siblings, and Ctrl+left and right send it
+ * deeper into the map or back out towards the centre — the direction read off the side
+ * the branch grows on, so Ctrl always pushes away from the centre or pulls towards it.
+ */
+
+/**
+ * The measure of the picture, in CSS pixels.
+ *
+ * Widths are fixed and a label that overflows is cut with an ellipsis, rather than
+ * measured after it is painted: a node that grows when its words arrive moves every
+ * node below it, and a picture that jumps about cannot be walked by keyboard.
+ */
+const MINDMAP = {
+  width: 178,
+  height: 38,
+  centreWidth: 236,
+  centreHeight: 56,
+  column: 62, // air between one depth and the next
+  row: 12, // air between siblings
+  branch: 28, // air between the branches off the centre
+  pad: 56,
+  /** One colour per branch. A thought keeps the colour it started with, all the way down. */
+  palette: [
+    "#c62828",
+    "#1565c0",
+    "#2e7d32",
+    "#ef6c00",
+    "#6a1b9a",
+    "#00838f",
+    "#8d6e63",
+    "#455a64",
+  ],
+};
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * Lay the map out: a tidy tree down each side, the centre between them.
+ *
+ * Each node is given a row record — its place, its depth, which side it grows on, the
+ * colour of the branch it belongs to, and its parent and children rows. Leaves are
+ * stacked as they come and a parent sits opposite the middle of its own children,
+ * which is what keeps a branch readable: the line of descent is never crossed.
+ */
+function mindmapLayout(map) {
+  const rows = [];
+  const byUuid = new Map();
+
+  function walk(node, depth, colour, sign, parent) {
+    const row = {
+      node,
+      depth,
+      colour,
+      sign,
+      parent,
+      children: [],
+      w: depth === 1 ? MINDMAP.width : MINDMAP.width - 14,
+      h: MINDMAP.height,
+      cy: 0,
+    };
+    rows.push(row);
+    byUuid.set(node.uuid, row);
+    if (parent) parent.children.push(row);
+
+    const below = node.children || [];
+    if (!below.length) {
+      row.cy = cursor + row.h / 2;
+      cursor += row.h + MINDMAP.row;
+    } else {
+      below.forEach((child) => walk(child, depth + 1, colour, sign, row));
+      row.cy = (row.children[0].cy + row.children[row.children.length - 1].cy) / 2;
+      // A parent with children is never taller than the stack of them, so the cursor
+      // has already moved past everything this row needs.
+    }
+    // Outward from the centre by one column per depth.
+    row.x =
+      sign *
+      (MINDMAP.centreWidth / 2 + MINDMAP.column + (depth - 1) * (MINDMAP.width + MINDMAP.column));
+    return row;
+  }
+
+  let cursor = 0;
+  const branches = (map.children || []).map((child, index) => ({
+    child,
+    colour: MINDMAP.palette[index % MINDMAP.palette.length],
+    sign: child.side === "left" ? -1 : 1,
+  }));
+
+  /**
+   * Each half is stacked from the same top line, and the stack is reset between them:
+   * one cursor for both would draw the left half, then carry on below it with the
+   * right, which is a list, not a mindmap.
+   */
+  const branchRows = new Map();
+  [-1, 1].forEach((sign) => {
+    cursor = 0;
+    branches
+      .filter((branch) => branch.sign === sign)
+      .forEach((branch) => {
+        const row = walk(branch.child, 1, branch.colour, sign, null);
+        branchRows.set(branch.child.uuid, row);
+        cursor += MINDMAP.branch - MINDMAP.row;
+      });
+  });
+
+  const centre = {
+    node: map,
+    depth: 0,
+    colour: "#20201f",
+    sign: 1,
+    parent: null,
+    children: [],
+    w: MINDMAP.centreWidth,
+    h: MINDMAP.centreHeight,
+    x: 0,
+    cy: 0,
+  };
+  rows.unshift(centre);
+  byUuid.set(map.uuid, centre);
+  // The branches hang off the centre, both for the curve and for the keys: a branch
+  // with no parent has nowhere to go back to.
+  branches.forEach((branch) => {
+    const row = branchRows.get(branch.child.uuid);
+    if (row) {
+      row.parent = centre;
+      centre.children.push(row);
+    }
+  });
+  const ends = rows.filter((row) => row !== centre);
+  centre.cy = ends.length
+    ? (Math.min(...ends.map((row) => row.cy)) + Math.max(...ends.map((row) => row.cy))) / 2
+    : centre.h / 2;
+
+  // Shift the whole picture into positive space, with air around it.
+  const left = Math.min(...rows.map((row) => row.x - row.w / 2)) - MINDMAP.pad;
+  const top = Math.min(...rows.map((row) => row.cy - row.h / 2)) - MINDMAP.pad;
+  const width = Math.max(...rows.map((row) => row.x + row.w / 2)) - left + MINDMAP.pad;
+  const height = Math.max(...rows.map((row) => row.cy + row.h / 2)) - top + MINDMAP.pad;
+  rows.forEach((row) => {
+    row.x -= left;
+    row.cy -= top;
+  });
+
+  return {rows, byUuid, centre, width, height};
+}
+
+/**
+ * The map of one box: nodes you can pick, keys you can press, and lines that say which
+ * thought came out of which.
+ */
+async function mindmapView(canvas, box, ctx, opts = {}) {
+  const token = paneGeneration;
+  let map;
+  try {
+    map = (await api.mindmap(box.uuid)).map;
+  } catch (error) {
+    canvas.append(emptyMessage(`Cannot draw the map: ${error.message}`));
+    return;
+  }
+  if (!stillOnScreen(token)) return; // the pane moved on while the map was being drawn
+
+  if (!opts.embedded) canvas.append(mindmapToolbar(box, ctx));
+
+  const view = document.createElement("div");
+  view.className = "mindmap-view";
+  view.tabIndex = 0; // the picture takes the keyboard: Insert, Enter, the arrows
+  view.setAttribute("role", "application");
+  view.setAttribute("aria-label", `Mindmap: ${box.name}. Click, then use Insert, Enter and the arrow keys.`);
+  const board = document.createElement("div");
+  board.className = "mindmap-board";
+  view.append(board);
+  canvas.append(view);
+
+  let drawn = mindmapLayout(map);
+  let selected = box.uuid;
+  let renameInPlace = null;
+
+  function label(text, className = "") {
+    const span = document.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    return span;
+  }
+
+  function select(uuid) {
+    selected = uuid;
+    board.querySelectorAll(".mindmap-node").forEach((node) => {
+      node.classList.toggle("selected", node.dataset.uuid === uuid);
+      node.setAttribute("aria-selected", node.dataset.uuid === uuid ? "true" : "false");
+    });
+  }
+
+  /** One line of the map: a cubic curve, the colour of the branch it belongs to. */
+  function linkPath(row) {
+    const parent = row.parent;
+    if (!parent) return null;
+    const path = document.createElementNS(SVG_NS, "path");
+    const x1 = parent.x + row.sign * (parent.w / 2);
+    const y1 = parent.cy;
+    const x2 = row.x - row.sign * (row.w / 2);
+    const y2 = row.cy;
+    const bend = (x2 - x1) / 2;
+    path.setAttribute("d", `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`);
+    path.setAttribute("stroke", row.colour);
+    return path;
+  }
+
+  function nodeTile(row) {
+    const isCentre = row === drawn.centre;
+    const tile = document.createElement("div");
+    tile.className = `mindmap-node${isCentre ? " mindmap-centre" : ""}`;
+    tile.dataset.uuid = row.node.uuid;
+    tile.setAttribute("role", "treeitem");
+    tile.setAttribute("aria-selected", row.node.uuid === selected ? "true" : "false");
+    tile.style.setProperty("--node", row.colour);
+    tile.style.left = `${row.x - row.w / 2}px`;
+    tile.style.top = `${row.cy - row.h / 2}px`;
+    tile.style.width = `${row.w}px`;
+    tile.style.height = `${row.h}px`;
+    tile.append(iconElement(row.node), label(row.node.name, "mindmap-label"));
+    tile.title = isCentre
+      ? `${row.node.name} — the middle of the map`
+      : `${row.node.name} (${row.node.box_type})`;
+    if (row.node.truncated) {
+      tile.append(label(" ↻", "mindmap-cycle"));
+      tile.title += " — this box is already drawn above; a box inside itself is drawn once";
+    }
+
+    tile.addEventListener("click", (event) => {
+      event.stopPropagation();
+      view.focus();
+      select(row.node.uuid);
+    });
+    tile.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      rename(row);
+    });
+    tile.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      select(row.node.uuid);
+      ctx.showMenu(event.clientX, event.clientY, nodeMenu(row));
+    });
+
+    // A node can be dragged onto another node: the drop either fills an empty
+    // placeholder or files the dragged box inside, which is what the server decides.
+    tile.draggable = true;
+    tile.addEventListener("dragstart", (event) => {
+      event.dataTransfer.setData("text/plain", row.node.uuid);
+      event.dataTransfer.effectAllowed = "move";
+    });
+    tile.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      tile.classList.add("drop-target");
+    });
+    tile.addEventListener("dragleave", () => tile.classList.remove("drop-target"));
+    tile.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      tile.classList.remove("drop-target");
+      const dragged = event.dataTransfer.getData("text/plain");
+      if (!dragged || dragged === row.node.uuid) return;
+      await fillNode(row, dragged);
+    });
+    return tile;
+  }
+
+  function paint(nextMap) {
+    map = nextMap;
+    drawn = mindmapLayout(map);
+    board.style.width = `${drawn.width}px`;
+    board.style.height = `${drawn.height}px`;
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "mindmap-links");
+    svg.setAttribute("width", String(drawn.width));
+    svg.setAttribute("height", String(drawn.height));
+    svg.setAttribute("viewBox", `0 0 ${drawn.width} ${drawn.height}`);
+    drawn.rows.forEach((row) => {
+      const path = linkPath(row);
+      if (path) svg.append(path);
+    });
+    const nodes = drawn.rows.map(nodeTile);
+    board.replaceChildren(svg, ...nodes);
+    if (!drawn.rows.some((row) => row !== drawn.centre)) {
+      const hint = document.createElement("p");
+      hint.className = "mindmap-hint muted";
+      hint.textContent =
+        "Click here, then press Insert for a branch — or drag a box from the panel onto the middle.";
+      board.append(hint);
+    }
+    select(selected && drawn.byUuid.has(selected) ? selected : map.uuid);
+  }
+
+  /** Take a mutation's answer, and redraw from what the database says the map is now. */
+  async function applied(promise, note) {
+    try {
+      const answer = await promise;
+      if (answer && answer.map) paint(answer.map);
+      if (note) ctx.status(typeof note === "function" ? note(answer) : note);
+      await refreshSide();
+    } catch (error) {
+      ctx.status(error.message, true);
+    }
+  }
+
+  async function addNode(parent, after) {
+    view.focus();
+    const before = new Set(drawn.rows.map((row) => row.node.uuid));
+    try {
+      const answer = await api.mindmapNode(map.uuid, parent ? parent.node.uuid : null, after);
+      paint(answer.map);
+      await refreshSide();
+      const fresh = drawn.rows.find((row) => !before.has(row.node.uuid));
+      if (fresh) {
+        select(fresh.node.uuid);
+        rename(fresh); // a node is named where it is made
+      }
+    } catch (error) {
+      ctx.status(error.message, true);
+    }
+  }
+
+  async function fillNode(row, draggedUuid) {
+    await applied(
+      api.mindmapFill(map.uuid, row.node.uuid, draggedUuid),
+      (answer) =>
+        answer.replaced
+          ? `${answer.removed} was an empty node: the box you dropped took its place`
+          : "filed in that node",
+    );
+  }
+
+  /**
+   * Write a node's name where it stands. A node made by Insert is unnamed, and typing
+   * the thought the moment the node appears is the whole reason the key exists.
+   */
+  function rename(row) {
+    if (renameInPlace) renameInPlace.cancel();
+    const tile = board.querySelector(`.mindmap-node[data-uuid="${row.node.uuid}"]`);
+    if (!tile) return;
+    const text = tile.querySelector(".mindmap-label");
+    const was = row.node.name;
+    text.contentEditable = "plaintext-only";
+    text.focus();
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const finish = async (keep) => {
+      if (done) return;
+      done = true;
+      text.contentEditable = "false";
+      // A field that stops being a field takes the keyboard with it, and the map is
+      // nothing without the keyboard: hand it back before anything else.
+      view.focus();
+      const now = text.textContent.trim();
+      if (!keep || !now || now === was) {
+        text.textContent = was;
+        renameInPlace = null;
+        return;
+      }
+      try {
+        await api.updateBox(row.node.uuid, {name: now});
+        row.node.name = now;
+        text.textContent = now;
+        await refreshSide();
+        ctx.status(`named ${now}`);
+      } catch (error) {
+        text.textContent = was;
+        ctx.status(error.message, true);
+      }
+      renameInPlace = null;
+    };
+    let done = false;
+    const onKey = (event) => {
+      event.stopPropagation(); // a key typed into a name is not a command to the map
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    };
+    text.addEventListener("keydown", onKey);
+    text.addEventListener("blur", () => finish(true), {once: true});
+    renameInPlace = {cancel: () => finish(false)};
+  }
+
+  /** Which node the arrow keys go to: outward, inward, or along the branch. */
+  function navigate(row, key) {
+    if (!row) {
+      select(map.uuid);
+      return;
+    }
+    const sideways = key === "ArrowLeft" ? -1 : key === "ArrowRight" ? 1 : 0;
+    const updown = key === "ArrowUp" ? -1 : key === "ArrowDown" ? 1 : 0;
+
+    if (row === drawn.centre) {
+      if (sideways) {
+        const first = drawn.rows.filter((other) => other.parent === drawn.centre && other.sign === sideways)[0];
+        if (first) select(first.node.uuid);
+        return;
+      }
+      if (updown) {
+        const first = drawn.rows.filter((other) => other.parent === drawn.centre)[0];
+        if (first) select(first.node.uuid);
+      }
+      return;
+    }
+
+    if (sideways === row.sign) {
+      // away from the centre: down into the branch
+      if (row.children.length) select(row.children[0].node.uuid);
+      return;
+    }
+    if (sideways) {
+      if (row.parent) select(row.parent.node.uuid);
+      return;
+    }
+
+    // Siblings are the nodes hanging from the same parent *on the same side*: the
+    // centre's children live in two columns, and stepping down out of one of them is
+    // not a step into the other half of the picture.
+    const among = (row.parent ? row.parent.children : drawn.rows).filter(
+      (other) => other.parent === row.parent && other.sign === row.sign,
+    );
+    const at = among.indexOf(row);
+    const next = among[at + updown];
+    if (next) {
+      select(next.node.uuid);
+      return;
+    }
+    // Nothing left in the branch: the nearest node above or below anywhere in the map.
+    const candidates = drawn.rows
+      .filter((other) => other !== row && (updown < 0 ? other.cy < row.cy : other.cy > row.cy))
+      .sort((a, b) => Math.abs(a.cy - row.cy) - Math.abs(b.cy - row.cy));
+    if (candidates.length) select(candidates[0].node.uuid);
+  }
+
+  function nodeMenu(row) {
+    const isCentre = row === drawn.centre;
+    const extra = [
+      { separator: true },
+      { label: "＋ New node here", run: () => addNode(row, null) },
+      !isCentre && row.parent
+        ? { label: "＋ New node beside it", run: () => addNode(row.parent, row.node.uuid) }
+        : null,
+      !isCentre ? { label: "Rename…", run: () => rename(row) } : null,
+      !isCentre && row.parent === drawn.centre
+        ? {
+            label: row.sign === 1 ? "Send this branch to the left" : "Send this branch to the right",
+            run: () => applied(api.mindmapSide(map.uuid, row.node.uuid, {flip: true})),
+          }
+        : null,
+      !isCentre && row.parent && row.parent !== drawn.centre
+        ? {
+            label: "Move it up the hierarchy",
+            run: () => applied(api.mindmapHierarchy(map.uuid, row.node.uuid, "in"), (answer) => answer.note),
+          }
+        : null,
+      !isCentre
+        ? {
+            label: "Make it a detail of the node above",
+            run: () => applied(api.mindmapHierarchy(map.uuid, row.node.uuid, "out"), (answer) => answer.note),
+          }
+        : null,
+      !isCentre && row.parent
+        ? { label: "Take out of this map", run: () => ctx.removeFrom(row.parent.node, row.node) }
+        : null,
+    ];
+    return boxMenuItems(row.node, extra);
+  }
+
+  view.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (target && target.isContentEditable) return; // typing a name, not commanding the map
+    const row = drawn.byUuid.get(selected);
+    const key = event.key;
+
+    if (key === "Insert") {
+      event.preventDefault();
+      addNode(row || drawn.centre, null);
+      return;
+    }
+    if (key === "Enter") {
+      event.preventDefault();
+      if (!row || row === drawn.centre) addNode(drawn.centre, null);
+      else addNode(row.parent, row.node.uuid);
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (key === "ArrowUp" || key === "ArrowDown")) {
+      event.preventDefault();
+      if (row && row !== drawn.centre) {
+        applied(api.mindmapOrder(map.uuid, row.node.uuid, key === "ArrowUp" ? -1 : 1));
+      }
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (key === "ArrowLeft" || key === "ArrowRight")) {
+      event.preventDefault();
+      if (!row || row === drawn.centre) return;
+      // Ctrl always means the same thing physically: away from the centre is deeper,
+      // towards it is shallower. Which arrow that is depends on the side.
+      const away = (key === "ArrowRight" && row.sign === 1) || (key === "ArrowLeft" && row.sign === -1);
+      applied(
+        api.mindmapHierarchy(map.uuid, row.node.uuid, away ? "out" : "in"),
+        (answer) => answer.note,
+      );
+      return;
+    }
+    if (key === "F2") {
+      event.preventDefault();
+      if (row) rename(row);
+      return;
+    }
+    if (key.startsWith("Arrow")) {
+      event.preventDefault();
+      navigate(row, key);
+    }
+  });
+
+  view.addEventListener("mousedown", () => view.focus());
+  view.addEventListener("contextmenu", (event) => {
+    if (event.target.closest(".mindmap-node")) return; // the node answers for itself
+    event.preventDefault();
+    ctx.showMenu(
+      event.clientX,
+      event.clientY,
+      boxMenuItems(box, [
+        { separator: true },
+        { label: "＋ New node at the centre", run: () => addNode(drawn.centre, null) },
+      ]),
+    );
+  });
+
+  // A box dropped on the bare picture is filed at the centre of the map: it becomes a
+  // branch, which is where a new thought about the subject belongs.
+  board.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    board.classList.add("drop-target");
+  });
+  board.addEventListener("dragleave", () => board.classList.remove("drop-target"));
+  board.addEventListener("drop", async (event) => {
+    if (event.target.closest(".mindmap-node")) return;
+    event.preventDefault();
+    board.classList.remove("drop-target");
+    const dragged = event.dataTransfer.getData("text/plain");
+    if (!dragged || dragged === map.uuid) return;
+    await applied(api.link(map.uuid, dragged), "filed as a branch of the centre");
+  });
+
+  paint(map);
+
+  /*
+   * In a cell the whole map is drawn smaller, not a corner of it at full size: what
+   * someone looks at in a small square is the shape of the thought. The board keeps
+   * its own coordinates and one transform shrinks it, so a node clicked in a scaled
+   * map still answers for the right box — the pointer never has to be converted,
+   * because nothing here is placed by the pointer.
+   */
+  if (opts.embedded) {
+    view.classList.add("mindmap-fitted");
+    const fit = () => {
+      const availW = view.clientWidth;
+      const availH = view.clientHeight;
+      if (!availW || !availH) return;
+      const scale = Math.min(1, availW / drawn.width, availH / drawn.height);
+      board.style.transformOrigin = "top left";
+      board.style.transform = scale === 1 ? "" : `scale(${scale})`;
+      view.scrollLeft = 0;
+      view.scrollTop = 0;
+    };
+    fit();
+    const watcher = new ResizeObserver(fit);
+    watcher.observe(view);
+    holdLive(() => watcher.disconnect());
+  } else {
+    // Open with the middle of the picture in the middle of the pane.
+    view.scrollLeft = Math.max(0, drawn.centre.x - view.clientWidth / 2);
+    view.scrollTop = Math.max(0, drawn.centre.cy - view.clientHeight / 2);
+  }
+}
+
+/** What the map is, how many nodes it holds, and the keys that drive it. */
+function mindmapToolbar(box, ctx) {
+  const bar = document.createElement("div");
+  bar.className = "mindmap-toolbar";
+  const title = document.createElement("strong");
+  title.textContent = `${box.icon} ${box.name}`;
+  const keys = document.createElement("span");
+  keys.className = "muted mindmap-keys";
+  keys.textContent =
+    "click the map, then: Insert — node · Enter — beside it · arrows — walk · Ctrl+↑↓ — reorder · Ctrl+←→ — deeper or shallower · double-click — rename";
+  const add = document.createElement("button");
+  add.type = "button";
+  add.textContent = "＋ New node";
+  add.addEventListener("click", () => {
+    const view = document.querySelector(".mindmap-view");
+    if (view) view.focus();
+    ctx.newBox({parent: box.uuid});
+  });
+  bar.append(title, keys, add);
+  return bar;
+}
+
+registerView("mindmap", {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    await mindmapView(canvas, box, ctx, opts);
+  },
+});
 
 /* The fallback for every type that has nothing better yet. */
 registerView("*", {

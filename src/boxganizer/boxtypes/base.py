@@ -77,6 +77,9 @@ class BoxType:
     #: True when the type places its children at coordinates of the user's choosing,
     #: so a new child can be told where to land. See `boxganizer.desktop`.
     arranges_icons: ClassVar[bool] = False
+    #: True when the type draws its children as a growing map of nodes, which is the
+    #: question the mindmap endpoints ask before answering. See `boxganizer.mindmap`.
+    maps_nodes: ClassVar[bool] = False
     #: What this type is meant to do once it is built. Empty means: already does all it claims.
     planned: ClassVar[str] = ""
 
@@ -155,6 +158,7 @@ class BoxType:
             "resolves_membership": cls.resolves_membership,
             "filter_is_fixed": cls.filter_is_fixed,
             "arranges_icons": cls.arranges_icons,
+            "maps_nodes": cls.maps_nodes,
             "indexes_content": cls.indexes_content,
             "parent": parent.key if parent is not None else None,
             "ancestors": [ancestor.key for ancestor in registry.ancestors_of(cls)],
