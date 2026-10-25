@@ -307,7 +307,7 @@ async def read_once(
 ) -> Reading | None:
     """The first value the broker sends, or None if none comes in `wait_s`.
 
-    The CLI uses it: `box box value Cellar-temp` answers once and exits, where the
+    The CLI uses it: `box value Cellar-temp` answers once and exits, where the
     web page stays open and keeps answering.
     """
     source = (stream or aiomqtt_events)(target)

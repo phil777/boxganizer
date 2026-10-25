@@ -4,8 +4,13 @@ A dynamic folder holds whatever a filter selects out of all the boxes in the
 library. The filter lives in the box's own `config` JSON under `filter`, so it
 travels with the box through `box edit`, the API and a copy of the database:
 
-    box add "PDF docs" -t dynamic-folder -c '{"filter": {"type": "resource",
-                                                       "name": "report"}}'
+    box add "All PDFs" -t dynamic-folder        # then `box edit "All PDFs"`, and
+    #   config:                                 # in the YAML that opens:
+    #     filter:
+    #       type: resource
+    #       name: report
+
+The page writes the same shape from the filter bar above the folder's list.
 
 Every clause present must match; a clause that is absent asks nothing. That makes
 the clauses AND, which is what a narrowing search feels like, and it keeps one
