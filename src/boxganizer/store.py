@@ -32,7 +32,9 @@ from boxganizer.models import DEFAULT_ICON, Box, canonical_name, new_uuid
 #: 1 = boxes and links. 2 = boxes gained ``box_type`` (see ``doc/box-types.md``).
 #: 3 = boxes gained ``config``: type-specific settings as JSON.
 #: 4 = boxes gained ``uuid``: a permanent identifier for links and layouts.
-SCHEMA_VERSION = 4
+#: 5 = dynamic folders resolve their members into ``links``; an older library's
+#: cabinet is filled from its filter once, on the way in (see ``_migrate``).
+SCHEMA_VERSION = 5
 
 _SCHEMA = f"""
 PRAGMA user_version = {SCHEMA_VERSION};
@@ -590,6 +592,21 @@ class BoxStore:
                 self._execute(f"ALTER TABLE boxes ADD COLUMN {name} {definition}")
         if stored_version < 4:
             self._backfill_uuids()
+        if stored_version < 5:
+            self._resolve_dynamic_folders()
+
+    def _resolve_dynamic_folders(self) -> None:
+        """Fill every dynamic folder from its filter, once, when a library is upgraded.
+
+        Membership is written into the links table rather than computed on read, so a
+        database written before a cabinet meant "everything" holds a cabinet holding
+        nothing: true under the old definition, wrong under this one, and nothing
+        later would correct it until someone happened to edit each folder. Re-cutting
+        on the way in is what makes `box show` tell the truth the first time it is
+        asked.
+        """
+        for folder in self.resolving_folders():
+            self.resolve_folder(folder.uuid)
 
     def _backfill_uuids(self) -> None:
         """Give every row that lacks one a permanent identifier."""

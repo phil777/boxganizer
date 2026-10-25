@@ -765,3 +765,38 @@ def test_a_hand_made_link_into_a_dynamic_folder_last_till_that_folder_is_resolve
 
     store.resolve_folder("PDFs")
     assert names(store, "PDFs") == ["anything"]
+
+
+def test_upgrading_an_older_library_fills_the_cabinet(db_path: Path) -> None:
+    """A cabinet written before it meant "everything" is re-cut on the way in."""
+    with BoxStore(db_path) as store:
+        store.add(Box(name="one"))
+        store.add(Box(name="two"))
+        store.add(Box(name="cabinet", box_type="cabinet"))
+        # an old library kept such a cabinet empty: wipe the membership the new
+        # build wrote on the way in, and mark the file as written before it existed
+        # reaching past the API on purpose: this test is about the file on disk
+        with store._conn:
+            store._conn.execute("DELETE FROM links")
+            store._conn.execute("PRAGMA user_version = 4")
+        assert store.children("cabinet") == []
+
+    with BoxStore(db_path) as reopened:
+        filled = sorted(box.name for box in reopened.children("cabinet"))
+        assert filled == ["cabinet", "one", "two"]
+        assert reopened.get("one").name == "one"
+
+
+def test_a_dynamic_folder_is_recut_on_upgrade_too(db_path: Path) -> None:
+    with BoxStore(db_path) as store:
+        store.add(Box(name="pic", box_type="image", resource_uri="/tmp/p.png"))
+        store.add(Box(name="txt", box_type="text", resource_uri="/tmp/t.txt"))
+        store.add(Box(name="Pics", box_type="dynamic-folder", config={"filter": {"type": "image"}}))
+        with store._conn:
+            parent = "(SELECT id FROM boxes WHERE key = 'pics')"
+            store._conn.execute(f"DELETE FROM links WHERE parent_id = {parent}")
+            store._conn.execute("PRAGMA user_version = 4")
+        assert store.children("Pics") == []
+
+    with BoxStore(db_path) as reopened:
+        assert [box.name for box in reopened.children("Pics")] == ["pic"]
