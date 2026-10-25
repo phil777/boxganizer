@@ -30,6 +30,7 @@ other boxes. Rules in brackets are enforced by the store.
         - `markdown` 📝 Markdown — leaf; resource required; extensions: .md .markdown .mdown
       - `image` 🖼️ Image — leaf; resource required; extensions: .png .jpg .jpeg .gif .webp .bmp .svg .heic
       - `pdf` 📕 PDF — leaf; resource required; extensions: .pdf
+      - `video` 🎥 Video — leaf; resource required; extensions: .mp4 .webm .mov .m4v .ogv .ogg *(added, see below)*
       - `archive` 🗜️ Archive — leaf; resource required; extensions: .zip .tar .gz .tgz .bz2 .xz .7z .rar
     - `directory` 📁 Directory — resource required; schemes: file
       - `indexed-directory` 🗂️ Indexed Directory — resource required; schemes: file
@@ -182,3 +183,52 @@ Two mistakes the registry already catches for you: a subclass that forgets
   them. Kept separate for now, because a graph may be edited and a viewport may
   not.
 * Where checklist ticks live: this scaffold says `metadata["done"]` on the child.
+
+## Types boxganizer 2 added
+
+The document above is kept as written. Two types exist because the running
+product needs them, and both are listed in `ADDITIONS` in `tests/test_boxtypes.py`
+so an omission fails a test rather than passing unnoticed:
+
+- **`root` 🌲** (`folder`) — one place for the graph to start, with exactly one
+  child. See `doc/adr/0010-single-slot-root.md`.
+- **`video` 🎥** (`file`) — so an `.mp4` can be inferred, previewed in the
+  directory explorer, and filed as itself instead of being called a `file`.
+
+## What each resource type shows
+
+| Type | Icon | Content |
+| --- | --- | --- |
+| `image` | a miniature of the file, in a thin frame | the image, fitted to the pane |
+| `pdf` | its first page, in a thin document outline | the browser's PDF viewer, opened on the file |
+| `video` | emoji (no poster frame yet) | `<video controls>` on the file |
+| `archive` | emoji | the member listing of a zip or tar |
+| `text`, `markdown` | emoji | the text, with wrap/font/crop controls |
+| `file` | emoji | a card that says so, plus a link to the file |
+| `directory` | emoji | the file explorer, below |
+
+Miniatures are not stored in the database. A box records
+`config.icon_source = "thumbnail"` and `config.thumb` (path, size, mtime); the
+PNG lives in `<data dir>/thumbnails/<uuid>-<size>-<mtime>.png`, so replacing the
+file replaces the icon, and the stale key is simply never read again. If the
+miniature cannot be served, the UI falls back to the emoji rather than showing a
+broken image.
+
+## The directory explorer
+
+A `directory` box browses the real filesystem in place of showing child boxes:
+
+- Directories first, then files by name; dot files hidden unless the box points
+  straight at a dot folder.
+- **Double-click a directory** to go deeper — still the content of the same box.
+  `↑` goes up, `▣ box folder` returns to the directory the box names.
+- **Double-click a file** to open it here in whichever viewer fits: image, text,
+  markdown, PDF, video, or an archive listing. A file nothing can open gets a
+  card with a link to it.
+- **Right-click** an entry to make a box out of it, with the type already
+  inferred (`markdown` for `notes.md`, `video` for `clip.mp4`, `directory` for a
+  folder) and the resource filled in.
+
+Every path from the browser is resolved and confined to the box's own resource
+directory, and then to `$BOXGANIZER_CONTENT_ROOT` when that is set — symlinks
+included (`boxganizer/fslist.py:safe_join`). Escaping is a `403 path_out_of_range`.

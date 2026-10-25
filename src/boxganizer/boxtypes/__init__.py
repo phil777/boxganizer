@@ -54,6 +54,7 @@ from boxganizer.boxtypes.resource import (
     PDFResource,
     ResourceBox,
     TextResource,
+    VideoResource,
 )
 from boxganizer.boxtypes.root import ROOT_BOX_NAME, RootBox
 from boxganizer.boxtypes.viewport import (
@@ -105,6 +106,7 @@ __all__ = [
     "TerminalResource",
     "TextResource",
     "TilingViewport",
+    "VideoResource",
     "ViewportBox",
     "WebResource",
     "WindowedViewport",

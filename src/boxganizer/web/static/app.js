@@ -60,6 +60,18 @@ const api = {
     }),
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
   thumbnailUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/thumbnail`,
+  contentUrl: (ref, sub) =>
+    `/api/boxes/${encodeURIComponent(ref)}/content?sub=${encodeURIComponent(sub || "")}`,
+  listing: (ref, sub) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/listing?sub=${encodeURIComponent(sub || "")}`),
+  archive: (ref, sub) => request(api.archiveUrl(ref, sub)),
+  archiveUrl: (ref, sub) =>
+    `/api/boxes/${encodeURIComponent(ref)}/archive?sub=${encodeURIComponent(sub || "")}`,
+  textAt: async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.text();
+  },
   unlink: (ref, child) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/children/${encodeURIComponent(child)}`, {
       method: "DELETE",
@@ -491,11 +503,14 @@ async function checkResourceType() {
 
 /** Type-specific fields. Views add theirs with `registerConfigForm`. */
 /** Open the create-box modal; `parentUuid` presets where the new box goes. */
-function openNewBoxModal(parentUuid = null, cell = null) {
-  state.pendingCell = cell;
+function openNewBoxModal(options = {}) {
+  state.pendingCell = options.cell || null;
   fillParentChoices();
-  if (parentUuid) el("nb-parent").value = parentUuid;
+  if (options.parent) el("nb-parent").value = options.parent;
+  if (options.boxType) el("nb-type").value = options.boxType;
   renderConfigFields();
+  if (options.name) el("nb-name").value = options.name;
+  if (options.resource) el("nb-resource").value = options.resource;
   el("new-box-modal").showModal();
   el("nb-name").focus();
 }
@@ -825,6 +840,7 @@ registerView("box", {
 /* An image: scaled into whatever space the screen has left, ratio untouched. */
 registerView("image", {
   render(canvas, box, ctx, mode, opts = {}) {
+    const src = opts.src || api.rawUrl(box.uuid);
     if (mode !== "content") {
       canvas.append(iconPane(box));
       return;
@@ -832,7 +848,7 @@ registerView("image", {
     const stage = document.createElement("div");
     stage.className = "image-view";
     const image = document.createElement("img");
-    image.src = api.rawUrl(box.uuid);
+    image.src = src;
     image.alt = box.name;
     image.addEventListener("error", () => {
       stage.replaceChildren(
@@ -955,7 +971,7 @@ function gridToolbar(box, options, ctx) {
   const add = document.createElement("button");
   add.type = "button";
   add.textContent = "＋ New box here";
-  add.addEventListener("click", () => ctx.newBox(box.uuid));
+  add.addEventListener("click", () => ctx.newBox({ parent: box.uuid }));
 
   bar.append(rows, columns, add);
 
@@ -1073,7 +1089,10 @@ function gridCell(box, ctx, row, column, child, depth) {
         },
       },
       child && { separator: true },
-      { label: child ? "New box in this cell" : "New box here", run: () => ctx.newBox(box.uuid, here) },
+      {
+        label: child ? "New box in this cell" : "New box here",
+        run: () => ctx.newBox({ parent: box.uuid, cell: here }),
+      },
     ]);
   });
   return cell;
@@ -1282,7 +1301,185 @@ function childTile(child, parent, ctx) {
 }
 
 registerView("folder", folderView);
-registerView("directory", folderView); // a directory on disk is explored the same way
+
+/* ------------------------------------------------------------- explorer ---- */
+
+const dirNav = new Map(); // box uuid -> { sub, preview }, so a re-render keeps the place
+
+/**
+ * A `directory` box, browsed for real: the files on disk, in place of the box's
+ * own children. Double-click a directory to go deeper — still the same box's
+ * content — and double-click a file to open it here in whichever viewer fits:
+ * image, text, markdown, PDF, video, or an archive listing. Right-click offers
+ * to make a box out of it, with the type already inferred.
+ */
+const directoryView = {
+  async render(canvas, box, ctx, opts = {}) {
+    if (ctx.mode() !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    const nav = dirNav.get(box.uuid) || { sub: "", preview: null };
+    dirNav.set(box.uuid, nav);
+
+    const wrap = document.createElement("div");
+    wrap.className = "fs-view";
+    canvas.append(wrap);
+
+    const bar = document.createElement("div");
+    bar.className = "fs-bar";
+    wrap.append(bar);
+
+    const pane = document.createElement("div");
+    pane.className = "fs-pane";
+    wrap.append(pane);
+
+    function drawBar(title, actions) {
+      bar.replaceChildren();
+      const label = document.createElement("span");
+      label.className = "fs-path";
+      label.textContent = title;
+      bar.append(label);
+      actions.forEach((action) => bar.append(action));
+    }
+
+    function previewOf(entry) {
+      const synthetic = {
+        uuid: null,
+        name: entry.name,
+        icon: entry.icon,
+        box_type: entry.box_type,
+        resource_uri: entry.path || entry.sub,
+        config: {},
+        metadata: {},
+      };
+      const VIEW_BY_KIND = {
+        image: "image",
+        text: entry.box_type === "markdown" ? "markdown" : "text",
+        pdf: "pdf",
+        video: "video",
+        archive: "archive",
+      };
+      const viewKey = VIEW_BY_KIND[entry.kind] || entry.box_type || "file";
+      const view = views.get(viewKey) || viewFor({ ...synthetic, box_type: viewKey }) || views.get("*");
+      synthetic.box_type = viewKey;
+      const src = api.contentUrl(box.uuid, entry.sub);
+      pane.replaceChildren();
+      view.render(pane, synthetic, ctx, "content", {
+        embedded: true,
+        depth: 1,
+        src,
+        archiveUrl: api.archiveUrl(box.uuid, entry.sub),
+      });
+      drawBar(`${entry.icon} ${entry.name}`, [
+        button("← Back to files", () => {
+          nav.preview = null;
+          draw();
+        }),
+      ]);
+    }
+
+    function button(text, run) {
+      const el2 = document.createElement("button");
+      el2.type = "button";
+      el2.textContent = text;
+      el2.addEventListener("click", run);
+      return el2;
+    }
+
+    function menuFor(entry, event) {
+      const items = [
+        entry.kind === "dir"
+          ? { label: "Open folder", run: () => enter(entry) }
+          : { label: `Open as ${entry.box_type}`, run: () => openEntry(entry) },
+        { separator: true },
+        {
+          label: `New ${entry.box_type} box from this ${entry.kind === "dir" ? "folder" : "file"}`,
+          run: () =>
+            ctx.newBox({
+              parent: box.uuid,
+              boxType: entry.box_type,
+              name: entry.name.replace(/\.[^.]+$/, ""),
+              resource: entry.path || "",
+            }),
+        },
+      ];
+      ctx.showMenu(event.clientX, event.clientY, items);
+    }
+
+    function openEntry(entry) {
+      nav.preview = entry;
+      previewOf(entry);
+    }
+
+    function enter(entry) {
+      nav.sub = entry.sub;
+      nav.preview = null;
+      draw();
+    }
+
+    async function draw() {
+      if (nav.preview) {
+        previewOf(nav.preview);
+        return;
+      }
+      let payload;
+      try {
+        payload = await api.listing(box.uuid, nav.sub);
+      } catch (error) {
+        drawBar(box.name, []);
+        pane.replaceChildren(emptyMessage(`Cannot list ${box.resource_uri}: ${error.message}`));
+        return;
+      }
+      const up = button("↑", () => {
+        nav.sub = payload.parent || "";
+        draw();
+      });
+      up.disabled = payload.parent === null;
+      up.title = "Up one folder";
+      const root = button("▣ box folder", () => {
+        nav.sub = "";
+        draw();
+      });
+      drawBar(`📁 ${payload.at}`, [up, root]);
+      pane.replaceChildren();
+      if (!payload.entries.length) {
+        pane.append(emptyMessage("No files here."));
+        return;
+      }
+      payload.entries.forEach((entry) => {
+        const row = document.createElement("div");
+        row.className = `fs-row ${entry.kind}`;
+        row.dataset.sub = entry.sub;
+        const glyph = iconElement({ uuid: null, icon: entry.icon, config: {}, box_type: entry.box_type });
+        const name = document.createElement("span");
+        name.className = "fs-name";
+        name.textContent = entry.name;
+        const kind = document.createElement("span");
+        kind.className = "fs-kind muted";
+        kind.textContent = entry.kind === "dir" ? "folder" : entry.box_type;
+        const size = document.createElement("span");
+        size.className = "fs-size muted";
+        size.textContent = entry.kind === "dir" ? "" : formatSize(entry.size);
+        row.append(glyph, name, kind, size);
+        row.addEventListener("dblclick", () => (entry.kind === "dir" ? enter(entry) : openEntry(entry)));
+        row.addEventListener("click", () => {
+          pane.querySelectorAll(".fs-row").forEach((other) => other.classList.toggle("selected", other === row));
+        });
+        row.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          menuFor(entry, event);
+        });
+        pane.append(row);
+      });
+    }
+
+    await draw();
+  },
+};
+
+registerView("directory", directoryView);
 
 /* ---------------------------------------------------------------- text ---- */
 
@@ -1312,7 +1509,7 @@ registerView("text", {
     canvas.append(stage);
 
     try {
-      body.textContent = await api.rawText(box.uuid);
+      body.textContent = await api.textAt(opts.src || api.rawUrl(box.uuid));
     } catch (error) {
       stage.replaceChildren(emptyMessage(`Cannot read ${box.resource_uri}: ${error.message}`));
       stage.classList.add("failed");
@@ -1351,6 +1548,7 @@ registerView("text", {
 /** A PDF is shown in the browser's own viewer, opened on the file. */
 registerView("pdf", {
   render(canvas, box, ctx, mode, opts = {}) {
+    const src = opts.src || api.rawUrl(box.uuid);
     if (mode !== "content") {
       canvas.append(iconPane(box));
       return;
@@ -1363,7 +1561,7 @@ registerView("pdf", {
     wrap.className = "pdf-view";
     const frame = document.createElement("iframe");
     frame.className = "pdf-frame";
-    frame.src = `${api.rawUrl(box.uuid)}#view=FitH`;
+    frame.src = `${src}#view=FitH`;
     frame.title = box.name;
     frame.addEventListener("error", () => {
       wrap.replaceChildren(emptyMessage(`The viewer could not load ${box.resource_uri}.`));
@@ -1371,7 +1569,7 @@ registerView("pdf", {
     const bar = document.createElement("div");
     bar.className = "pdf-bar muted";
     const open = document.createElement("a");
-    open.href = api.rawUrl(box.uuid);
+    open.href = src;
     open.target = "_blank";
     open.rel = "noreferrer";
     open.textContent = box.resource_uri;
@@ -1384,6 +1582,120 @@ registerView("pdf", {
     }
   },
 });
+
+/* ------------------------------------------------------- video, archive ---- */
+
+registerView("video", {
+  render(canvas, box, ctx, mode, opts = {}) {
+    if (mode !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "video-view";
+    const video = document.createElement("video");
+    video.controls = true;
+    video.src = opts.src || api.rawUrl(box.uuid);
+    video.addEventListener("error", () =>
+      wrap.replaceChildren(
+        unableMessage(box, opts, "This browser cannot play the video.")
+      )
+    );
+    wrap.append(video);
+    canvas.append(wrap);
+  },
+});
+
+/** A zip or tar, listed like a folder. Members are read-only here. */
+registerView("archive", {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    if (mode !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    let payload;
+    try {
+      payload = opts.archiveUrl
+        ? await request(opts.archiveUrl)
+        : await api.archive(box.uuid, opts.sub || "");
+    } catch (error) {
+      canvas.append(emptyMessage(`Cannot open the archive: ${error.message}`));
+      return;
+    }
+    const wrap = document.createElement("div");
+    wrap.className = "archive-view";
+    const head = document.createElement("p");
+    head.className = "muted";
+    head.textContent = `${payload.entries.length} members of ${box.name}`;
+    wrap.append(head);
+    if (!payload.entries.length) {
+      wrap.append(emptyMessage("This archive is empty."));
+    }
+    payload.entries.forEach((entry) => {
+      const row = document.createElement("div");
+      row.className = "fs-row";
+      const glyph = document.createElement("span");
+      glyph.className = "fs-icon";
+      glyph.textContent = entry.icon;
+      const name = document.createElement("span");
+      name.className = "fs-name";
+      name.textContent = entry.name;
+      const size = document.createElement("span");
+      size.className = "fs-size muted";
+      size.textContent = entry.kind === "dir" ? "-" : formatSize(entry.size);
+      row.append(glyph, name, size);
+      wrap.append(row);
+    });
+    canvas.append(wrap);
+  },
+});
+
+function formatSize(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+/** A file with no viewer: what it is, how big, and a link to take it away. */
+registerView("file", {
+  render(canvas, box, ctx, mode, opts = {}) {
+    if (mode !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    canvas.append(
+      unableMessage(box, opts, `Boxganizer has no viewer for ${box.name || "this file"}.`)
+    );
+  },
+});
+
+/** A card explaining that the file cannot be shown, with the file still reachable. */
+function unableMessage(box, opts, reason) {
+  const card = document.createElement("div");
+  card.className = "empty-message unable";
+  const glyph = document.createElement("span");
+  glyph.className = "glyph";
+  glyph.textContent = box.icon || "\u{1f4c4}";
+  const text = document.createElement("p");
+  text.textContent = reason;
+  card.append(glyph, text);
+  const src = opts.src || (box.uuid ? api.rawUrl(box.uuid) : null);
+  if (src) {
+    const link = document.createElement("a");
+    link.href = src;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = box.resource_uri || "Open the file";
+    card.append(link);
+  }
+  return card;
+}
 
 /* The fallback for every type that has nothing better yet. */
 registerView("*", {

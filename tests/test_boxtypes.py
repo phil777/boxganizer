@@ -62,8 +62,9 @@ DOCUMENTED: dict[str, str | None] = {
 GROUPING_LEVELS = {"content", "resource", "dynamic", "organizer", "viewport"}
 
 #: Types this project added on top of the source document, with their parents.
-#: `root` exists because a database needs one place for the graph to start.
-ADDITIONS: dict[str, str] = {"root": "folder"}
+#: `root` exists because a database needs one place for the graph to start;
+#: `video` sits under `file` so a .mp4 can be inferred, previewed and filed by name.
+ADDITIONS: dict[str, str] = {"root": "folder", "video": "file"}
 
 ALL_KEYS = set(DOCUMENTED) | set(ADDITIONS)
 PARENTS = {**DOCUMENTED, **ADDITIONS}

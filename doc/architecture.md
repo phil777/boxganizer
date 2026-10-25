@@ -116,11 +116,20 @@ Endpoints the interface uses:
 | `POST /api/boxes/{ref}/grid/resize`   | new size; reports what lost a cell              |
 | `POST /api/boxes/{ref}/grid/unplace`  | empty a cell, keep the child                    |
 | `GET /api/boxes/{ref}/raw`            | the bytes behind a file box (see below)         |
+| `GET /api/boxes/{ref}/thumbnail`      | the miniature that box was iconed from          |
+| `GET /api/types/suggest`              | the better type for a resource, if there is one |
+| `GET /api/boxes/{ref}/listing`        | browse a `directory` box's files (see below)    |
+| `GET /api/boxes/{ref}/content`        | one file inside that directory, for previews    |
+| `GET /api/boxes/{ref}/archive`        | the members of a zip or tar in that directory   |
 
 `{ref}` is a name or a uuid everywhere.
 
-**Reading files off the disk** is the one place the server touches the
-filesystem beyond the database. Only types whose `serves_content` is true — from
+**Reading files off the disk** — `/raw`, `/content`, `/listing`, `/archive` — is
+the one place the server touches the filesystem beyond the database. Listings and
+previews are confined to the box's own resource directory first, so a `directory`
+box can browse freely inside itself and nowhere else: `boxganizer/fslist.py`
+resolves every client path and refuses anything that climbs out, symlinks
+included. Only types whose `serves_content` is true — from
 `FileResource` down — are readable, only regular files, only under 32 MiB, and
 only inside `$BOXGANIZER_CONTENT_ROOT` when that is set (symlinks resolved
 first). Responses carry `X-Content-Type-Options: nosniff`, and SVG gets a

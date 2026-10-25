@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import tarfile
+import zipfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from boxganizer import __version__, boxtypes, grid, infer, paths, thumbs
+from boxganizer import __version__, boxtypes, fslist, grid, infer, paths, thumbs
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -293,6 +295,47 @@ def create_app(store: BoxStore | None = None) -> FastAPI:
         parent = store.resolve(ref)
         store.unlink(parent.uuid, child)
 
+    @app.get("/api/boxes/{ref}/listing")
+    def read_listing(
+        ref: str,
+        request: Request,
+        store: StoreDep,
+        sub: Annotated[str, Query(description="Path inside the box's directory.")] = "",
+    ) -> dict[str, object]:
+        """Browse the directory a `directory` box points at."""
+        root, target = _box_file(store, request, ref, sub, need_list=True)
+        return {
+            "root": str(root),
+            "sub": sub or "",
+            "parent": _parent_of(sub),
+            "at": str(target),
+            "entries": [entry.as_dict() for entry in fslist.list_directory(root, sub)],
+        }
+
+    @app.get("/api/boxes/{ref}/archive")
+    def read_archive(
+        ref: str,
+        request: Request,
+        store: StoreDep,
+        sub: Annotated[str, Query(description="Archive inside the box's directory.")] = "",
+    ) -> dict[str, object]:
+        """List the members of a zip or tar archive."""
+        _root, target = _box_file(store, request, ref, sub)
+        try:
+            entries = fslist.list_archive(target)
+        except (ValueError, zipfile.BadZipFile, tarfile.TarError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "cannot_list_archive", "reason": str(exc)},
+            ) from exc
+        return {"path": str(target), "entries": [entry.as_dict() for entry in entries]}
+
+    @app.get("/api/boxes/{ref}/content")
+    def read_box_file(ref: str, request: Request, store: StoreDep, sub: str = "") -> Response:
+        """One file inside a box's directory, for the explorer's previews."""
+        _, target = _box_file(store, request, ref, sub)
+        return _file_response(target)
+
     @app.get("/api/boxes/{ref}/thumbnail")
     def read_thumbnail(ref: str, store: StoreDep) -> Response:
         """The miniature this box uses as its icon, generated from its resource."""
@@ -396,6 +439,63 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _box_file(
+    store: BoxStore,
+    request: Request,
+    ref: str,
+    sub: str,
+    *,
+    need_list: bool = False,
+) -> tuple[Path, Path]:
+    """Resolve `ref` + `sub` to a real file inside the box's own directory.
+
+    The sub-path can never leave the box's resource directory, and the whole
+    directory must still be inside `$BOXGANIZER_CONTENT_ROOT` when that is set.
+    """
+    box = store.resolve(ref)
+    if need_list and not boxtypes.get(box.box_type).lists_files:
+        raise HTTPException(
+            status_code=415,
+            detail={"error": "not_a_directory_box", "type": box.box_type},
+        )
+    if not box.resource_uri:
+        raise HTTPException(status_code=404, detail={"error": "resource_missing", "name": box.name})
+    root = _local_path(box.resource_uri)
+    confine = getattr(request.app.state, "content_root", None)
+    if confine is not None and not _inside(root, confine):
+        raise HTTPException(
+            status_code=403, detail={"error": "resource_out_of_range", "root": str(confine)}
+        )
+    try:
+        target = fslist.safe_join(root, sub)
+    except fslist.OutsideRoot as exc:
+        raise HTTPException(status_code=403, detail={"error": "path_out_of_range"}) from exc
+    if not target.exists():
+        raise HTTPException(status_code=404, detail={"error": "no_such_path", "path": str(target)})
+    return root, target
+
+
+def _parent_of(sub: str) -> str | None:
+    cleaned = (sub or "").strip("/")
+    if not cleaned:
+        return None
+    parent = cleaned.rsplit("/", 1)[0] if "/" in cleaned else ""
+    return parent
+
+
+def _file_response(path: Path) -> Response:
+    if path.is_dir():
+        raise HTTPException(status_code=409, detail={"error": "is_a_directory"})
+    size = path.stat().st_size
+    if size > MAX_RAW_BYTES:
+        raise HTTPException(status_code=413, detail={"error": "resource_too_large", "size": size})
+    media_type = fslist.media_type_for(path)
+    headers = {"X-Content-Type-Options": "nosniff", "Content-Disposition": "inline"}
+    if media_type == "image/svg+xml":
+        headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    return Response(content=path.read_bytes(), media_type=media_type, headers=headers)
 
 
 def _local_path(resource_uri: str) -> Path:

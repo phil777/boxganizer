@@ -407,7 +407,8 @@ def test_horizontal_scrolling_is_tied_to_wrapping(client: TestClient) -> None:
 def test_the_folder_view_is_registered_for_containers(client: TestClient) -> None:
     script = client.get("/static/app.js").text
     assert 'registerView("folder", folderView)' in script
-    assert 'registerView("directory", folderView)' in script
+    # A directory on disk is browsed, not listed like a folder.
+    assert 'registerView("directory", directoryView)' in script
     assert "FOLDER_DEFAULTS" in script
 
 
@@ -478,7 +479,7 @@ def test_embedded_views_drop_their_toolbars(client: TestClient) -> None:
 
 
 def test_the_modal_can_be_opened_with_a_parent(client: TestClient) -> None:
-    assert "function openNewBoxModal(parentUuid" in client.get("/static/app.js").text
+    assert "function openNewBoxModal(options = {})" in client.get("/static/app.js").text
 
 
 # -- root -------------------------------------------------------------------
@@ -821,3 +822,155 @@ def test_the_pdf_view_embeds_the_browser_viewer(client: TestClient) -> None:
     assert "#view=FitH" in script
     assert "pdf-frame" in script
     assert "box-icon--page" in client.get("/static/app.css").text
+
+
+# -- the directory explorer --------------------------------------------------
+
+
+@pytest.fixture
+def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A small directory tree, plus an archive and a video to open."""
+    import zipfile
+
+    from boxganizer import config
+
+    monkeypatch.setattr(config, "data_dir", lambda: tmp_path / "data")
+    root = tmp_path / "files"
+    (root / "photos").mkdir(parents=True)
+    (root / "notes.md").write_text("# Notes\n")
+    (root / "clip.mp4").write_bytes(b"\x00" * 32)
+    (root / "photos" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (root / ".hidden").write_text("no")
+    with zipfile.ZipFile(root / "bundle.zip", "w") as archive:
+        archive.writestr("inner/hello.txt", "hello")
+    return root
+
+
+def _dir_box(client: TestClient, tree: Path) -> dict:
+    return client.post(
+        "/api/boxes", json={"name": "Files", "box_type": "directory", "resource_uri": str(tree)}
+    ).json()
+
+
+def test_a_directory_box_lists_its_files(client: TestClient, tree: Path) -> None:
+    box = _dir_box(client, tree)
+    listing = client.get(f"/api/boxes/{box['uuid']}/listing").json()
+    names = [entry["name"] for entry in listing["entries"]]
+    assert names == ["photos", "bundle.zip", "clip.mp4", "notes.md"]  # folders first
+    assert ".hidden" not in names
+
+
+def test_listing_reports_the_type_each_file_would_become(client: TestClient, tree: Path) -> None:
+    entries = {
+        entry["name"]: entry
+        for entry in client.get(f"/api/boxes/{_dir_box(client, tree)['uuid']}/listing").json()[
+            "entries"
+        ]
+    }
+    assert entries["notes.md"]["box_type"] == "markdown"
+    assert entries["clip.mp4"]["box_type"] == "video"
+    assert entries["bundle.zip"]["box_type"] == "archive"
+    assert entries["photos"]["box_type"] == "directory"
+    assert entries["clip.mp4"]["kind"] == "video"
+
+
+def test_the_explorer_navigates_into_a_subdirectory(client: TestClient, tree: Path) -> None:
+    box = _dir_box(client, tree)
+    sub = client.get(f"/api/boxes/{box['uuid']}/listing", params={"sub": "photos"}).json()
+    assert [entry["sub"] for entry in sub["entries"]] == ["photos/a.png"]
+    assert sub["parent"] == ""
+
+
+def test_a_path_cannot_climb_out_of_the_box_directory(client: TestClient, tree: Path) -> None:
+    box = _dir_box(client, tree)
+    for attempt in ("../secrets", "/etc", "photos/../../etc"):
+        response = client.get(f"/api/boxes/{box['uuid']}/listing", params={"sub": attempt})
+        assert response.status_code == 403, attempt
+        assert response.json()["detail"]["error"] == "path_out_of_range"
+
+
+def test_a_file_inside_the_directory_is_served_for_preview(client: TestClient, tree: Path) -> None:
+    box = _dir_box(client, tree)
+    response = client.get(f"/api/boxes/{box['uuid']}/content", params={"sub": "notes.md"})
+    assert response.status_code == 200
+    assert response.text == "# Notes\n"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_listing_is_refused_for_a_box_that_is_not_a_directory(client: TestClient) -> None:
+    box = client.post("/api/boxes", json={"name": "Plain", "box_type": "folder"}).json()
+    response = client.get(f"/api/boxes/{box['uuid']}/listing")
+    assert response.status_code == 415
+    assert response.json()["detail"]["error"] == "not_a_directory_box"
+
+
+def test_an_archive_lists_its_members(client: TestClient, tree: Path) -> None:
+    box = _dir_box(client, tree)
+    payload = client.get(f"/api/boxes/{box['uuid']}/archive", params={"sub": "bundle.zip"}).json()
+    assert [entry["sub"] for entry in payload["entries"]] == ["inner/hello.txt"]
+
+
+def test_an_unreadable_archive_is_an_error_not_a_crash(client: TestClient, tree: Path) -> None:
+    (tree / "broken.zip").write_text("this is not a zip")
+    box = _dir_box(client, tree)
+    response = client.get(f"/api/boxes/{box['uuid']}/archive", params={"sub": "broken.zip"})
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "cannot_list_archive"
+
+
+def test_video_files_are_inferred_as_video(client: TestClient, tree: Path) -> None:
+    # A real file: a type's own check requires it to exist, so inference only
+    # proposes types that would actually accept the resource.
+    assert (
+        client.get("/api/types/suggest", params={"resource_uri": str(tree / "clip.mp4")}).json()[
+            "suggestion"
+        ]["key"]
+        == "video"
+    )
+
+
+def test_a_listing_entry_carries_the_absolute_path(client: TestClient, tree: Path) -> None:
+    """Right-click -> "new box" needs a real path, not a path relative to the box."""
+    box = _dir_box(client, tree)
+    entries = client.get(f"/api/boxes/{box['uuid']}/listing").json()["entries"]
+    by_name = {entry["name"]: entry for entry in entries}
+    assert by_name["notes.md"]["path"] == str(tree / "notes.md")
+    # Archive members are not files on disk, so they carry no path.
+    archive = client.get(f"/api/boxes/{box['uuid']}/archive", params={"sub": "bundle.zip"}).json()
+    assert archive["entries"][0]["path"] is None
+
+
+def test_creating_a_box_from_a_listed_file_keeps_the_resource(
+    client: TestClient, tree: Path
+) -> None:
+    parent = _dir_box(client, tree)
+    created = client.post(
+        "/api/boxes",
+        json={
+            "name": "notes",
+            "box_type": "markdown",
+            "resource_uri": str(tree / "notes.md"),
+            "parent": parent["uuid"],
+        },
+    )
+    assert created.status_code == 201
+    box = client.get(f"/api/boxes/{created.json()['uuid']}").json()
+    assert box["resource_uri"] == str(tree / "notes.md")
+    assert [entry["uuid"] for entry in box["parents"]] == [parent["uuid"]]
+
+
+def test_the_explorer_front_end_navigates_and_previews(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    for needle in (
+        "const directoryView",
+        "await api.listing(box.uuid, nav.sub)",
+        "api.contentUrl(box.uuid, entry.sub)",
+        'registerView("video"',
+        'registerView("archive"',
+        "function formatSize",
+        'registerView("file"',
+        "function unableMessage",
+        "const VIEW_BY_KIND",
+    ):
+        assert needle in script, needle
+    assert "fs-row" in client.get("/static/app.css").text

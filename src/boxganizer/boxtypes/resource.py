@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from boxganizer import paths
+from boxganizer import fslist, paths
 from boxganizer.boxtypes.base import BoxType
 from boxganizer.errors import InvalidBoxContent
 from boxganizer.models import Box
@@ -87,6 +87,18 @@ class ImageResource(FileResource):
     )
 
 
+class VideoResource(FileResource):
+    """A video file. Not in the source document: added so the explorer can
+    preview video and infer a type for it instead of calling it a `file`."""
+
+    key: ClassVar[str] = "video"
+    label: ClassVar[str] = "Video"
+    icon: ClassVar[str] = "\U0001f3a5"  # 🎥
+    summary: ClassVar[str] = "A video file, played in place."
+    extensions: ClassVar[frozenset[str] | None] = fslist.VIDEO_EXTENSIONS
+    planned: ClassVar[str] = "Poster frames as icons, and chapter metadata."
+
+
 class PDFResource(FileResource):
     """A PDF document, shown as a viewer and iconed with its first page."""
 
@@ -111,9 +123,7 @@ class ArchiveResource(FileResource):
     label: ClassVar[str] = "Archive"
     icon: ClassVar[str] = "\U0001f5dc️"  # 🗜️
     summary: ClassVar[str] = "zip, tar, 7z and friends. Contents are listed, not stored."
-    extensions: ClassVar[frozenset[str] | None] = frozenset(
-        {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"}
-    )
+    extensions: ClassVar[frozenset[str] | None] = fslist.ARCHIVE_EXTENSIONS
     planned: ClassVar[str] = "List entries through a read-only directory view."
 
 
@@ -124,6 +134,7 @@ class DirectoryResource(ResourceBox):
     label: ClassVar[str] = "Directory"
     icon: ClassVar[str] = "\U0001f4c1"  # 📁
     summary: ClassVar[str] = "A directory on disk."
+    lists_files: ClassVar[bool] = True
     allows_children: ClassVar[bool] = True
     resource_uri_required: ClassVar[bool] = True
     resource_uri_schemes: ClassVar[frozenset[str] | None] = _FILE_SCHEMES

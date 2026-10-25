@@ -93,6 +93,17 @@ def best_type_for(
     return _by_extension(path)
 
 
+def best_key_for(resource_uri: str, *, is_dir: Callable[[Path], bool] = Path.is_dir) -> str | None:
+    """The type that best fits this resource, whatever was chosen before.
+
+    The explorer uses this to pre-select a type when a file on disk becomes a
+    box; `suggest` is the guarded version that only speaks up when it knows
+    better than the current choice.
+    """
+    found = best_type_for(resource_uri, is_dir=is_dir)
+    return found[0].key if found else None
+
+
 def _accepts(
     kind: type[BoxType],
     resource_uri: str,

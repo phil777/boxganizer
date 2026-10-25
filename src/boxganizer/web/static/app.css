@@ -514,3 +514,38 @@ pre.text {
 }
 
 .pdf-bar { padding: 0 0.1rem; overflow-wrap: anywhere; }
+
+/* ---------- the directory explorer ---------- */
+
+.fs-view { display: flex; flex-direction: column; gap: 0.4rem; height: 100%; min-height: 0; }
+.fs-bar { display: flex; align-items: center; gap: 0.4rem; flex: none; flex-wrap: wrap; }
+.fs-path { font-size: 0.85rem; opacity: 0.85; overflow-wrap: anywhere; }
+.fs-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  padding: 0.3rem;
+}
+.fs-pane:has(video), .fs-pane:has(iframe), .fs-pane:has(.image-view) { padding: 0; }
+.fs-row {
+  display: grid;
+  grid-template-columns: 1.6em 1fr auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.2rem 0.35rem;
+  border-radius: 0.2rem;
+  cursor: pointer;
+}
+.fs-row:hover { background: var(--line); }
+.fs-row.selected { outline: 1px solid var(--accent); }
+.fs-icon { text-align: center; }
+.fs-name { overflow-wrap: anywhere; }
+.fs-kind { font-size: 0.75rem; opacity: 0.65; }
+.fs-size { font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.video-view { height: 100%; display: flex; align-items: center; justify-content: center; }
+.video-view video { max-width: 100%; max-height: 100%; background: #000; }
+
+.unable { display: flex; flex-direction: column; align-items: center; gap: 0.4rem; }
+.unable a { color: var(--accent); }
