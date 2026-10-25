@@ -7,6 +7,12 @@
     box box add "Notes"  -t text  -r /tmp/notes.md
     box box add "Sunset" -t image -r /tmp/sunset.png
     box box add "Board"  -t grid
+    python - <<'PY'
+    from PIL import Image; Image.new("RGB", (320, 200), (30, 60, 120)).save("/tmp/wall.png")
+    PY
+    box box add "Wall"   -t desktop -r /tmp/wall.png
+    box box add "Tile"   -t text -r /tmp/notes.md --parent Wall
+    box box add "Loose"  --parent Wall
     box serve --port 8300
 
     # terminal 2
@@ -18,8 +24,10 @@ or in $BOXGANIZER_CHROME.
 
 It drives the real interface and prints what the page actually shows: the side
 pane, the display-mode round trip, image scaling, folder navigation, grid
-resizing, swapping by drag and drop, the context menus. Exit code is 0 only if
-every check passed and the browser reported no console errors.
+resizing, swapping by drag and drop, the context menus, and the desktop surface
+— wallpaper, dropping a box where it was dropped, dragging an icon by the pixels
+it was dragged, and the magnetic grid taking it to the nearest line. Exit code is
+0 only if every check passed and the browser reported no console errors.
 
 It is kept out of CI on purpose: a browser download in the test pipeline is a
 dependency nobody asked for, and `make test` must stay fast and offline.
@@ -186,6 +194,192 @@ def main() -> int:
             "cell menu offers a new box", "New box" in page.locator("#context-menu").inner_text()
         )
         page.keyboard.press("Escape")
+
+        print("desktop")
+        wall = page.locator("#box-list li", has_text="Wall")
+        if not wall.count():
+            print("      (skipped: no `Wall` desktop box in this library)")
+        else:
+            wall.click()
+            page.wait_for_timeout(300)
+            page.locator('#mode-toggle button[data-mode="content"]').click()
+            page.wait_for_timeout(800)
+            kids = api(base, "/api/boxes/Wall")["children"]
+            checks.check(
+                "a child nobody placed is not drawn on the surface",
+                page.locator(".desktop-icon").count() == 0,
+                f"{page.locator('.desktop-icon').count()} icons for {len(kids)} children",
+            )
+            checks.check(
+                "the resource is painted as the background",
+                page.evaluate(
+                    """() => {
+                      const view = document.querySelector('.desktop-view');
+                      return !!view && view.classList.contains('has-background')
+                        && getComputedStyle(view).backgroundImage.includes('/raw');
+                    }"""
+                ),
+            )
+
+            def rect_of(name: str) -> dict:
+                uuid = api(base, f"/api/boxes/{name}")["uuid"]
+                return (
+                    api(base, "/api/boxes/Wall")["config"]
+                    .get("desktop", {})
+                    .get("positions", {})
+                    .get(uuid, {})
+                )
+
+            def chip(name: str):
+                return page.locator(".desktop-unplaced .chip", has_text=name)
+
+            def drag_tile(name: str, dx: int, dy: int) -> None:
+                """Move a placed icon with the pointer, by whole pixels."""
+                uuid = api(base, f"/api/boxes/{name}")["uuid"]
+                frame = page.locator(f'.desktop-icon[data-uuid="{uuid}"]').bounding_box()
+                assert frame is not None, name
+                start = (frame["x"] + frame["width"] / 2, frame["y"] + frame["height"] / 3)
+                page.mouse.move(*start)
+                page.mouse.down()
+                page.mouse.move(start[0] + dx / 2, start[1] + dy / 2, steps=6)
+                page.mouse.move(start[0] + dx, start[1] + dy, steps=6)
+                page.mouse.up()
+                page.wait_for_timeout(800)
+
+            checks.check(
+                "a fresh desktop has no positions stored yet",
+                api(base, "/api/boxes/Wall")["config"].get("desktop", {}).get("positions", {})
+                == {},
+            )
+            checks.check(
+                "children nobody placed wait on the strip below",
+                chip("Tile").count() == 1 and chip("Loose").count() == 1,
+                page.locator(".desktop-unplaced .chip").count(),
+            )
+
+            chip("Tile").drag_to(
+                page.locator(".desktop-surface"), target_position={"x": 220, "y": 140}
+            )
+            page.wait_for_timeout(900)
+
+            def landed_on_target(where: dict, x: int, y: int) -> bool:
+                """A whole pixel, because the page measures itself in fractions."""
+                return (
+                    abs(int(where.get("x", -9999)) - x) <= 1
+                    and abs(int(where.get("y", -9999)) - y) <= 1
+                )
+
+            landed = rect_of("Tile")
+            checks.check(
+                "dropping a box puts its icon where it was dropped",
+                landed_on_target(landed, 220, 140),
+                landed,
+            )
+
+            drag_tile("Tile", 70, 50)
+            dragged = rect_of("Tile")
+            checks.check(
+                "dragging an icon moves it by the pixels it was dragged",
+                landed_on_target(dragged, 290, 190),
+                dragged,
+            )
+
+            page.locator('[data-action="desktop-snap"]').click()
+            page.wait_for_timeout(700)
+            grid_saved = api(base, "/api/boxes/Wall")["config"]["desktop"]
+            checks.check(
+                "the magnet is a setting on the box",
+                grid_saved.get("snap") is True and grid_saved.get("grid") == 32,
+                grid_saved,
+            )
+            checks.check(
+                "the grid lines are drawn while it is engaged",
+                page.locator(".desktop-view[data-snap='true']").count() == 1,
+            )
+            checks.check(
+                "engaging the magnet leaves what is already placed alone",
+                abs(rect_of("Tile").get("x", 0) - 290) <= 1,
+                rect_of("Tile"),
+            )
+            chip("Loose").drag_to(
+                page.locator(".desktop-surface"), target_position={"x": 45, "y": 45}
+            )
+            page.wait_for_timeout(900)
+            snapped = rect_of("Loose")
+            checks.check(
+                "the magnet took the icon to the nearest line",
+                snapped.get("x") == 32 and snapped.get("y") == 32,
+                snapped,
+            )
+
+            checks.check(
+                "every placed child has one icon on the surface",
+                page.locator(".desktop-icon").count() == len(kids),
+                f"{page.locator('.desktop-icon').count()} of {len(kids)}",
+            )
+
+            page.locator('[data-action="desktop-grid-plus"]').click()
+            page.wait_for_timeout(700)
+            checks.check(
+                "the grid size is adjustable and saved",
+                api(base, "/api/boxes/Wall")["config"]["desktop"]["grid"] == 36,
+                api(base, "/api/boxes/Wall")["config"]["desktop"]["grid"],
+            )
+
+            painted = page.evaluate(
+                """(uuid) => {
+                  const tile = document.querySelector(`.desktop-icon[data-uuid="${uuid}"]`);
+                  const surface = document.querySelector('.desktop-surface');
+                  if (!tile || !surface) return null;
+                  return {
+                    left: tile.offsetLeft, top: tile.offsetTop,
+                    right: tile.offsetLeft + tile.offsetWidth,
+                    bottom: tile.offsetTop + tile.offsetHeight,
+                    across: surface.offsetWidth, down: surface.offsetHeight,
+                    grid: getComputedStyle(surface).backgroundSize,
+                  };
+                }""",
+                api(base, "/api/boxes/Tile")["uuid"],
+            )
+            tile_rect = rect_of("Tile")
+            checks.check(
+                "the icon is painted where the box says it is",
+                bool(painted)
+                and painted["left"] == tile_rect["x"]
+                and abs(painted["top"] - tile_rect["y"]) <= 1,
+                painted,
+            )
+            checks.check(
+                "the surface is big enough for everything on it",
+                bool(painted)
+                and painted["right"] <= painted["across"]
+                and painted["bottom"] <= painted["down"]
+                and painted["grid"].startswith("36px"),
+                painted,
+            )
+
+            page.locator(".desktop-icon[data-uuid]").first.dblclick()
+            page.wait_for_timeout(700)
+            checks.check(
+                "double-clicking an icon replaces the desktop",
+                page.locator(".desktop-icon").count() == 0
+                and page.locator("#breadcrumb button").count() >= 2,
+                page.locator("#breadcrumb").inner_text(),
+            )
+
+            page.locator("#up").click()
+            page.wait_for_timeout(800)
+            tiles = page.locator(".desktop-icon")
+            checks.check("the desktop comes back with its icons placed", tiles.count() == len(kids))
+            tiles.first.click(button="right")
+            page.wait_for_timeout(250)
+            menu = page.locator("#context-menu").inner_text()
+            checks.check(
+                "the icon menu can modify it and take it off the desktop",
+                "Modify" in menu and "Remove from Wall" in menu,
+                menu.replace("\n", " / "),
+            )
+            page.keyboard.press("Escape")
 
         checks.check("no console errors", not errors, "; ".join(errors[:3]))
         page.screenshot(path="/tmp/verify-web-ui.png")

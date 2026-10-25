@@ -91,6 +91,10 @@ class GridError(BoxganizerError):
     """A cell reference or a placement that the grid cannot accept."""
 
 
+class PlacementError(BoxganizerError):
+    """A coordinate, a tile size, or a grid size the desktop cannot accept."""
+
+
 class StoreError(BoxganizerError):
     """The database could not be opened or written."""
 

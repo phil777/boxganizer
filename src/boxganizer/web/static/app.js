@@ -112,6 +112,16 @@ const api = {
       method: "POST",
       body: JSON.stringify({ rows, columns }),
     }),
+  desktopMove: (ref, child, x, y) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/desktop/move`, {
+      method: "POST",
+      body: JSON.stringify({ child, x, y }),
+    }),
+  desktopResize: (ref, child, width, height) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/desktop/resize`, {
+      method: "POST",
+      body: JSON.stringify({ child, width, height }),
+    }),
   rawText: async (ref) => {
     const response = await fetch(api.rawUrl(ref));
     if (!response.ok) {
@@ -1354,6 +1364,351 @@ function gridCell(box, ctx, row, column, child, depth) {
   return cell;
 }
 
+
+
+/* -------------------------------------------------------------- desktop ---- */
+
+const DESKTOP_DEFAULTS = { grid: 32, snap: false, tile: 96 };
+
+function desktopOptions(box) {
+  return { ...DESKTOP_DEFAULTS, ...((box.config || {}).desktop || {}) };
+}
+
+/** The same rounding the core applies in `boxganizer.desktop`, so the icon the
+ * page drags to ends up where the database will put it. */
+function magnetise(value, options) {
+  if (!options.snap) return value;
+  const cell = Number(options.grid) || DESKTOP_DEFAULTS.grid;
+  return Math.floor(value / cell + 0.5) * cell;
+}
+
+/**
+ * A `desktop` box: its children as icons where the user put them, on a surface
+ * that can carry a background picture. Drag an icon to move it, its corner to
+ * size it, double-click to open it in place of the desktop. The magnetic grid is
+ * a mode, off until it is asked for, and both the size and the mode are kept in
+ * the box, so the desktop is the same in another browser tomorrow.
+ */
+registerView("desktop", {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    if (ctx.mode() !== "content") {
+      canvas.append(iconPane(box));
+      return;
+    }
+    const options = desktopOptions(box);
+    let children = [];
+    try {
+      children = await api.children(box.uuid);
+    } catch (error) {
+      canvas.append(emptyMessage(`Cannot list the children: ${error.message}`));
+      return;
+    }
+    const positions = options.positions || {};
+
+    if (!opts.embedded) canvas.append(desktopToolbar(box, options, ctx, children.length));
+
+    const wrap = document.createElement("div");
+    wrap.className = "desktop-view";
+    wrap.dataset.uuid = box.uuid;
+    wrap.dataset.snap = String(!!options.snap);
+    wrap.style.setProperty("--desk-grid", `${Number(options.grid) || DESKTOP_DEFAULTS.grid}px`);
+    canvas.append(wrap);
+
+    // The resource field may point at a picture to work on. It is tried before
+    // it is announced, so a resource that is not an image leaves a plain desktop
+    // rather than a broken one.
+    if (box.resource_uri) {
+      // Never put in the page: it exists only to ask whether the file is a
+      // picture, so a resource that is not one leaves a plain desktop.
+      const probe = new Image();
+      probe.onload = () => {
+        wrap.classList.add("has-background");
+        wrap.style.setProperty("--desk-bg", `url(${JSON.stringify(api.rawUrl(box.uuid))})`);
+      };
+      probe.src = api.rawUrl(box.uuid);
+    }
+
+    const surface = document.createElement("div");
+    surface.className = "desktop-surface";
+    wrap.append(surface);
+
+    // Absolutely placed icons do not grow the surface, and the grid lines are
+    // painted on it, so the surface is asked to be big enough for everything on
+    // it plus one cell of breathing room.
+    const cell = Number(options.grid) || DESKTOP_DEFAULTS.grid;
+    let widest = 0;
+    let tallest = 0;
+    Object.values(positions).forEach((rect) => {
+      widest = Math.max(widest, (rect.x || 0) + (rect.width || DESKTOP_DEFAULTS.tile));
+      tallest = Math.max(tallest, (rect.y || 0) + (rect.height || DESKTOP_DEFAULTS.tile));
+    });
+    if (widest) surface.style.minWidth = `${widest + cell}px`;
+    if (tallest) surface.style.minHeight = `${tallest + cell}px`;
+
+    children.forEach((child) => {
+      const rect = positions[child.uuid];
+      if (rect) surface.append(desktopIcon(box, child, rect, options, ctx));
+    });
+    if (!children.length) {
+      const hint = document.createElement("p");
+      hint.className = "desktop-hint muted";
+      hint.textContent = "Drag a box here from the panel on the left to put an icon on the desktop.";
+      surface.append(hint);
+    }
+
+    const loose = children.filter((child) => !positions[child.uuid]);
+    if (loose.length) {
+      const strip = document.createElement("div");
+      strip.className = "desktop-unplaced";
+      const label = document.createElement("span");
+      label.className = "muted";
+      label.textContent = `Not placed (${loose.length}): drag one onto the surface`;
+      strip.append(label);
+      loose.forEach((child) => strip.append(chipFor(child, ctx)));
+      wrap.append(strip);
+    }
+
+    // Anything dropped on the surface lands where it was dropped — or on the
+    // nearest grid line, when the magnet is on.
+    surface.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      surface.classList.add("drop-target");
+    });
+    surface.addEventListener("dragleave", () => surface.classList.remove("drop-target"));
+    surface.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      surface.classList.remove("drop-target");
+      const dragged = event.dataTransfer.getData("text/plain");
+      if (!dragged) return;
+      const frame = surface.getBoundingClientRect();
+      await placeOnDesktop(box, ctx, dragged, event.clientX - frame.left, event.clientY - frame.top);
+    });
+  },
+});
+
+/**
+ * Tell the server where an icon went, and redraw from what it answered with.
+ * The server holds the magnet, so it, not the page, decides the final spot.
+ */
+async function placeOnDesktop(box, ctx, childUuid, x, y) {
+  const edge = (value) => Math.round(Math.max(0, value));
+  try {
+    await api.desktopMove(box.uuid, childUuid, edge(x), edge(y));
+    ctx.reload();
+  } catch (error) {
+    ctx.status(`cannot place that icon here: ${error.message}`, true);
+  }
+}
+
+function desktopToolbar(box, options, ctx, count) {
+  const bar = document.createElement("div");
+  bar.className = "desktop-toolbar";
+
+  const title = document.createElement("strong");
+  title.textContent = `${box.icon} ${box.name}`;
+  const tally = document.createElement("span");
+  tally.className = "muted";
+  tally.textContent = ` ${count} on the desktop`;
+
+  const magnet = document.createElement("button");
+  magnet.type = "button";
+  magnet.dataset.action = "desktop-snap";
+  magnet.setAttribute("aria-pressed", String(!!options.snap));
+  magnet.textContent = options.snap ? "🧲 Snap: on" : "🧲 Snap: off";
+  magnet.title = "Stick icons to the grid when they are dropped";
+  magnet.addEventListener("click", () => ctx.saveSection("desktop", { snap: !options.snap }));
+
+  const cell = Number(options.grid) || DESKTOP_DEFAULTS.grid;
+  const group = document.createElement("span");
+  group.className = "stepper";
+  const label = document.createElement("span");
+  label.textContent = "grid";
+  const minus = document.createElement("button");
+  minus.type = "button";
+  minus.dataset.action = "desktop-grid-minus";
+  minus.textContent = "−";
+  const size = document.createElement("input");
+  size.type = "number";
+  size.min = "4";
+  size.max = "256";
+  size.step = "4";
+  size.value = String(cell);
+  size.dataset.action = "desktop-grid-value";
+  size.setAttribute("aria-label", "Grid size in pixels");
+  const plus = document.createElement("button");
+  plus.type = "button";
+  plus.dataset.action = "desktop-grid-plus";
+  plus.textContent = "+";
+  group.append(label, minus, size, plus);
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.dataset.action = "desktop-new";
+  add.textContent = "＋ New box here";
+  add.addEventListener("click", () => ctx.newBox(box.uuid));
+
+  bar.append(title, tally, magnet, group, add);
+
+  const commit = (value) => {
+    const next = Math.min(256, Math.max(4, Math.round(Number(value) || cell)));
+    ctx.saveSection("desktop", { grid: next });
+  };
+  minus.addEventListener("click", () => commit(cell - 4));
+  plus.addEventListener("click", () => commit(cell + 4));
+  size.addEventListener("change", () => commit(size.value));
+  size.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit(size.value);
+    }
+  });
+  return bar;
+}
+
+/**
+ * One icon on the surface. Pointer events do the dragging — not HTML5 drag and
+ * drop, which cannot follow a move — while `draggable` stays off so the tile
+ * itself is never dragged. Double-click opens the box; the corner grip sizes it.
+ */
+function desktopIcon(box, child, rect, options, ctx) {
+  const tile = document.createElement("div");
+  tile.className = "desktop-icon";
+  tile.dataset.uuid = child.uuid;
+  tile.tabIndex = 0;
+  tile.style.left = `${rect.x}px`;
+  tile.style.top = `${rect.y}px`;
+  tile.style.width = `${rect.width}px`;
+  tile.style.height = `${rect.height}px`;
+  tile.title = `Drag to move · double-click to open ${child.name}`;
+
+  tile.append(iconElement(child, "desktop-glyph"));
+  const caption = document.createElement("span");
+  caption.className = "desktop-caption";
+  caption.textContent = child.name;
+  tile.append(caption);
+
+  const grip = document.createElement("span");
+  grip.className = "desktop-grip";
+  grip.title = "Drag to resize";
+  tile.append(grip);
+
+  /**
+   * Both gestures start the same way: remember where the pointer and the tile
+   * began, then write the tile as the pointer moves, magnetised, and commit once
+   * on release. A click that never moved is left to the browser as a click.
+   */
+  function follow(event, onMove, onCommit) {
+    const origin = {
+      x: event.clientX,
+      y: event.clientY,
+      left: tile.offsetLeft,
+      top: tile.offsetTop,
+      width: tile.offsetWidth,
+      height: tile.offsetHeight,
+    };
+    let latest = null;
+    tile.setPointerCapture(event.pointerId);
+    tile.classList.add("handling");
+
+    const move = (next) => {
+      latest = onMove(origin, next);
+    };
+    const release = () => {
+      tile.removeEventListener("pointermove", move);
+      tile.removeEventListener("pointerup", release);
+      tile.removeEventListener("pointercancel", release);
+      tile.classList.remove("handling");
+      if (latest) onCommit(latest);
+    };
+    tile.addEventListener("pointermove", move);
+    tile.addEventListener("pointerup", release);
+    tile.addEventListener("pointercancel", release);
+  }
+
+  tile.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    follow(
+      event,
+      (origin, next) => ({
+        x: Math.max(0, magnetise(origin.left + next.clientX - origin.x, options)),
+        y: Math.max(0, magnetise(origin.top + next.clientY - origin.y, options)),
+      }),
+      (where) => {
+        tile.style.left = `${where.x}px`;
+        tile.style.top = `${where.y}px`;
+        if (where.x === rect.x && where.y === rect.y) return; // put back where it was
+        placeOnDesktop(box, ctx, child.uuid, where.x, where.y);
+      }
+    );
+  });
+
+  grip.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    follow(
+      event,
+      (origin, next) => ({
+        width: Math.min(4096, Math.max(32, Math.round(origin.width + next.clientX - origin.x))),
+        height: Math.min(4096, Math.max(32, Math.round(origin.height + next.clientY - origin.y))),
+      }),
+      (size) => {
+        tile.style.width = `${size.width}px`;
+        tile.style.height = `${size.height}px`;
+        if (size.width === rect.width && size.height === rect.height) return;
+        api
+          .desktopResize(box.uuid, child.uuid, size.width, size.height)
+          .then(() => ctx.reload())
+          .catch((error) => ctx.status(`cannot size that icon: ${error.message}`, true));
+      }
+    );
+  });
+
+  tile.addEventListener("click", () => {
+    ctx.status(`${child.name} selected — double-click to open it`);
+    document
+      .querySelectorAll(".desktop-icon")
+      .forEach((other) => other.classList.toggle("selected", other === tile));
+  });
+  tile.addEventListener("dblclick", () =>
+    ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() })
+  );
+  tile.addEventListener("keydown", (event) => {
+    const cell = Number(options.grid) || DESKTOP_DEFAULTS.grid;
+    const step = {
+      ArrowLeft: [-cell, 0],
+      ArrowRight: [cell, 0],
+      ArrowUp: [0, -cell],
+      ArrowDown: [0, cell],
+    }[event.key];
+    if (step) {
+      event.preventDefault();
+      placeOnDesktop(box, ctx, child.uuid, tile.offsetLeft + step[0], tile.offsetTop + step[1]);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      ctx.open(child.uuid, { trail: ctx.trail(), mode: ctx.mode() });
+    }
+  });
+  tile.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    ctx.showMenu(
+      event.clientX,
+      event.clientY,
+      boxMenuItems(child, [
+        { label: `New box in ${box.name}`, run: () => ctx.newBox({ parent: box.uuid }) },
+        { separator: true },
+        { label: `Remove from ${box.name}`, run: () => ctx.removeFrom(box, child) },
+      ])
+    );
+  });
+  return tile;
+}
+
 /* ----------------------------------------------------------------- root ---- */
 
 /**
@@ -2104,6 +2459,8 @@ const boxganizer = {
   saveSection,
   textOptions,
   folderOptions,
+  desktopOptions,
+  magnetise,
   viewFor,
 };
 window.boxganizer = boxganizer;

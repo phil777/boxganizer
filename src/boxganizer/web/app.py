@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from boxganizer import __version__, boxtypes, fslist, grid, infer, paths, thumbs
+from boxganizer import __version__, boxtypes, desktop, fslist, grid, infer, paths, thumbs
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -23,6 +23,7 @@ from boxganizer.errors import (
     GridError,
     InvalidBoxContent,
     InvalidBoxName,
+    PlacementError,
     RootCannotBeFiled,
     UnknownBoxType,
 )
@@ -97,6 +98,29 @@ class GridResize(BaseModel):
 
     rows: int = Field(ge=1, le=grid.MAX_ROWS)
     columns: int = Field(ge=1, le=grid.MAX_COLUMNS)
+
+
+class DesktopMove(BaseModel):
+    """Put a child's icon at a spot on the desktop surface."""
+
+    child: str = Field(description="Name or uuid of the child box.")
+    x: int = Field(ge=0, description="Pixels from the left edge of the surface.")
+    y: int = Field(ge=0, description="Pixels from the top edge of the surface.")
+
+
+class DesktopResize(BaseModel):
+    """How much surface one icon takes."""
+
+    child: str
+    width: int = Field(ge=desktop.MIN_SIZE, le=desktop.MAX_SIZE)
+    height: int = Field(ge=desktop.MIN_SIZE, le=desktop.MAX_SIZE)
+
+
+class DesktopSettingsUpdate(BaseModel):
+    """The magnetic grid: how coarse it is, and whether it is engaged."""
+
+    grid: int = Field(ge=desktop.MIN_GRID_SIZE, le=desktop.MAX_GRID_SIZE)
+    snap: bool
 
 
 class ConfigUpdate(BaseModel):
@@ -184,6 +208,12 @@ def create_app(store: BoxStore | None = None, *, content_root: Path | str | None
     async def _bad_grid_move(request: Request, exc: GridError) -> JSONResponse:
         return JSONResponse(
             status_code=422, content={"detail": {"error": "bad_grid_move", "reason": str(exc)}}
+        )
+
+    @app.exception_handler(PlacementError)
+    async def _bad_desktop_move(request: Request, exc: PlacementError) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content={"detail": {"error": "bad_desktop_move", "reason": str(exc)}}
         )
 
     @app.exception_handler(UnknownBoxType)
@@ -304,6 +334,33 @@ def create_app(store: BoxStore | None = None, *, content_root: Path | str | None
         box.config = grid.to_config(box.config, size=size, cells=kept)
         saved = store.update(box)
         return saved.to_dict() | {"unplaced": lost}
+
+    @app.post("/api/boxes/{ref}/desktop/move")
+    def move_on_desktop(ref: str, payload: DesktopMove, store: StoreDep) -> dict[str, object]:
+        """Place a child's icon. The magnetic grid has the last word on where it lands."""
+        box = store.resolve(ref)
+        child = _desktop_child(store, box, payload.child)
+        saved = desktop.move(box.config, child.uuid, payload.x, payload.y)
+        box.config = saved
+        return _with_rect(store, box, child.uuid)
+
+    @app.post("/api/boxes/{ref}/desktop/resize")
+    def resize_on_desktop(ref: str, payload: DesktopResize, store: StoreDep) -> dict[str, object]:
+        """Change the size of one icon on the surface."""
+        box = store.resolve(ref)
+        child = _desktop_child(store, box, payload.child)
+        box.config = desktop.resize(box.config, child.uuid, payload.width, payload.height)
+        return _with_rect(store, box, child.uuid)
+
+    @app.post("/api/boxes/{ref}/desktop/settings")
+    def write_desktop_settings(
+        ref: str, payload: DesktopSettingsUpdate, store: StoreDep
+    ) -> dict[str, object]:
+        """Engage or disengage the magnetic grid, and set its size."""
+        box = store.resolve(ref)
+        settings = desktop.Settings(grid=payload.grid, snap=payload.snap)
+        box.config = desktop.to_config(box.config, settings=settings)
+        return store.update(box).to_dict()
 
     @app.delete("/api/boxes/{ref}/children/{child}", status_code=204)
     def remove_child(ref: str, child: str, store: StoreDep) -> None:
@@ -530,6 +587,25 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _desktop_child(store: BoxStore, parent: Box, child_ref: str) -> Box:
+    """The child of a desktop, filing it first when the drop came from the side pane."""
+    child = store.resolve(child_ref)
+    if child.uuid not in {existing.uuid for existing in store.children(parent.uuid)}:
+        store.link(parent.uuid, child.uuid)
+    return child
+
+
+def _with_rect(store: BoxStore, box: Box, child_uuid: str) -> dict[str, object]:
+    """Save a desktop whose one child just moved, and say where it ended up.
+
+    The answer carries the rectangle the core settled on — after the magnetic
+    grid — so the page can leave the icon where the database says it is.
+    """
+    saved = store.update(box)
+    rect = desktop.rect_for(saved.config, child_uuid)
+    return saved.to_dict() | {"rect": rect.as_dict() if rect else None}
 
 
 def _browse_root(request: Request) -> Path:

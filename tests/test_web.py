@@ -1218,3 +1218,202 @@ def test_the_browser_box_can_keep_a_new_address(client: TestClient) -> None:
     refused = client.put("/api/boxes/Docs", json={"resource_uri": "ftp://nope/"})
     assert refused.status_code == 422
     assert refused.json()["detail"]["error"] == "invalid_for_type"
+
+
+# -- the desktop view ---------------------------------------------------------
+
+
+def test_the_desktop_view_is_registered(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert 'registerView("desktop"' in script
+    assert "DESKTOP_DEFAULTS" in script
+    for endpoint in ("desktop/move", "desktop/resize"):
+        assert endpoint in script
+
+
+def test_the_desktop_draws_icons_where_the_box_says(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "function desktopIcon(" in script
+    assert "surface.append(desktopIcon(" in script
+    assert "tile.style.left" in script and "tile.style.top" in script
+    assert "tile.style.width" in script and "tile.style.height" in script
+
+
+def test_desktop_icons_are_dragged_with_pointer_events_and_open_on_double_click(
+    client: TestClient,
+) -> None:
+    script = client.get("/static/app.js").text
+    assert '"pointerdown"' in script
+    assert '"pointermove"' in script
+    assert "setPointerCapture" in script
+    assert "touch-action: none" in client.get("/static/app.css").text
+    assert 'tile.addEventListener("dblclick"' in script
+
+
+def test_the_desktop_toolbar_offers_the_magnet_and_the_grid_size(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert '"desktop-snap"' in script
+    assert '"desktop-grid-minus"' in script and '"desktop-grid-plus"' in script
+    assert '"desktop-grid-value"' in script
+    assert 'ctx.saveSection("desktop"' in script
+    # The page rounds the same way the core does, so an icon does not jump on save.
+    assert "Math.floor(value / cell + 0.5) * cell" in script
+
+
+def test_the_desktop_wallpaper_is_only_claimed_once_it_loads(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "has-background" in script
+    assert "probe.onload" in script
+    assert "--desk-bg" in client.get("/static/app.css").text
+
+
+# -- desktop endpoints --------------------------------------------------------
+
+
+@pytest.fixture
+def desk(populated: BoxStore) -> Box:
+    """A desktop with two children filed in it."""
+    populated.add(Box(name="Surface", box_type="desktop"))
+    populated.link("Surface", "Passport")
+    populated.link("Surface", "Garage")
+    return populated.get("Surface")
+
+
+def desktop_of(client: TestClient, ref: str = "Surface") -> dict:
+    return client.get(f"/api/boxes/{ref}").json()["config"]["desktop"]
+
+
+def test_placing_an_icon_records_where_it_lands(
+    client: TestClient, populated: BoxStore, desk: Box
+) -> None:
+    child = populated.get("Passport").uuid
+    response = client.post(
+        "/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": 40, "y": 60}
+    )
+    assert response.status_code == 200
+    assert response.json()["rect"] == {"x": 40, "y": 60, "width": 96, "height": 96}
+    assert desktop_of(client)["positions"] == {child: {"x": 40, "y": 60, "width": 96, "height": 96}}
+
+
+def test_placing_an_icon_files_a_box_that_was_only_dropped_from_the_pane(
+    client: TestClient, populated: BoxStore, desk: Box
+) -> None:
+    assert "Books" not in [box.name for box in populated.children("Surface")]
+    client.post("/api/boxes/Surface/desktop/move", json={"child": "Books", "x": 0, "y": 0})
+    assert "Books" in [box.name for box in populated.children("Surface")]
+
+
+def test_the_magnet_pulls_the_icon_to_the_nearest_line(
+    client: TestClient, populated: BoxStore, desk: Box
+) -> None:
+    client.post("/api/boxes/Surface/desktop/settings", json={"grid": 32, "snap": True})
+    response = client.post(
+        "/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": 45, "y": 45}
+    )
+    rect = response.json()["rect"]
+    assert (rect["x"], rect["y"]) == (32, 32)
+    assert desktop_of(client)["snap"] is True
+
+
+def test_with_the_magnet_off_the_icon_stays_under_the_pointer(
+    client: TestClient, populated: BoxStore, desk: Box
+) -> None:
+    client.post("/api/boxes/Surface/desktop/settings", json={"grid": 32, "snap": False})
+    response = client.post(
+        "/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": 45, "y": 45}
+    )
+    assert (response.json()["rect"]["x"], response.json()["rect"]["y"]) == (45, 45)
+
+
+def test_the_grid_size_is_a_setting_of_the_desktop(client: TestClient, desk: Box) -> None:
+    client.post("/api/boxes/Surface/desktop/settings", json={"grid": 64, "snap": True})
+    assert desktop_of(client)["grid"] == 64
+    response = client.post(
+        "/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": 100, "y": 10}
+    )
+    assert (response.json()["rect"]["x"], response.json()["rect"]["y"]) == (128, 0)
+
+
+def test_changing_the_magnet_does_not_scatter_what_is_already_placed(
+    client: TestClient, populated: BoxStore, desk: Box
+) -> None:
+    client.post("/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": 45, "y": 45})
+    client.post("/api/boxes/Surface/desktop/settings", json={"grid": 16, "snap": True})
+    assert desktop_of(client)["positions"][populated.get("Passport").uuid]["x"] == 45
+
+
+def test_sizing_an_icon_leaves_it_where_it_was(
+    client: TestClient, populated: BoxStore, desk: Box
+) -> None:
+    child = populated.get("Passport").uuid
+    client.post("/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": 64, "y": 128})
+    client.post(
+        "/api/boxes/Surface/desktop/resize", json={"child": "Passport", "width": 200, "height": 120}
+    )
+    assert desktop_of(client)["positions"][child] == {
+        "x": 64,
+        "y": 128,
+        "width": 200,
+        "height": 120,
+    }
+
+
+def test_the_wallpaper_a_desktop_points_at_is_served(
+    client: TestClient, populated: BoxStore, tmp_path: Path
+) -> None:
+    """`serves_content` is what lets the page paint the resource behind the icons."""
+    picture = tmp_path / "wall.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"pixels")
+    populated.add(Box(name="Paned", box_type="desktop", resource_uri=str(picture)))
+    response = client.get("/api/boxes/Paned/raw")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_a_coordinate_below_zero_is_refused(client: TestClient, desk: Box) -> None:
+    response = client.post(
+        "/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": -5, "y": 0}
+    )
+    assert response.status_code == 422
+
+
+def test_a_coordinate_that_is_not_a_number_is_refused(client: TestClient, desk: Box) -> None:
+    response = client.post(
+        "/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": "left", "y": 0}
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("grid", [3, 257, 4096])
+def test_a_grid_size_nobody_would_use_is_refused(client: TestClient, desk: Box, grid: int) -> None:
+    assert (
+        client.post(
+            "/api/boxes/Surface/desktop/settings", json={"grid": grid, "snap": True}
+        ).status_code
+        == 422
+    )
+
+
+def test_two_icons_on_a_desktop_are_placed_independently(
+    client: TestClient, populated: BoxStore, desk: Box
+) -> None:
+    client.post("/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": 0, "y": 0})
+    client.post("/api/boxes/Surface/desktop/move", json={"child": "Garage", "x": 200, "y": 40})
+    positions = desktop_of(client)["positions"]
+    assert positions[populated.get("Passport").uuid]["x"] == 0
+    assert positions[populated.get("Garage").uuid] == {
+        "x": 200,
+        "y": 40,
+        "width": 96,
+        "height": 96,
+    }
+
+
+def test_removing_a_child_from_the_desktop_takes_only_the_link(
+    client: TestClient, populated: BoxStore, desk: Box
+) -> None:
+    child = populated.get("Passport").uuid
+    client.post("/api/boxes/Surface/desktop/move", json={"child": "Passport", "x": 10, "y": 10})
+    client.delete(f"/api/boxes/Surface/children/{child}")
+    assert "Passport" not in [box.name for box in populated.children("Surface")]
+    assert populated.get("Passport").name == "Passport"

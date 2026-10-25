@@ -58,7 +58,7 @@ if changed; links are edited with `box link`, not here. Quitting without saving
 changes nothing.
 
 Every box declares a type — `box add -t markdown`, `-t mqtt`, `-t mindmap` —
-out of a hierarchy of 40 kinds documented in [doc/box-types.md](doc/box-types.md).
+out of a hierarchy of 41 kinds documented in [doc/box-types.md](doc/box-types.md).
 
 ```bash
 box serve --port 8000                        # UI on /, API on /api, docs on /docs
@@ -77,12 +77,15 @@ it. What a box shows depends on what it is:
 | text, markdown     | the file's text; wrap, crop and font size in the right-click menu; vertical scroll always, horizontal when wrap is off |
 | folder, directory, cabinet | its children, as a list or as icons; double-click opens one in place |
 | grid               | rows and columns you set (type them or step them), one child per cell, drag to move, drop on an occupied cell to swap, right-click to create a box in a cell |
+| desktop            | icons anywhere on the surface: drag them with the pointer, drag a corner to size them, arrow-key them about, and let a magnetic grid of the size you chose pull them onto its lines. The resource, when it is a picture, is the wallpaper. Double-click opens a box in place of the desktop |
 | anything else      | its icon, and a detail panel with description, resource, metadata and config |
 
-Display mode, list-or-icons, text appearance and the grid layout are saved in the
-box's own `config` column, so they come back tomorrow in another browser. A grid
-remembers cells by box **uuid**, so renaming a box does not scramble it; shrinking
-a grid leaves children linked and shows them as "Not placed".
+Display mode, list-or-icons, text appearance, the grid layout and the desktop
+surface are saved in the box's own `config` column, so they come back tomorrow in
+another browser. A grid remembers cells by box **uuid**, and a desktop its icon
+positions, so renaming a box does not scramble either; shrinking a grid leaves
+children linked and shows them as "Not placed", and so does a desktop whose icons
+nobody has placed yet.
 
 `box serve` and `box tui` import their own framework, so `box --help` works
 even when only the core is installed; asking for one without its extra prints
@@ -131,12 +134,14 @@ make run-tui          # box tui
 
 Early development. The core store (boxes, links, search), the box type registry
 with its validation, the CLI, the web API with a minimal HTML browser, and the
-text UI all work and are covered by tests. The web UI shows images, file text,
-folder contents and draggable grids; the other 35 box types still render as their
-icon.
+text UI all work and are covered by tests.
 
-The 40 box types are **declared, not built**: they enforce their rules, but none
-of them fetches, renders, indexes or lays anything out yet — that is what the
+In the web app these kinds render as themselves: image, text, markdown, pdf,
+video, archive, file, folder, cabinet, directory, grid, desktop, root, web and
+browser. The rest still show their icon and their detail panel.
+
+Most box types are **declared, not built**: they enforce their rules, but none of
+them fetches, indexes or talks to anything outside the machine — that is what the
 `planned` line of each type describes. Also not built: import/export, full-text
 search, authentication, and multi-user access.
 

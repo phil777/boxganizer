@@ -29,7 +29,8 @@ class Desktop(OrganizerBox):
     label: ClassVar[str] = "Desktop"
     icon: ClassVar[str] = "\U0001f5a5️"  # 🖥️
     summary: ClassVar[str] = "An open surface where each box goes where you put it."
-    planned: ClassVar[str] = "Keep x/y/width/height per child and draw the surface."
+    #: The resource is the wallpaper, so the interfaces may read it.
+    serves_content: ClassVar[bool] = True
 
 
 class Blueprint(Desktop):

@@ -598,3 +598,101 @@ pre.text {
   background: #fff;
 }
 .browser-note { flex: none; font-size: 0.75rem; }
+
+/* ---------- desktop view ---------- */
+
+.desktop-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.desktop-view {
+  height: calc(100% - 3.5rem);
+  min-height: 14rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background-repeat: no-repeat;
+}
+
+/* The resource field, when it holds a picture, is the wallpaper. */
+.desktop-view.has-background {
+  background-image: var(--desk-bg);
+  background-size: cover;
+  background-position: center;
+}
+
+/* Icons are placed inside it, so it carries the grid lines too. */
+.desktop-surface {
+  position: relative;
+  min-height: 100%;
+  min-width: 100%;
+}
+
+.desktop-view[data-snap="true"] .desktop-surface {
+  background-image:
+    linear-gradient(to right, var(--line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line) 1px, transparent 1px);
+  background-size: var(--desk-grid) var(--desk-grid);
+}
+
+.desktop-surface.drop-target { outline: 2px dashed var(--accent); outline-offset: -4px; }
+
+.desktop-icon {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.3rem;
+  border: 1px solid transparent;
+  border-radius: 0.3rem;
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  touch-action: none; /* the tile is dragged by the pointer, not by the browser */
+}
+
+.desktop-icon:hover { border-color: var(--line); background: var(--panel); }
+.desktop-icon.selected { border-color: var(--accent); background: var(--panel); }
+.desktop-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.desktop-icon.handling { cursor: grabbing; border-color: var(--accent); background: var(--panel); }
+
+.desktop-icon .box-icon { font-size: 2.4rem; max-width: 100%; }
+.desktop-caption {
+  font-size: 0.8rem;
+  text-align: center;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.desktop-grip {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 0.85rem;
+  height: 0.85rem;
+  cursor: nwse-resize;
+  border-right: 2px solid var(--line);
+  border-bottom: 2px solid var(--line);
+  touch-action: none;
+}
+.desktop-icon:hover .desktop-grip { border-color: var(--accent); }
+
+.desktop-hint { margin: 1rem; }
+
+.desktop-unplaced {
+  margin-top: 0.7rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+/* A desktop drawn inside a cell keeps its proportions and loses its toolbar. */
+.cell-content .desktop-view,
+.cell-content .desktop-surface { height: 100%; }
+.root-child .desktop-view { height: 100%; }
