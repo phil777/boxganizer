@@ -41,7 +41,7 @@ DOCUMENTED: dict[str, str | None] = {
     "home-assistant": "sensor",
     "folder": "box",
     "dynamic-folder": "folder",
-    "cabinet": "folder",
+    "cabinet": "dynamic-folder",
     "organizer": "box",
     "desktop": "organizer",
     "blueprint": "desktop",

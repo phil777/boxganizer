@@ -16,7 +16,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from boxganizer import __version__, boxtypes, desktop, fslist, grid, infer, mqtt, paths, thumbs
+from boxganizer import (
+    __version__,
+    boxtypes,
+    desktop,
+    filters,
+    fslist,
+    grid,
+    infer,
+    mqtt,
+    paths,
+    thumbs,
+)
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -129,6 +140,27 @@ class ConfigUpdate(BaseModel):
     """Request body for replacing a box's config."""
 
     config: dict[str, JsonValue]
+
+
+class FilterUpdate(BaseModel):
+    """Request body for setting what a dynamic folder selects.
+
+    `{}` asks for every box. An unrecognised clause is refused rather than stored,
+    because a folder that silently selects nothing looks like an empty library.
+    """
+
+    filter: dict[str, Any]
+
+
+class FilterBody(BaseModel):
+    """What a dynamic folder asks, and how many boxes that currently holds."""
+
+    box: dict[str, object]
+    filter: dict[str, object]
+    describes: str
+    usable: bool
+    broken: str
+    members: list[dict[str, object]]
 
 
 class LinkCreate(BaseModel):
@@ -545,6 +577,58 @@ def create_app(
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
         )
 
+    @app.get("/api/boxes/{ref}/filter", response_model=FilterBody)
+    def read_filter(ref: str, store: StoreDep) -> FilterBody:
+        """What a dynamic folder asks for, in words, and who it currently holds.
+
+        The meaning of a filter — which types count as which — belongs to the type
+        hierarchy, so the page asks here instead of working it out again in
+        JavaScript and drifting from the store.
+        """
+        box = _resolving_box(store, ref)
+        asked = store.filter_of(box)
+        return FilterBody(
+            box=_brief(box),
+            filter=asked.as_config(),
+            describes=asked.describe(),
+            usable=asked.usable,
+            broken=asked.broken,
+            members=[_brief(child) for child in store.children(box.uuid)],
+        )
+
+    @app.put("/api/boxes/{ref}/filter", response_model=FilterBody)
+    def write_filter(ref: str, payload: FilterUpdate, store: StoreDep) -> FilterBody:
+        """Set a dynamic folder's filter, and update the link table to match it.
+
+        The store is what re-cuts the membership, so the same thing happens here as
+        when a filter is edited through `box edit` or a raw config write.
+        """
+        box = _resolving_box(store, ref)
+        asked = filters.parse(payload.filter)
+        if not asked.usable:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "bad_filter", "reason": asked.broken},
+            )
+        box.config = {**box.config, filters.FILTER_KEY: asked.as_config()}
+        # `update` is what re-cuts the membership; calling resolve again would do
+        # the same work twice and make it unclear which one is the rule.
+        saved = store.update(box)
+        return FilterBody(
+            box=_brief(saved),
+            filter=asked.as_config(),
+            describes=asked.describe(),
+            usable=True,
+            broken="",
+            members=[_brief(child) for child in store.children(saved.uuid)],
+        )
+
+    @app.post("/api/boxes/{ref}/resolve")
+    def resolve_dynamic_folder(ref: str, store: StoreDep) -> dict[str, object]:
+        """Re-apply a dynamic folder's filter now, and say how many boxes it holds."""
+        box = _resolving_box(store, ref)
+        return {"box": _brief(box), "members": store.resolve_folder(box.uuid)}
+
     @app.get("/api/boxes/{ref}/children")
     def read_children(ref: str, store: StoreDep) -> list[dict[str, object]]:
         box = store.resolve(ref)
@@ -663,6 +747,22 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _resolving_box(store: BoxStore, ref: str) -> Box:
+    """A box whose type takes its members from a filter — the cabinet included.
+
+    Asked of the type, never of the `box_type` string, so a future kind of dynamic
+    folder answers the same endpoints without a change here.
+    """
+    box = store.resolve(ref)
+    kind = boxtypes.get(box.box_type)
+    if not kind.resolves_membership:
+        raise HTTPException(
+            status_code=415,
+            detail={"error": "not_a_dynamic_folder", "type": kind.key},
+        )
+    return box
 
 
 def _live_box(store: BoxStore, ref: str, source: str) -> Box:

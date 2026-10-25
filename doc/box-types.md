@@ -45,8 +45,8 @@ other boxes. Rules in brackets are enforced by the store.
         - `http` 📥 HTTP Sensor — resource required; schemes: http https
         - `home-assistant` 🏠 Home Assistant — schemes: http https; needs metadata: entity_id
   - `folder` 📂 Folder
-    - `dynamic-folder` 🌀 Dynamic Folder
-    - `cabinet` 🗄️ Cabinet
+    - `dynamic-folder` 🌀 Dynamic Folder — members come from `config.filter`
+      - `cabinet` 🗄️ Cabinet — the dynamic folder that filters nothing; holds every box, and itself
     - `root` 🌲 Root — ours, not the document's; singleton
   - `organizer` 🧰 Organizer — group
     - `desktop` 🖥️ Desktop

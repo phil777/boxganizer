@@ -620,3 +620,148 @@ def test_the_root_box_is_found_whatever_it_is_named(store: BoxStore) -> None:
 def test_a_library_without_a_root_has_no_root_box(store: BoxStore) -> None:
     store.add(Box(name="only"))
     assert store.root_box() is None
+
+
+# -- dynamic folders: the filter decides, the link table records -------------
+
+
+def names(store: BoxStore, parent: str) -> list[str]:
+    return sorted(box.name for box in store.children(parent))
+
+
+def test_a_dynamic_folder_takes_the_boxes_that_already_match_it(store: BoxStore) -> None:
+    store.add(Box(name="report-one", box_type="pdf", resource_uri="/tmp/one.pdf"))
+    store.add(Box(name="report-two", box_type="pdf", resource_uri="/tmp/two.pdf"))
+    store.add(Box(name="note", box_type="text", resource_uri="/tmp/note.txt"))
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    assert names(store, "PDFs") == ["report-one", "report-two"]
+
+
+def test_a_box_created_afterwards_joins_the_folder_that_wants_it(store: BoxStore) -> None:
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    store.add(Box(name="late", box_type="pdf", resource_uri="/tmp/late.pdf"))
+    assert "late" in names(store, "PDFs")
+
+
+def test_editing_the_filter_updates_the_link_table(store: BoxStore) -> None:
+    store.add(Box(name="a", box_type="pdf", resource_uri="/tmp/a.pdf"))
+    store.add(Box(name="b", box_type="text", resource_uri="/tmp/b.txt"))
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    assert names(store, "PDFs") == ["a"]
+
+    folder = store.get("PDFs")
+    folder.config = {"filter": {"type": "text"}}
+    store.update(folder)
+    # b in, a out: the filter is the authority, not what was linked once
+    assert names(store, "PDFs") == ["b"]
+
+
+def test_retyping_a_box_moves_it_out_of_the_folder_it_stopped_matching(
+    store: BoxStore,
+) -> None:
+    store.add(Box(name="doc", box_type="pdf", resource_uri="/tmp/doc.pdf"))
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    assert names(store, "PDFs") == ["doc"]
+
+    doc = store.get("doc")
+    doc.box_type = "text"
+    doc.resource_uri = "/tmp/doc.txt"
+    store.update(doc)
+    assert names(store, "PDFs") == []
+
+
+def test_renaming_a_box_can_pull_it_into_a_folder(store: BoxStore) -> None:
+    store.add(Box(name="misc", box_type="box"))
+    # named so it does not select itself: a folder whose filter fits its own name is
+    # its own member, which other tests cover on purpose
+    store.add(
+        Box(name="Billing", box_type="dynamic-folder", config={"filter": {"name": "invoice"}})
+    )
+    assert names(store, "Billing") == []
+
+    misc = store.get("misc")
+    misc.name = "invoice 2026"
+    store.update(misc)
+    assert names(store, "Billing") == ["invoice 2026"]
+
+
+def test_a_broken_filter_holds_nothing_rather_than_everything(store: BoxStore) -> None:
+    store.add(Box(name="one"))
+    store.add(Box(name="Ouch", box_type="dynamic-folder", config={"filter": {"colour": "red"}}))
+    assert names(store, "Ouch") == []
+
+
+def test_a_dynamic_folder_matching_itself_holds_itself(store: BoxStore) -> None:
+    store.add(Box(name="everything", box_type="dynamic-folder"))
+    assert names(store, "everything") == ["everything"]
+
+
+def test_the_cabinet_holds_every_box_and_is_not_given_the_root(store: BoxStore) -> None:
+    store.add(Box(name="attic", box_type="box"))
+    store.add(Box(name="way-in", box_type="root"))
+    store.add(Box(name="cabinet", box_type="cabinet", config={"filter": {"name": "nothing"}}))
+    # a cabinet ignores any filter it is handed: it is defined as the whole library
+    assert names(store, "cabinet") == ["attic", "cabinet"]
+    # ...and the root is filed nowhere, so it stays out of the cabinet
+    assert store.parents("way-in") == []
+
+
+def test_deleting_a_box_takes_its_dynamic_membership_with_it(store: BoxStore) -> None:
+    store.add(Box(name="gone", box_type="pdf", resource_uri="/tmp/gone.pdf"))
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    assert names(store, "PDFs") == ["gone"]
+    store.remove("gone")
+    assert names(store, "PDFs") == []
+
+
+def test_resolving_leaves_a_plain_folders_links_alone(store: BoxStore) -> None:
+    """A folder filled by hand is not a filter's business."""
+    store.add(Box(name="box", box_type="pdf", resource_uri="/tmp/b.pdf"))
+    store.add(Box(name="Handmade", box_type="folder"))
+    store.link("Handmade", "box")
+    assert store.resolve_folder("Handmade") is None
+    assert names(store, "Handmade") == ["box"]
+
+
+def test_several_dynamic_folders_each_keep_their_own_membership(store: BoxStore) -> None:
+    store.add(Box(name="pdf-one", box_type="pdf", resource_uri="/tmp/one.pdf"))
+    store.add(Box(name="pic-one", box_type="image", resource_uri="/tmp/one.png"))
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    store.add(Box(name="Pictures", box_type="dynamic-folder", config={"filter": {"type": "image"}}))
+    assert names(store, "PDFs") == ["pdf-one"]
+    assert names(store, "Pictures") == ["pic-one"]
+
+    store.add(Box(name="pdf-two", box_type="pdf", resource_uri="/tmp/two.pdf"))
+    assert names(store, "PDFs") == ["pdf-one", "pdf-two"]
+    assert names(store, "Pictures") == ["pic-one"]
+
+
+def test_resolve_folder_reports_the_member_count_it_settled_on(store: BoxStore) -> None:
+    store.add(Box(name="x", box_type="pdf", resource_uri="/tmp/x.pdf"))
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    assert store.resolve_folder("PDFs") == 1
+    with pytest.raises(BoxNotFound):
+        store.resolve_folder("no-such-box")
+
+
+def test_a_hand_made_link_into_a_dynamic_folder_last_till_that_folder_is_resolved(
+    store: BoxStore,
+) -> None:
+    """Creating a box updates that box's place; it does not re-cut every folder.
+
+    A box filed into a dynamic folder by hand sits there until the folder is next
+    resolved — its filter edited, or `resolve_folder` called — because re-resolving
+    every folder on every creation would cost the whole library each time. This is
+    the seam to know about, not a mystery: the filter wins, eventually, and the
+    page can ask for it now.
+    """
+    store.add(Box(name="square", box_type="box"))
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    store.link("PDFs", "square")
+    assert "square" in names(store, "PDFs")
+
+    store.add(Box(name="anything", box_type="pdf", resource_uri="/tmp/a.pdf"))
+    assert "square" in names(store, "PDFs")  # nothing has re-cut PDFs yet
+
+    store.resolve_folder("PDFs")
+    assert names(store, "PDFs") == ["anything"]

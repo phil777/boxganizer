@@ -65,6 +65,12 @@ class BoxType:
     #: Which live source the box reads outside this machine — "mqtt", "ssh" — or
     #: None. A frontend asks this instead of comparing `box_type` with a string.
     live_source: ClassVar[str | None] = None
+    #: True when the store keeps this box's children in step with a filter over
+    #: every box, rather than taking them one link at a time. See `boxganizer.filters`.
+    resolves_membership: ClassVar[bool] = False
+    #: True when such a folder asks for everything and has no filter to edit: the
+    #: cabinet. Whatever its config holds is ignored.
+    filter_is_fixed: ClassVar[bool] = False
     #: What this type is meant to do once it is built. Empty means: already does all it claims.
     planned: ClassVar[str] = ""
 
@@ -140,6 +146,8 @@ class BoxType:
             "thumbnail_kind": cls.thumbnail_kind,
             "is_root": cls.is_root,
             "live_source": cls.live_source,
+            "resolves_membership": cls.resolves_membership,
+            "filter_is_fixed": cls.filter_is_fixed,
             "parent": parent.key if parent is not None else None,
             "ancestors": [ancestor.key for ancestor in registry.ancestors_of(cls)],
             "resource_uri_required": cls.resource_uri_required,

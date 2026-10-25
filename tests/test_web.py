@@ -1704,3 +1704,111 @@ def test_the_page_lands_on_the_root_not_the_first_name(client: TestClient) -> No
     assert 'state.boxes.find((box) => box.box_type === "root") || state.boxes[0]' not in script
     # the Root button asks the same question
     assert "async function goToRoot() {\n  const root = await findRoot();" in script
+
+
+# -- the dynamic folder and the cabinet --------------------------------------
+
+
+def test_a_folder_is_told_what_a_dynamic_folder_asks_for(client: TestClient) -> None:
+    client.post(
+        "/api/boxes",
+        json={"name": "Paperwork", "box_type": "pdf", "resource_uri": "/tmp/p.pdf"},
+    )
+    created = client.post(
+        "/api/boxes",
+        json={
+            "name": "All PDFs",
+            "box_type": "dynamic-folder",
+            "config": {"filter": {"type": "pdf"}},
+        },
+    )
+    assert created.status_code == 201
+    body = client.get("/api/boxes/All PDFs/filter").json()
+    assert body["usable"] is True
+    assert body["describes"] == "type is pdf or one below it"
+    assert [m["name"] for m in body["members"]] == ["Paperwork"]
+
+
+def test_a_plain_folder_is_not_asked_for_a_filter(client: TestClient) -> None:
+    client.post("/api/boxes", json={"name": "Basket", "box_type": "folder"})
+    response = client.get("/api/boxes/Basket/filter")
+    assert response.status_code == 415
+    assert response.json()["detail"]["error"] == "not_a_dynamic_folder"
+
+
+def test_writing_a_filter_updates_the_link_table_through_the_api(client: TestClient) -> None:
+    client.post("/api/boxes", json={"name": "note", "box_type": "text", "resource_uri": "/n.txt"})
+    client.post("/api/boxes", json={"name": "doc", "box_type": "pdf", "resource_uri": "/d.pdf"})
+    client.post(
+        "/api/boxes",
+        json={"name": "Docs", "box_type": "dynamic-folder", "config": {"filter": {"type": "pdf"}}},
+    )
+    assert [m["name"] for m in client.get("/api/boxes/Docs/filter").json()["members"]] == ["doc"]
+
+    moved = client.put("/api/boxes/Docs/filter", json={"filter": {"type": "text"}})
+    assert moved.status_code == 200
+    assert [m["name"] for m in moved.json()["members"]] == ["note"]
+    # and the links say the same thing as the endpoint
+    filed = [child["name"] for child in client.get("/api/boxes/Docs").json()["children"]]
+    assert filed == ["note"]
+
+
+def test_a_filter_with_an_unknown_clause_is_refused(client: TestClient) -> None:
+    client.post(
+        "/api/boxes", json={"name": "Ouch", "box_type": "dynamic-folder", "config": {}}
+    )
+    response = client.put("/api/boxes/Ouch/filter", json={"filter": {"colour": "red"}})
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "bad_filter"
+    assert "colour" in response.json()["detail"]["reason"]
+    # the refusal left the folder asking nothing, which is to say: everything
+    assert client.get("/api/boxes/Ouch/filter").json()["describes"] == "every box"
+
+
+def test_an_empty_filter_asks_for_every_box(client: TestClient) -> None:
+    client.post("/api/boxes", json={"name": "one"})
+    client.post("/api/boxes", json={"name": "two"})
+    client.post(
+        "/api/boxes", json={"name": "Whole", "box_type": "dynamic-folder", "config": {}}
+    )
+    body = client.put("/api/boxes/Whole/filter", json={"filter": {}}).json()
+    assert body["describes"] == "every box"
+    # every box means every box: the library as it stands, including the folder itself
+    everything = sorted(entry["name"] for entry in client.get("/api/boxes?limit=1000").json())
+    assert sorted(m["name"] for m in body["members"]) == everything
+
+
+def test_the_cabinet_holds_every_box_through_the_api(client: TestClient) -> None:
+    created = client.post("/api/boxes", json={"name": "cabinet", "box_type": "cabinet"})
+    assert created.status_code == 201
+    client.post("/api/boxes", json={"name": "later"})
+    members = sorted(child["name"] for child in client.get("/api/boxes/cabinet").json()["children"])
+    everything = sorted(entry["name"] for entry in client.get("/api/boxes?limit=1000").json())
+    assert members == everything
+    assert "cabinet" in members  # a cabinet is a box, so it holds itself
+
+
+def test_resolving_on_demand_says_what_it_holds(client: TestClient) -> None:
+    client.post(
+        "/api/boxes", json={"name": "square", "box_type": "box"}
+    )  # not a pdf: the folder does not want it
+    client.post(
+        "/api/boxes",
+        json={"name": "PDFs", "box_type": "dynamic-folder", "config": {"filter": {"type": "pdf"}}},
+    )
+    client.post("/api/boxes/PDFs/children", json={"child": "square"})  # filed by hand
+    assert "square" in [
+        child["name"] for child in client.get("/api/boxes/PDFs").json()["children"]
+    ]
+    resolved = client.post("/api/boxes/PDFs/resolve")
+    assert resolved.status_code == 200
+    assert resolved.json()["members"] == 0
+    assert client.get("/api/boxes/PDFs").json()["children"] == []
+
+
+def test_a_dynamic_folder_says_so_in_the_type_list(client: TestClient) -> None:
+    described = {entry["key"]: entry for entry in client.get("/api/types").json()}
+    assert described["dynamic-folder"]["resolves_membership"] is True
+    assert described["cabinet"]["resolves_membership"] is True
+    assert described["cabinet"]["filter_is_fixed"] is True
+    assert described["folder"]["resolves_membership"] is False

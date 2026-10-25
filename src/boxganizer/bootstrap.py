@@ -42,7 +42,7 @@ def bootstrap(store: BoxStore) -> list[str]:
         cabinet = Box(
             name=CABINET_BOX_NAME,
             box_type=CABINET_BOX_TYPE,
-            description="A cabinet of drawers: file boxes here.",
+            description="Every box in the library, and itself.",
         )
         store.add(boxtypes.adopt_type_icon(cabinet))
         created.append(CABINET_BOX_NAME)

@@ -22,7 +22,10 @@ def test_an_empty_library_gets_root_and_cabinet(db_path: Path) -> None:
         assert root.box_type == "root"
         assert cabinet.box_type == "cabinet"
         assert [box.name for box in store.children("root")] == ["cabinet"]
-        assert [box.name for box in store.parents("cabinet")] == ["root"]
+        # The cabinet holds every box, and a cabinet is a box, so it holds itself.
+        # The root is the one box nothing files, which keeps the way in open.
+        assert sorted(box.name for box in store.parents("cabinet")) == ["cabinet", "root"]
+        assert [box.name for box in store.children("cabinet")] == ["cabinet"]
 
 
 def test_the_two_boxes_wear_their_type_icons(db_path: Path) -> None:
@@ -56,4 +59,5 @@ def test_a_cabinet_the_user_filed_elsewhere_stays_there(db_path: Path) -> None:
 
         bootstrap.bootstrap(store)
 
-        assert [box.name for box in store.parents("cabinet")] == ["Workshop"]
+        # filed where the user put it, plus itself: a cabinet always holds itself
+        assert sorted(box.name for box in store.parents("cabinet")) == ["Workshop", "cabinet"]

@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-from boxganizer import boxtypes, config
+from boxganizer import boxtypes, config, filters
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -75,6 +75,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 _SELECT_BY_KEY = "SELECT * FROM boxes WHERE key = ?"
 
 _SELECT_BY_TYPE = "SELECT * FROM boxes WHERE box_type = ? ORDER BY key"
+
+_SELECT_CHILD_IDS = "SELECT child_id FROM links WHERE parent_id = ?"
+
+_SELECT_ONE_LINK = "SELECT 1 FROM links WHERE parent_id = ? AND child_id = ?"
 
 _SELECT_BY_REF = "SELECT * FROM boxes WHERE key = ? OR uuid = ?"
 
@@ -205,7 +209,102 @@ class BoxStore:
         )
         box.id = row_id
         box.updated_at = datetime.now(UTC)
+        self._sync_membership(box)
         return box
+
+    # -- dynamic folders ----------------------------------------------------
+    #
+    # A dynamic folder holds whatever its filter selects out of all the boxes, and
+    # that membership is written into the links table rather than computed on read:
+    # `box show`, the tree, and every box's own `in` list then see a dynamic
+    # container exactly as they see one filled by hand. Three moments keep the two
+    # in step — a box is created, a box changes, or a folder's filter changes — and
+    # all three arrive here from `add` and `update`.
+
+    def resolving_folders(self) -> list[Box]:
+        """Every box whose type takes its members from a filter rather than by hand."""
+        found = []
+        for box in self.list_boxes():
+            kind = boxtypes.get(box.box_type) if boxtypes.known(box.box_type) else None
+            if kind is not None and kind.resolves_membership:
+                found.append(box)
+        return found
+
+    def filter_of(self, folder: Box) -> filters.Filter:
+        """The filter a folder lives by. A fixed one, like the cabinet, asks for all.
+
+        Ignoring a cabinet's stored filter is the point: it is defined as everything,
+        so a stray `config` entry must not quietly narrow the whole library down.
+        """
+        kind = boxtypes.get(folder.box_type) if boxtypes.known(folder.box_type) else None
+        if kind is not None and kind.filter_is_fixed:
+            return filters.Filter()
+        return filters.parse_of(folder)
+
+    def resolve_folder(self, ref: str) -> int | None:
+        """Write one folder's membership from its filter, and return the member count.
+
+        None when the box is not a dynamic folder: its links were put there on
+        purpose and nothing here touches them. The root box is never a member of
+        anything, which the store already refuses elsewhere, so it is skipped rather
+        than raising on the way.
+        """
+        folder = self.resolve(ref)
+        kind = boxtypes.get(folder.box_type) if boxtypes.known(folder.box_type) else None
+        if kind is None or not kind.resolves_membership or folder.id is None:
+            return None
+        wanted = self.filter_of(folder)
+        now = _now()
+        held = {int(row["child_id"]) for row in self._rows(_SELECT_CHILD_IDS, (folder.id,))}
+        keep: set[int] = set()
+        for box in self.list_boxes():
+            if box.id is None or not wanted.matches(box):
+                continue
+            if boxtypes.known(box.box_type) and boxtypes.get(box.box_type).is_root:
+                continue
+            keep.add(box.id)
+        for stale in sorted(held - keep):
+            self._execute(
+                "DELETE FROM links WHERE parent_id = ? AND child_id = ?", (folder.id, stale)
+            )
+        for fresh in sorted(keep - held):
+            self._execute(
+                "INSERT OR IGNORE INTO links (parent_id, child_id, added_at) VALUES (?, ?, ?)",
+                (folder.id, fresh, now),
+            )
+        return len(keep)
+
+    def _sync_membership(self, box: Box) -> None:
+        """Reconcile one box with every dynamic folder, in both directions.
+
+        First the box's place in the folders that resolve themselves: a filter that
+        no longer selects it takes it back, so a rename moves a box out of the folder
+        it has stopped matching instead of leaving it filed there for good. Then, if
+        the box is itself such a folder, its own members are recomputed — which is
+        how editing a filter in `box edit` updates the link table.
+        """
+        if box.id is None:
+            return
+        kind = boxtypes.get(box.box_type) if boxtypes.known(box.box_type) else None
+        filed_here: set[int] = set()
+        root_box = kind is not None and kind.is_root
+        for folder in self.resolving_folders():
+            if folder.id is None or folder.id == box.id:
+                continue
+            filed_here.add(folder.id)
+            wants = self.filter_of(folder).matches(box)
+            held = self._rows(_SELECT_ONE_LINK, (folder.id, box.id))
+            if wants and not held and not root_box:
+                self._execute(
+                    "INSERT OR IGNORE INTO links (parent_id, child_id, added_at) VALUES (?, ?, ?)",
+                    (folder.id, box.id, _now()),
+                )
+            elif held and (not wants or root_box):
+                self._execute(
+                    "DELETE FROM links WHERE parent_id = ? AND child_id = ?", (folder.id, box.id)
+                )
+        if kind is not None and kind.resolves_membership:
+            self.resolve_folder(box.uuid)
 
     def _check_still_holds_children(self, box: Box, kind: type[boxtypes.BoxType]) -> None:
         """Refuse a retype that would leave a leaf box holding children.
@@ -290,6 +389,7 @@ class BoxStore:
             ),
             duplicate_name=box.name,
         )
+        self._sync_membership(box)
         return box
 
     def remove(self, name: str) -> Box:
