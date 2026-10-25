@@ -280,11 +280,23 @@ def create_app(
 
     @app.get("/api/boxes/{ref}")
     def read_box(ref: str, store: StoreDep) -> dict[str, object]:
-        box = store.resolve(ref)
-        return box.to_dict() | {
-            "children": [_brief(b) for b in store.children(box.uuid)],
-            "parents": [_brief(b) for b in store.parents(box.uuid)],
-        }
+        return _full(store, store.resolve(ref))
+
+    @app.get("/api/root")
+    def read_root(store: StoreDep) -> dict[str, object]:
+        """The box the page starts on, found by its type.
+
+        `/api/boxes` is a page of the library and a page is sorted by name, so it
+        cannot answer "which box is the way in" for a library bigger than the page.
+        This can, and it is what the landing page and the Root button ask.
+        """
+        box = store.root_box()
+        if box is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "no_root_box", "reason": "run `box init` to create one"},
+            )
+        return _full(store, box)
 
     @app.get("/api/boxes/{ref}/raw")
     def read_raw(ref: str, request: Request, store: StoreDep) -> Response:
@@ -774,6 +786,14 @@ def _inside(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _full(store: BoxStore, box: Box) -> dict[str, object]:
+    """One box as the page wants it: the row, and the boxes on either side of it."""
+    return box.to_dict() | {
+        "children": [_brief(b) for b in store.children(box.uuid)],
+        "parents": [_brief(b) for b in store.parents(box.uuid)],
+    }
 
 
 def _brief(box: Box) -> dict[str, object]:

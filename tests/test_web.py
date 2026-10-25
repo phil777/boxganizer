@@ -678,11 +678,14 @@ def test_the_side_panel_has_a_root_button(client: TestClient) -> None:
     assert "🌲 Root" in page.text
 
 
-def test_the_root_button_falls_back_to_the_name_when_filtered(client: TestClient) -> None:
+def test_the_root_button_asks_the_server_for_the_root_box(client: TestClient) -> None:
+    """A filtered or short panel must not decide where the Root button goes."""
     script = client.get("/static/app.js").text
     assert "async function goToRoot()" in script
-    assert "state.boxes.find((box) => isRootType(box))" in script
-    assert 'await openBox("root")' in script
+    assert "async function findRoot()" in script
+    assert "return await api.root();" in script
+    # a library with no root is said, not guessed at
+    assert '"no root box in this library — run `box init`"' in script
     assert 'el("go-root").addEventListener("click", goToRoot);' in script
 
 
@@ -1659,3 +1662,45 @@ def test_a_desktops_background_is_its_resource_field(
     assert saved["resource_uri"] == "/home/me/wall.png"
     cleared = client.put(f"/api/boxes/{desk.uuid}", json={"resource_uri": ""}).json()
     assert not cleared["resource_uri"]
+
+
+# -- the way in: /api/root and the landing page -------------------------------
+
+
+def test_the_root_endpoint_answers_with_the_root_box(
+    client: TestClient, populated: BoxStore
+) -> None:
+    root = populated.add(Box(name="way-in", box_type="root"))
+    body = client.get("/api/root").json()
+    assert body["uuid"] == root.uuid
+    assert body["box_type"] == "root"
+
+
+def test_the_root_endpoint_finds_it_past_the_end_of_the_box_page(
+    client: TestClient, populated: BoxStore
+) -> None:
+    """250 boxes whose names sort ahead of the root: the page misses it, the endpoint does not."""
+    root = populated.add(Box(name="root", box_type="root"))
+    for index in range(250):
+        populated.add(Box(name=f"a{index:03d}"))
+    listed = [box["name"] for box in client.get("/api/boxes").json()]
+    assert "root" not in listed
+    assert client.get("/api/root").json()["uuid"] == root.uuid
+
+
+def test_a_library_without_a_root_says_so(client: TestClient) -> None:
+    response = client.get("/api/root")
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "no_root_box"
+
+
+def test_the_page_lands_on_the_root_not_the_first_name(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    # the root is asked of the server, which knows the graph...
+    assert 'root: () => request("/api/root")' in script
+    assert "async function findRoot()" in script
+    # ...and the landing page starts from it, not from whatever the list begins with
+    assert "const root = await findRoot();" in script
+    assert 'state.boxes.find((box) => box.box_type === "root") || state.boxes[0]' not in script
+    # the Root button asks the same question
+    assert "async function goToRoot() {\n  const root = await findRoot();" in script

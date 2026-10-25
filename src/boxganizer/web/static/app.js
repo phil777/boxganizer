@@ -67,6 +67,7 @@ const api = {
     }),
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
   thumbnailUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/thumbnail`,
+  root: () => request("/api/root"),
   mqtt: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/mqtt`),
   mqttStreamUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/mqtt/stream`,
   contentUrl: (ref, sub) =>
@@ -894,18 +895,33 @@ async function submitNewBox(event) {
 }
 
 /**
- * Jump to the root box. It is normally in the list, but the list may be filtered
- * by a search, so fall back to the name `box init` gives it.
+ * The box the library starts from, from the server that knows the graph.
+ *
+ * It is not looked for in the left panel: that panel holds one page of the library
+ * sorted by name, so in a library big enough to spill over a page, or filtered by
+ * a search, the root is simply not in it — and the page would start on whichever
+ * box sorts first instead. Asked of the server, the root is found by its type
+ * whoever it is named and however many boxes sort ahead of it.
  */
-async function goToRoot() {
-  const known = state.boxes.find((box) => isRootType(box));
-  if (known) return openBox(known.uuid);
+async function findRoot() {
   try {
-    return await openBox("root");
-  } catch {
+    return await api.root();
+  } catch (error) {
+    // A library with no root box is an answer, not a failure to work around; any
+    // other failure falls back to what the page already has in hand.
+    if (error.status === 404) return null;
+    return state.boxes.find((box) => isRootType(box)) || null;
+  }
+}
+
+/** Jump to the root box. */
+async function goToRoot() {
+  const root = await findRoot();
+  if (!root) {
     status("no root box in this library — run `box init`", true);
     return null;
   }
+  return openBox(root.uuid);
 }
 
 /* ---------------------------------------------------------------- init ----- */
@@ -981,8 +997,10 @@ async function init() {
   });
 
   await refreshSide();
-  const start = state.boxes.find((box) => box.box_type === "root") || state.boxes[0];
-  if (start) await openBox(start.uuid);
+  // The way in is the root box, not the first box the list happens to show.
+  const root = await findRoot();
+  if (root) await openBox(root.uuid);
+  else if (state.boxes[0]) await openBox(state.boxes[0].uuid);
 }
 
 /**

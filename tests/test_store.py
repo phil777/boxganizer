@@ -595,3 +595,28 @@ def test_an_integrity_error_that_is_not_a_name_clash_says_so(store: BoxStore) ->
         store._execute("INSERT INTO boxes (uuid, name, key) VALUES ('u', NULL, 'k')")
     assert "NOT NULL" in str(caught.value)
     assert "already exists" not in str(caught.value)
+
+
+# -- the root box, found by what it is ---------------------------------------
+
+
+def test_the_root_box_is_found_when_the_library_outgrows_a_page(store: BoxStore) -> None:
+    """A page of names is not the library: the root must be found anyway."""
+    root = store.add(Box(name="root", box_type="root"))
+    for index in range(250):
+        store.add(Box(name=f"a{index:03d}"))
+    assert store.root_box().uuid == root.uuid
+    # the page the interfaces ask for does not hold it
+    page = [box.name for box in store.list_boxes(limit=200)]
+    assert "root" not in page
+
+
+def test_the_root_box_is_found_whatever_it_is_named(store: BoxStore) -> None:
+    root = store.add(Box(name="way-in", box_type="root"))
+    store.add(Box(name="aardvark"))
+    assert store.root_box().uuid == root.uuid
+
+
+def test_a_library_without_a_root_has_no_root_box(store: BoxStore) -> None:
+    store.add(Box(name="only"))
+    assert store.root_box() is None

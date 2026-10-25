@@ -144,6 +144,12 @@ Early development. The core store (boxes, links, search), the box type registry
 with its validation, the CLI, the web API with a minimal HTML browser, and the
 text UI all work and are covered by tests.
 
+The page opens on the **root box**, not on whatever the list happens to start with:
+the root is asked of the server (`GET /api/root`), which finds it by its type
+however it is named. The left panel is one page of the library sorted by name, so
+digging for the root there lands on the first alphabetical box once the library
+outgrows the page. A library with no root box says so and points at `box init`.
+
 The root box is never an icon of what is filed in it: it shows that box the way
 opening it would, toolbars and all, and one box at a time — dropping another takes
 the slot, and the box it displaces stays in the library. Dropping something on a

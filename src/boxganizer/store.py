@@ -74,6 +74,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
 _SELECT_BY_KEY = "SELECT * FROM boxes WHERE key = ?"
 
+_SELECT_BY_TYPE = "SELECT * FROM boxes WHERE box_type = ? ORDER BY key"
+
 _SELECT_BY_REF = "SELECT * FROM boxes WHERE key = ? OR uuid = ?"
 
 _SELECT_RELATED_CHILDREN = """
@@ -358,6 +360,23 @@ class BoxStore:
             "INSERT OR IGNORE INTO links (parent_id, child_id, added_at) VALUES (?, ?, ?)",
             (parent_id, child_id, _now()),
         )
+
+    def root_box(self) -> Box | None:
+        """The box the library starts from, or None when it holds none.
+
+        Asked of the database rather than picked out of a page of `list_boxes()`:
+        a page is not the library, and the root sorts wherever its name sorts, so
+        a library big enough to spill over a page can hide the one box that ought
+        to be the way in. `root` is a singleton type, so there is at most one; a
+        type that inherits it counts, because being the start is the type's property.
+        """
+        for kind in boxtypes.registry.all_types():
+            if not kind.is_root:
+                continue
+            rows = self._rows(_SELECT_BY_TYPE, (kind.key,))
+            if rows:
+                return self._from_row(rows[0])
+        return None
 
     def root_child(self) -> Box | None:
         """The single box filed under the root, or None."""
