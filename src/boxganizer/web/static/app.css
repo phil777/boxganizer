@@ -988,3 +988,56 @@ pre.text {
    size: the shape of the thought is the thing being looked at. */
 .cell-content .mindmap-view { min-height: 0; height: 100%; border: none; overflow: hidden; }
 .cell-content .mindmap-toolbar { display: none; }
+
+/* SSH console. A scrollback of commands and answers, kept in the order they happened,
+   because that is what it is: not a terminal, and honest about it. */
+.ssh-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.ssh-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.ssh-head strong { font-size: 1.02rem; }
+.ssh-note,
+.ssh-warning { margin: 0; font-size: 0.78rem; }
+.ssh-warning { color: var(--accent); }
+
+.ssh-log {
+  flex: 1 1 auto;
+  min-height: 12rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.65rem;
+  background: var(--panel);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+}
+.ssh-entry { margin-bottom: 0.65rem; overflow-wrap: anywhere; }
+.ssh-entry--bad { border-left: 2px solid var(--accent); padding-left: 0.45rem; }
+.ssh-asked { font-weight: 600; }
+.ssh-out,
+.ssh-err { margin: 0.15rem 0; white-space: pre-wrap; font: inherit; }
+.ssh-err { color: var(--accent); }
+.ssh-tally { font-size: 0.7rem; }
+.ssh-running { font-style: italic; }
+
+.ssh-form { display: flex; gap: 0.4rem; flex: none; }
+.ssh-input { flex: 1 1 auto; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.ssh-copy { display: block; text-align: left; background: none; border: none; padding: 0; font-size: 0.72rem; cursor: pointer; text-decoration: underline; }
+.ssh-line {
+  display: block;
+  font-size: 0.72rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.cell-content .ssh-view { overflow: auto; }
+.cell-content .ssh-note,
+.cell-content .ssh-copy,
+.cell-content .ssh-line { display: none; }

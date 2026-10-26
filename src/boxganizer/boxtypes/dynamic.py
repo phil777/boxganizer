@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from boxganizer.boxtypes.resource import ResourceBox
+from boxganizer.models import Box
 
 
 class DynamicResource(ResourceBox):
@@ -71,7 +72,14 @@ class TerminalResource(DynamicResource):
 
 
 class SSHResource(TerminalResource):
-    """A terminal over SSH."""
+    """A shell on another machine, reached through the system's own ssh.
+
+    The box holds an address — `ssh://user@host:2222`, or the same in metadata — and
+    runs commands there with the `ssh` already installed here, so keys, agents and
+    `~/.ssh/config` behave the way they do at a terminal. **It cannot hold a password**:
+    the address is read by a page and lives in a file that gets copied, and a secret
+    belongs to neither. A box whose address carries one is refused.
+    """
 
     key: ClassVar[str] = "ssh"
     label: ClassVar[str] = "SSH Terminal"
@@ -79,7 +87,26 @@ class SSHResource(TerminalResource):
     summary: ClassVar[str] = "A shell on another machine."
     required_metadata: ClassVar[frozenset[str]] = frozenset({"host"})
     resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"ssh"})
-    planned: ClassVar[str] = "Connect through the system ssh client; never store the password."
+    # What is left is a real terminal in the page — a full-screen session with a
+    # cursor. Commands run and answer already; an editor on the far side does not yet.
+    planned: ClassVar[str] = "Full-screen interactive sessions in the page (a terminal emulator)."
+
+    @classmethod
+    def check(cls, box: Box) -> None:
+        """No password, in the address or anywhere else.
+
+        Enforced here rather than where the command is built, because a box that cannot
+        be stored is better than one that sits in the library holding a secret until
+        something prints its address. The database is a plain file that gets copied and
+        backed up and shown to a page; a password belongs in a key, an agent, or
+        `~/.ssh/config`, none of which Boxganizer touches.
+        """
+        from boxganizer import ssh
+
+        try:
+            ssh.destination(box)
+        except ssh.SshError as exc:
+            cls._reject(box, str(exc))
 
 
 class SensorResource(DynamicResource):

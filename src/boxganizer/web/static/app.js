@@ -155,6 +155,12 @@ const api = {
       method: "POST",
       body: JSON.stringify({ node, with: withBox }),
     }),
+  ssh: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/ssh`),
+  sshRun: (ref, command, timeout) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/ssh/run`, {
+      method: "POST",
+      body: JSON.stringify({command, ...(timeout ? {timeout} : {})}),
+    }),
   desktopResize: (ref, child, width, height) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/desktop/resize`, {
       method: "POST",
@@ -3817,6 +3823,229 @@ function mindmapToolbar(box, ctx) {
   bar.append(title, keys, add);
   return bar;
 }
+
+/* -- ssh ---------------------------------------------------------------------
+ *
+ * A box that reaches another machine. This is a console, not a terminal emulator: you
+ * type a command, the machine answers, and the exchange stays on the screen in order.
+ * The distinction is stated on the panel rather than hidden, because the first
+ * full-screen program anyone tries (an editor, `top`) will not behave like a program
+ * that answers once and exits — and a page that promised a terminal and delivered a
+ * scrollback is worse than one that says what it is.
+ *
+ * There is no password field anywhere, and no box can carry one: the type refuses it.
+ * Authentication is what `ssh` already does with keys, an agent, or ~/.ssh/config.
+ */
+
+const SSH_MAX_HISTORY = 20;
+
+async function sshView(canvas, box, ctx, opts = {}) {
+  const token = paneGeneration;
+  let info;
+  try {
+    info = await api.ssh(box.uuid);
+  } catch (error) {
+    canvas.append(emptyMessage(`Cannot read the SSH box: ${error.message}`));
+    return;
+  }
+  if (!stillOnScreen(token)) return; // the pane moved on while the address was read
+
+  const where = info.destination;
+  const wrap = document.createElement("div");
+  wrap.className = "ssh-view";
+
+  const head = document.createElement("div");
+  head.className = "ssh-head";
+  const address = document.createElement("strong");
+  address.textContent = `ssh://${where.user ? `${where.user}@` : ""}${where.host}:${where.port}`;
+  head.append(address);
+  if (where.jump_host) {
+    const jump = document.createElement("span");
+    jump.className = "muted";
+    jump.textContent = `through ${where.jump_host}`;
+    head.append(jump);
+  }
+  if (where.identity_file) {
+    const key = document.createElement("span");
+    key.className = "muted";
+    key.textContent = `key ${where.identity_file}`;
+    head.append(key);
+  }
+  wrap.append(head);
+
+  if (!info.client_available) {
+    const missing = document.createElement("p");
+    missing.className = "ssh-warning";
+    missing.textContent =
+      "This machine has no ssh command, so nothing can be run. Install OpenSSH.";
+    wrap.append(missing);
+  }
+
+  const note = document.createElement("p");
+  note.className = "muted ssh-note";
+  note.textContent =
+    "One command at a time, run by this machine's own ssh: keys, agents and ~/.ssh/config decide who you are. No password is stored, and none is asked for.";
+  wrap.append(note);
+
+  const log = document.createElement("div");
+  log.className = "ssh-log";
+  log.setAttribute("role", "log");
+  log.setAttribute("aria-live", "polite");
+  wrap.append(log);
+
+  const form = document.createElement("form");
+  form.className = "ssh-form";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "ssh-input";
+  input.placeholder = "uptime";
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  input.setAttribute("aria-label", "command to run on the far side");
+  const go = document.createElement("button");
+  go.type = "submit";
+  go.textContent = "Run";
+  form.append(input, go);
+  wrap.append(form);
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "ssh-copy muted";
+  copy.textContent = "For a session of your own, copy this:";
+  const line = document.createElement("code");
+  line.className = "ssh-line";
+  line.textContent = where.command_line;
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(where.command_line);
+      ctx.status("copied the command line");
+    } catch {
+      // No clipboard permission: the line is on the screen, and selecting it works.
+      const range = document.createRange();
+      range.selectNodeContents(line);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      ctx.status("selected instead — copy it from here");
+    }
+  });
+  wrap.append(copy, line);
+
+  const history = sshHistory(box);
+  let cursor = history.length;
+
+  function entry(record) {
+    const block = document.createElement("div");
+    block.className = `ssh-entry${record.ok ? "" : " ssh-entry--bad"}`;
+    const asked = document.createElement("div");
+    asked.className = "ssh-asked";
+    asked.textContent = `$ ${record.command}`;
+    block.append(asked);
+    for (const [text, kind] of [
+      [record.stdout, "ssh-out"],
+      [record.stderr, "ssh-err"],
+    ]) {
+      if (!text) continue;
+      const part = document.createElement("pre");
+      part.className = kind;
+      part.textContent = text.replace(/\n$/, "");
+      block.append(part);
+    }
+    const tally = document.createElement("div");
+    tally.className = "muted ssh-tally";
+    tally.textContent = record.timed_out
+      ? `no answer in ${record.seconds.toFixed(1)}s`
+      : `exit ${record.exit_code} in ${record.seconds.toFixed(2)}s`;
+    block.append(tally);
+    log.append(block);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const command = input.value.trim();
+    if (!command) return;
+    input.value = "";
+    go.disabled = true;
+    const pending = document.createElement("div");
+    pending.className = "muted ssh-running";
+    pending.textContent = `running ${command} …`;
+    log.append(pending);
+    log.scrollTop = log.scrollHeight;
+    try {
+      const result = await api.sshRun(box.uuid, command);
+      pending.remove();
+      entry(result);
+      // The list the arrows walk is this page's own, and it is written to the box for
+      // tomorrow: an up-arrow that only works after a reload is no help at all.
+      if (!history.includes(command)) {
+        history.push(command);
+      }
+      cursor = history.length;
+      rememberSsh(box, ctx, command);
+    } catch (error) {
+      pending.remove();
+      const failed = document.createElement("div");
+      failed.className = "ssh-err ssh-entry";
+      failed.textContent = error.message;
+      log.append(failed);
+    } finally {
+      go.disabled = false;
+      input.focus();
+    }
+  });
+
+  // The arrow keys walk what was run here, because a command repeated from a terminal
+  // is muscle memory; the far side has no say in this list.
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      if (!history.length) return;
+      event.preventDefault();
+      cursor = event.key === "ArrowUp"
+        ? Math.max(0, cursor - 1)
+        : Math.min(history.length, cursor + 1);
+      input.value = history[cursor] || "";
+    }
+  });
+
+  canvas.append(wrap);
+  if (!opts.embedded) input.focus();
+}
+
+function sshHistory(box) {
+  const section = (box.config || {}).ssh;
+  const stored = section && Array.isArray(section.history) ? section.history : [];
+  // A copy: the page appends to what it is walking, and must not be editing the box's
+  // own config behind the code that saves it.
+  return stored.filter((item) => typeof item === "string" && item.trim());
+}
+
+function pushHistory(history, command) {
+  const kept = history.filter((item) => item !== command);
+  return [...kept, command].slice(-SSH_MAX_HISTORY);
+}
+
+/** Save the console's history without disturbing anything else in the box's config. */
+function rememberSsh(box, ctx, command) {
+  const config = {...(box.config || {})};
+  const section = {...(config.ssh || {})};
+  section.history = pushHistory(sshHistory(box), command);
+  config.ssh = section;
+  api
+    .setConfig(box.uuid, config)
+    .then(() => {
+      box.config = config;
+    })
+    .catch(() => {
+      /* the command still ran; the history is a convenience, not a result */
+    });
+}
+
+registerView("ssh", {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    await sshView(canvas, box, ctx, opts);
+  },
+});
 
 registerView("mindmap", {
   async render(canvas, box, ctx, mode, opts = {}) {

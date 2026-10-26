@@ -35,6 +35,7 @@ from boxganizer import (
     infer,
     mqtt,
     paths,
+    ssh,
     thumbs,
 )
 
@@ -615,6 +616,77 @@ def _type_requirements(kind: type[boxtypes.BoxType]) -> str:
     if kind.resource_uri_required:
         parts.append("resource required")
     return ", ".join(parts)
+
+
+@app.command("ssh")
+def box_ssh(
+    ctx: typer.Context,
+    name: str,
+    command: Annotated[
+        list[str] | None,
+        typer.Argument(help="The command to run there. Leave it out to see the address."),
+    ] = None,
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Seconds to wait for the far side.")
+    ] = ssh.DEFAULT_TIMEOUT,
+    as_json: Annotated[bool, typer.Option("--json", help="Answer as JSON.")] = False,
+) -> None:
+    """Run one command on the machine an SSH box points at.
+
+    The system's own `ssh` does the work, so keys, agents and `~/.ssh/config` behave as
+    they always do. Boxganizer never stores a password and never asks for one: a box
+    whose address carries one is refused when it is made, and a box that cannot log in
+    without being asked a question answers with `Permission denied` rather than hanging.
+
+    With no command the box is described instead — where it goes, and the line to type
+    in a real terminal for a session of your own. A command's exit status comes through:
+    `box ssh web false` exits 1, which is what a script needs.
+    """
+    with _open(ctx, _db_of(ctx)) as store:
+        box = store.get(name)
+    if "ssh" not in boxtypes.get(box.box_type).path().split("/"):
+        _fail(f"{box.name} is a {box.box_type} box; it does not reach another machine")
+        raise typer.Exit(code=1)
+
+    if not command:
+        try:
+            target = ssh.destination(box)
+        except ssh.SshError as exc:
+            _fail(str(exc))
+            raise typer.Exit(code=1) from exc
+        if as_json:
+            console.print_json(json.dumps({"box": box.name, **target.as_dict()}))
+            return
+        say("address", f"{box.icon} {box.name} -> ssh://{target.target}:{target.port}")
+        if target.identity_file:
+            lit(f"  identity : {target.identity_file}")
+        if target.jump_host:
+            lit(f"  through  : {target.jump_host}")
+        if not ssh.available():
+            lit("  note     : this machine has no ssh command; install OpenSSH")
+        lit("")
+        lit("  for a session of your own, type:")
+        lit(f"    {target.command_line()}")
+        lit(f'  or run one command: box ssh {box.name} "uptime"')
+        return
+
+    wanted = " ".join(command)
+    try:
+        result = ssh.run(box, wanted, timeout=timeout)
+    except ssh.SshError as exc:
+        _fail(str(exc))
+        raise typer.Exit(code=1) from exc
+    if as_json:
+        console.print_json(json.dumps(result.as_dict()))
+    else:
+        if result.stdout:
+            console.print(result.stdout.rstrip("\n"))
+        if result.stderr:
+            console.print(Text(result.stderr.rstrip("\n"), style="red"))
+        if result.timed_out:
+            _fail(f"no answer in {timeout:g}s")
+    if result.timed_out or (result.exit_code or 0) != 0:
+        raise typer.Exit(code=result.exit_code or 1)
 
 
 @app.command()

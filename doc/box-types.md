@@ -123,7 +123,8 @@ like a folder — its entries are virtual and are not stored as contained boxes.
 **A field the machine writes is never required at creation.** `SnapshotResource`
 will gain `captured_at` when the capture happens, so requiring it up front would
 make the type impossible to create. Required metadata is only for what the user
-knows at creation time: `ssh` needs `host`, `mqtt` needs `topic`,
+knows at creation time: `ssh` needs `host` and refuses an address carrying a password,
+`mqtt` needs `topic`,
 `home-assistant` needs `entity_id`.
 
 ## Resource analysis and proposals

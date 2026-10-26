@@ -2117,3 +2117,48 @@ def test_a_map_shown_in_a_cell_is_scaled_rather_than_cropped(client: TestClient)
     assert "mindmap-fitted" in script
     assert "new ResizeObserver(fit)" in script
     assert ".cell-content .mindmap-view" in css
+
+
+def test_the_ssh_console_is_registered_and_says_what_it_is(client: TestClient) -> None:
+    """A console, not a terminal: the page states the difference instead of hiding it."""
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    assert 'registerView("ssh"' in script
+    assert "sshView" in script
+    assert ".ssh-log" in css
+    # the transcript announces itself to a screen reader as a log of what happened
+    assert 'setAttribute("role", "log")' in script
+    assert "no password is stored" in script.lower()
+
+
+def test_the_ssh_console_asks_only_the_endpoints_that_exist(client: TestClient) -> None:
+    script = client.get("/static/app.js").text
+    assert "/ssh" in script
+    assert "/ssh/run" in script
+    # and never anything that would open a session it cannot close
+    assert "/ssh/open" not in script
+    assert "/ssh/stream" not in script
+
+
+def test_nothing_in_the_page_offers_to_type_a_password(client: TestClient) -> None:
+    """The rule is that a box keeps no secret, so the page must not invite one.
+
+    The word may appear — it has to, to explain the rule — but no field may, and no
+    value may be sent under that name.
+    """
+    script = client.get("/static/app.js").text
+    page = client.get("/").text
+    assert 'type="password"' not in page
+    assert 'type = "password"' not in script
+    ssh_source = script[script.index("async function sshView") : script.index('registerView("ssh"')]
+    assert "password" not in ssh_source.lower().replace("no password is stored", "")
+
+
+def test_the_console_keeps_what_it_ran_without_touching_the_rest_of_the_box(
+    client: TestClient,
+) -> None:
+    """History is saved into `config.ssh`, beside whatever else the config holds."""
+    script = client.get("/static/app.js").text
+    assert "sshHistory" in script
+    assert "pushHistory" in script
+    assert "config.ssh" in script or "ssh: {" in script

@@ -45,6 +45,7 @@ box show Kitchen
 box search cooking                           # names, fields, and what the files say
 box search "basement NOT pump"               # quotes and and/or/not are understood
 box index                                    # read every text and PDF file again
+box ssh Build "df -h"                          # one command on the machine an ssh box points at
 box tree                                       # starts at the root box
 box tree Kitchen                               # or wherever you say
 box types                                      # the box type hierarchy
@@ -128,6 +129,7 @@ it. What a box shows depends on what it is:
 | mindmap            | the box in a rounded node at the centre, its children as branches growing left and right, each branch curved to its parent in its own colour. Click into it and the keys drive it: **Insert** a node under the one in hand, **Enter** beside it, **arrows** to walk the map, **Ctrl+↑↓** to shuffle a node among its siblings, **Ctrl+←→** to push it deeper into the map or pull it out towards the centre — read off the side the branch grows on, so Ctrl always means away from the middle or towards it, and a branch of the centre changes side instead of rising above it. Double-click, or **F2**, writes the node's name where it stands. A box dragged onto a node that nothing has been written into takes that node's place; onto any other node it is filed inside |
 | browser, web       | the page, framed; the address bar saves back to the box |
 | mqtt               | the last message on its topic, and every one after it, as the broker sends them. The address is shown with its password hidden, which the box keeps for itself. In a grid cell it is the last value alone: the cell does not listen, the opened box does |
+| ssh                | a console on another machine: the address it goes to, the line to type for a session of your own, a field for one command at a time, and the transcript of what was asked and what answered, exit code and all. Up and down arrows walk what was run here, kept in the box. **There is no password field, and none can be stored** — the type refuses an address carrying one; keys, an agent and `~/.ssh/config` decide who you are. It is a console and not a terminal emulator, and says so on the panel: one command, one answer, no full-screen programs |
 | anything else      | its icon, and a detail panel with description, resource, metadata and config |
 
 A box created **from** another box — "New box here" on a folder, "New box in X" in
@@ -213,7 +215,7 @@ not the root's to answer.
 
 In the web app these kinds render as themselves: image, text, markdown, pdf,
 video, archive, file, folder, dynamic-folder, cabinet, directory, grid, desktop,
-mindmap, root, web, browser and mqtt. The rest still show their icon and their
+mindmap, ssh, root, web, browser and mqtt. The rest still show their icon and their
 detail panel.
 
 A **dynamic folder** holds whatever a filter over all the boxes selects, and the

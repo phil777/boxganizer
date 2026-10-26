@@ -27,6 +27,7 @@ from boxganizer import (
     mindmap,
     mqtt,
     paths,
+    ssh,
     thumbs,
 )
 
@@ -207,6 +208,18 @@ class MindmapFill(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class SshRun(BaseModel):
+    """One command to run on the far side, and how long to wait for it."""
+
+    command: str = Field(description="The command, passed whole to the remote shell.")
+    timeout: float = Field(
+        default=ssh.DEFAULT_TIMEOUT,
+        ge=ssh.MIN_TIMEOUT,
+        le=ssh.MAX_TIMEOUT,
+        description="Seconds before the command is cut off.",
+    )
+
+
 class ConfigUpdate(BaseModel):
     """Request body for replacing a box's config."""
 
@@ -323,6 +336,13 @@ def create_app(
     async def _bad_grid_move(request: Request, exc: GridError) -> JSONResponse:
         return JSONResponse(
             status_code=422, content={"detail": {"error": "bad_grid_move", "reason": str(exc)}}
+        )
+
+    @app.exception_handler(ssh.SshError)
+    async def _bad_ssh(request: Request, exc: ssh.SshError) -> JSONResponse:
+        """A box with no host, an address holding a password, or a bad option line."""
+        return JSONResponse(
+            status_code=422, content={"detail": {"error": "bad_ssh_box", "reason": str(exc)}}
         )
 
     @app.exception_handler(PlacementError)
@@ -499,6 +519,36 @@ def create_app(
         settings = desktop.Settings(grid=payload.grid, snap=payload.snap)
         box.config = desktop.to_config(box.config, settings=settings)
         return store.update(box).to_dict()
+
+    @app.get("/api/boxes/{ref}/ssh")
+    def read_ssh(ref: str, store: StoreDep) -> dict[str, object]:
+        """Where this SSH box goes, and what it can do from here.
+
+        The address comes back with any user name it holds, because it is not a secret
+        who someone logs in as — but a box whose address *does* hold a secret is refused
+        here as everywhere else, so there is nothing to redact.
+        """
+        box = _ssh_box(store, ref)
+        target = ssh.destination(box)
+        return {
+            "box": box.to_dict(),
+            "destination": target.as_dict(),
+            "client_available": ssh.available(),
+            "max_output_bytes": ssh.MAX_OUTPUT_BYTES,
+        }
+
+    @app.post("/api/boxes/{ref}/ssh/run")
+    def run_ssh(
+        ref: str, payload: SshRun, store: StoreDep
+    ) -> dict[str, object]:
+        """Run one command on the far side and bring back what it printed.
+
+        There is no session behind this: each command is one `ssh`, started and finished,
+        so the page never holds a shell open on another machine while nobody is looking.
+        """
+        box = _ssh_box(store, ref)
+        result = ssh.run(box, payload.command, timeout=payload.timeout)
+        return result.as_dict()
 
     @app.get("/api/boxes/{ref}/mindmap")
     def read_mindmap(ref: str, store: StoreDep) -> dict[str, object]:
@@ -1123,6 +1173,25 @@ def _add_unique(store: BoxStore, box: Box, name: str | None) -> Box:
             refused.add(box.name)
             box.name = mindmap.next_name(refused)
     raise DuplicateBoxName(box.name)  # pragma: no cover - 50 ideas taken is a different problem
+
+
+def _ssh_box(store: BoxStore, ref: str) -> Box:
+    """A box whose type reaches another machine.
+
+    Asked of the type, so any kind of terminal box added under `terminal` answers the
+    SSH endpoints too — and asked before the address is read, so a box that is not one
+    is refused with its own type named rather than with a parse error.
+    """
+    box = store.resolve(ref)
+    kind = boxtypes.get(box.box_type)
+    # The whole line is asked, not just the key: a kind of terminal below `ssh` is
+    # still a box that reaches another machine, and inherits these routes.
+    if "ssh" not in kind.path().split("/"):
+        raise HTTPException(
+            status_code=415,
+            detail={"error": "not_an_ssh_box", "type": kind.key},
+        )
+    return box
 
 
 def _is_in_map(store: BoxStore, box: Box, uuid: str) -> bool:
