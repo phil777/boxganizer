@@ -2162,3 +2162,14 @@ def test_the_console_keeps_what_it_ran_without_touching_the_rest_of_the_box(
     assert "sshHistory" in script
     assert "pushHistory" in script
     assert "config.ssh" in script or "ssh: {" in script
+
+
+def test_a_filtered_type_choice_does_not_leak_into_the_next_box(client: TestClient) -> None:
+    """The list keeps what is chosen so filtering cannot lose it — so opening the modal
+    has to name the type explicitly, or the last type anyone searched for is the one
+    the next box is made with."""
+    script = client.get("/static/app.js").text
+    assert 'el(CREATE_MODAL.type).value = choices.boxType || "box";' in script
+    # and the choice still rides along *within* one search, which is why the bug was
+    # possible in the first place
+    assert "if (!hit && type.key !== chosen) return;" in script

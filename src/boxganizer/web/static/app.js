@@ -808,7 +808,11 @@ async function openNewBoxModal(options = {}) {
   state.pendingPlace = choices.place || null;
   await fillParentChoices(choices.parent);
   if (choices.parent) el("nb-parent").value = choices.parent;
-  if (choices.boxType) el(CREATE_MODAL.type).value = choices.boxType;
+  // The type is named every time, not only when a caller asks for one. The list keeps
+  // whatever is chosen so that filtering cannot lose it — which means that without
+  // this line the type left over from the last search would be the one the next box is
+  // made with, and a box nobody asked to be Markdown fails for want of a resource.
+  el(CREATE_MODAL.type).value = choices.boxType || "box";
   renderConfigFields(CREATE_MODAL);
   if (choices.name) el(CREATE_MODAL.name).value = choices.name;
   if (choices.resource) el(CREATE_MODAL.resource).value = choices.resource;
