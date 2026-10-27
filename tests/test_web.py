@@ -1955,7 +1955,7 @@ def test_the_desktop_is_one_scaled_canvas_so_icons_stay_on_the_picture(
         "function fitSurface()",
         'surface.dataset.scale = String(scale);',
         "const scale = Math.max(0.2, Math.min(1, ratio));",
-        "new ResizeObserver(() => fitSurface())",
+        "fitted = fitSurface();",
         "holdLive(() => watcher.disconnect());",
         # the size it was arranged at is recorded for smaller panes to scale by
         "canvas: wanted }",
@@ -2173,3 +2173,66 @@ def test_a_filtered_type_choice_does_not_leak_into_the_next_box(client: TestClie
     # and the choice still rides along *within* one search, which is why the bug was
     # possible in the first place
     assert "if (!hit && type.key !== chosen) return;" in script
+
+
+def test_the_canvas_kept_is_the_canvas_and_not_the_picture_on_screen(
+    client: TestClient,
+) -> None:
+    """What is saved is the number the icon coordinates are written in.
+
+    Saving `getBoundingClientRect()` saved that same number multiplied by the scale, so
+    each opening folded the desktop a little smaller — visible as a pane that needed a
+    scrollbar, then did not, then did again.
+    """
+    script = client.get("/static/app.js").text
+    # the target is at least what the icons occupy, so an old too-small record is healed
+    assert "width: Math.max(base.width, availW, extent.width)," in script
+    assert "height: Math.max(base.height, availH, extent.height)," in script
+    # and what is recorded comes from the target, at full size only
+    assert "Math.round(fitted.target.width)" in script
+    assert "Math.round(fitted.target.height)" in script
+    assert "if (!opts.embedded && fitted && fitted.scale === 1)" in script
+    # the screen rectangle is no longer a source of the stored size
+    record = script[script.index("if (!opts.embedded && fitted && fitted.scale === 1)") :][:900]
+    assert "getBoundingClientRect" not in record
+
+
+def test_a_dragged_icon_is_painted_while_the_pointer_moves(
+    client: TestClient,
+) -> None:
+    """The tile follows the hand; the database is told only when the hand lets go."""
+    script = client.get("/static/app.js").text
+    assert "function follow(event, onMove, onCommit, show)" in script
+    assert "if (show) show(latest);" in script
+    # the move paints and the commit persists: two callbacks on one gesture, the paint
+    # handed to `follow` as the argument that runs on every pointer move
+    drag = script[script.index('tile.addEventListener("pointerdown"') :]
+    drag = drag[: drag.index("grip.addEventListener")]
+    assert "placeOnDesktop(box, ctx, child.uuid, where.x, where.y);" in drag
+    assert "      (where) => {\n        tile.style.left = `${where.x}px`;" in drag
+    # sizing the tile is live too, for the same reason
+    assert "tile.style.width = `${size.width}px`;" in script
+
+
+def test_the_roots_slot_does_not_put_a_scrollbar_around_a_desktop(
+    client: TestClient,
+) -> None:
+    """A scaled canvas and a scrollbar are contradictory answers to the same problem."""
+    css = client.get("/static/app.css").text
+    assert ".root-child > .desktop-view {" in css
+    block = css[css.index(".root-child > .desktop-view {") :]
+    assert "overflow: hidden;" in block.split("}")[0]
+    # and the slot's own generous rule is deliberately weightless, so that holds
+    assert ":where(:not(.desktop-toolbar)" in css
+
+
+def test_nothing_is_the_default_parent_of_a_new_box(client: TestClient) -> None:
+    """Root holds one box: preselecting it would evict the way in for a box nobody
+    filed anywhere on purpose."""
+    script = client.get("/static/app.js").text
+    fill = script[script.index("async function fillParentChoices") :]
+    fill = fill[: fill.index("\n}\n")]
+    assert "select.value = root.uuid" not in fill
+    assert "if (preferred) select.value = preferred;" in fill
+    # the empty choice is still offered first, and still says what it means
+    assert 'none.textContent = "(no parent)";' in script

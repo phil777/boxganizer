@@ -722,8 +722,17 @@ async function fillParentChoices(preferred) {
     }
   }
 
-  const root = state.boxes.find((box) => box.box_type === "root");
-  if (root) select.value = root.uuid;
+  /*
+   * Nothing is the default parent. Root holds exactly one box, and taking that slot throws the current way in out of
+   * it, so preselecting it would mean a New box pressed in the panel — where nobody
+   * said where the box belongs — quietly displaces whatever is the way into the
+   * library. The empty choice is the honest answer to an unasked question, and it
+   * matches `box add`, which files a new box nowhere unless --parent says otherwise.
+   *
+   * Root stays in the list: filing something at the way in is a thing a person may
+   * genuinely mean to do, and then they say so.
+   */
+  if (preferred) select.value = preferred;
 }
 
 let suggestTimer = null;
@@ -1730,46 +1739,58 @@ registerView("desktop", {
         ? { width: Number(recorded.width), height: Number(recorded.height) }
         : null;
 
+    /**
+     * Size the canvas to the pane and scale it to fit, and say what was settled on.
+     *
+     * The canvas is never smaller than the icons need, never larger than what it was
+     * arranged at unless the pane has grown into empty space, and is only ever drawn
+     * smaller — a desktop with three icons does not blow them up to fill the window,
+     * and never past the point where a label is unreadable.
+     */
     function fitSurface() {
       const availW = wrap.clientWidth;
       const availH = wrap.clientHeight;
-      if (!availW || !availH) return;
-      const target = laidOut || {
-        width: Math.max(availW, extent.width),
-        height: Math.max(availH, extent.height),
+      if (!availW || !availH) return null;
+      const base = laidOut || {width: availW, height: availH};
+      const target = {
+        width: Math.max(base.width, availW, extent.width),
+        height: Math.max(base.height, availH, extent.height),
       };
       const ratio = Math.min(availW / target.width, availH / target.height);
-      // Never enlarged — a desktop with three icons does not blow them up to fill
-      // the window — and never shrunk past the point where an icon's label is
-      // unreadable, which a grid cell can otherwise reach.
       const scale = Math.max(0.2, Math.min(1, ratio));
       surface.style.width = `${target.width}px`;
       surface.style.height = `${target.height}px`;
       surface.style.transform = scale === 1 ? "" : `scale(${scale})`;
       surface.dataset.scale = String(scale);
+      return {target, scale};
     }
 
-    fitSurface();
+    let fitted = fitSurface();
     // The pane changes size when a grid gets more rows, when the window is dragged,
     // when the left panel is resized: the canvas follows it, asking nothing of the
     // server. The observer is released with the pane, like any other live thing.
-    const watcher = new ResizeObserver(() => fitSurface());
+    const watcher = new ResizeObserver(() => {
+      fitted = fitSurface();
+    });
     watcher.observe(wrap);
     holdLive(() => watcher.disconnect());
 
-    if (!opts.embedded) {
-      // Record the size this desktop is arranged at, so a smaller pane can scale the
-      // same canvas instead of inventing one. Only when it really changed: writing
-      // the config on every paint would keep the database busy for nothing.
-      const wanted = {
-        width: Math.round(surface.getBoundingClientRect().width),
-        height: Math.round(surface.getBoundingClientRect().height),
-      };
+    if (!opts.embedded && fitted && fitted.scale === 1) {
+      /*
+       * What is kept is the size of the CANVAS — the number every icon's coordinates
+       * are written in — and never the rectangle on screen, because that is the same
+       * number multiplied by the scale. Recording the screen rectangle made a desktop
+       * shrink a little each time it was opened: 1200 drawn at 0.6 came back as 720,
+       * and in the root's slot, where the pane is smaller than the window, that is
+       * what a person sees as the pane flapping between needing a scrollbar and not.
+       *
+       * Only a full-size layout writes it, so a scaled-down view cannot redefine the
+       * canvas it is merely showing.
+       */
+      const wanted = {width: Math.round(fitted.target.width), height: Math.round(fitted.target.height)};
       if (
-        wanted.width > 0 &&
-        wanted.height > 0 &&
-        (Math.abs(wanted.width - Number(recorded.width || 0)) > 2 ||
-          Math.abs(wanted.height - Number(recorded.height || 0)) > 2)
+        Math.abs(wanted.width - Number(recorded.width || 0)) > 2 ||
+        Math.abs(wanted.height - Number(recorded.height || 0)) > 2
       ) {
         const config = box.config || {};
         const next = { ...config, desktop: { ...(config.desktop || {}), canvas: wanted } };
@@ -2002,7 +2023,7 @@ function desktopIcon(box, child, rect, options, ctx) {
    * began, then write the tile as the pointer moves, magnetised, and commit once
    * on release. A click that never moved is left to the browser as a click.
    */
-  function follow(event, onMove, onCommit) {
+  function follow(event, onMove, onCommit, show) {
     const origin = {
       x: event.clientX,
       y: event.clientY,
@@ -2019,8 +2040,16 @@ function desktopIcon(box, child, rect, options, ctx) {
     tile.setPointerCapture(event.pointerId);
     tile.classList.add("handling");
 
+    /*
+     * `show` paints the tile where the gesture has just put it, on every pointer move
+     * and not only at the end. Without it the icon sits still while the hand drags and
+     * then jumps to wherever it ended up — which reads as the desktop lagging a whole
+     * gesture behind the mouse. Nothing is written to the database until the release:
+     * what moves during the drag is the picture.
+     */
     const move = (next) => {
       latest = onMove(origin, next);
+      if (show) show(latest);
     };
     const release = () => {
       tile.removeEventListener("pointermove", move);
@@ -2044,10 +2073,15 @@ function desktopIcon(box, child, rect, options, ctx) {
         y: Math.max(0, magnetise(origin.top + (next.clientY - origin.y) / origin.scale, options)),
       }),
       (where) => {
+        if (where.x === rect.x && where.y === rect.y) {
+          // put back where it was: the tile is already there, the drag only drew it
+          return;
+        }
+        placeOnDesktop(box, ctx, child.uuid, where.x, where.y);
+      },
+      (where) => {
         tile.style.left = `${where.x}px`;
         tile.style.top = `${where.y}px`;
-        if (where.x === rect.x && where.y === rect.y) return; // put back where it was
-        placeOnDesktop(box, ctx, child.uuid, where.x, where.y);
       }
     );
   });
@@ -2069,13 +2103,15 @@ function desktopIcon(box, child, rect, options, ctx) {
         ),
       }),
       (size) => {
-        tile.style.width = `${size.width}px`;
-        tile.style.height = `${size.height}px`;
         if (size.width === rect.width && size.height === rect.height) return;
         api
           .desktopResize(box.uuid, child.uuid, size.width, size.height)
           .then(() => ctx.reload())
           .catch((error) => ctx.status(`cannot size that icon: ${error.message}`, true));
+      },
+      (size) => {
+        tile.style.width = `${size.width}px`;
+        tile.style.height = `${size.height}px`;
       }
     );
   });

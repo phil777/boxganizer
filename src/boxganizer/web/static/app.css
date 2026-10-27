@@ -873,9 +873,21 @@ pre.text {
 .root-child > .grid-toolbar,
 .root-child > .children-toolbar { flex: none; margin-bottom: 0; }
 
-.root-child > :not(.desktop-toolbar):not(.grid-toolbar):not(.children-toolbar) {
+/* `:where()` keeps this rule's weight at nothing, so the exception under it is a
+   matter of what it says rather than of a specificity fight won by accident. */
+.root-child > :where(:not(.desktop-toolbar):not(.grid-toolbar):not(.children-toolbar)) {
   flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
+}
+
+/* A desktop is *scaled* to the room it is given, not scrolled inside it. A scrollbar
+   around it takes height from the very measurement the scale is computed from, and the
+   next fit then needs no scrollbar, and the one after that does again: that is a pane
+   flapping between needing a scrollbar and not needing one, which is what the root's
+   slot — smaller than the window by its own bar — used to do. */
+.root-child > .desktop-view {
+  overflow: hidden;
 }
 
 .root-child .desktop-view,

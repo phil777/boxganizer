@@ -103,7 +103,7 @@ def _edit_in_editor(text: str, name: str, editor: str | None) -> str:
 def _resolve_parent(
     store: BoxStore, box: Box, *, parent: str | None, no_parent: bool
 ) -> str | None:
-    """Which box the new box goes into: an explicit one, `root`, or none.
+    """Which box the new box goes into: the one that was named, or none at all.
 
     Checked before the insert, so a bad `--parent` never leaves a stray box
     behind.
