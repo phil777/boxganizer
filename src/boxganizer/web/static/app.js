@@ -40,6 +40,12 @@ async function request(path, options = {}) {
     } catch {
       /* a body that is not JSON says nothing more useful than the status */
     }
+    if (response.status === 404 && reason === "Not Found") {
+      // No route matched. The page came off this disk a moment ago; the server was started
+      // earlier and does not know the endpoint yet. Saying "Not Found" here sends the reader
+      // looking for a missing box, when what is missing is a restart.
+      reason = `this server has no ${path.split("?")[0]} endpoint — restart \`box serve\``;
+    }
     const error = new Error(reason);
     // Callers that can say more (the file picker names the confine) read this.
     error.status = response.status;
@@ -155,7 +161,10 @@ const api = {
       method: "POST",
       body: JSON.stringify({ node, with: withBox }),
     }),
-  markdown: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/markdown`),
+  markdown: (ref, sub) =>
+    request(
+      `/api/boxes/${encodeURIComponent(ref)}/markdown${sub ? `?sub=${encodeURIComponent(sub)}` : ""}`
+    ),
   note: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/note`),
   saveNote: (ref, source, format) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/note`, {
@@ -2781,6 +2790,8 @@ const directoryView = {
         embedded: true,
         depth: 1,
         src,
+        sub: entry.sub, // the file to read, which is not a box and has no uuid of its own
+        owner: box.uuid, // ... but this box is who is asked, because it is the confine
         archiveUrl: api.archiveUrl(box.uuid, entry.sub),
       });
       drawBar(`${entry.icon} ${entry.name}`, [
@@ -3407,7 +3418,10 @@ async function markdownView(canvas, box, ctx, opts = {}) {
       });
       paint();
       // Remembered in the box, the way every other view choice is: a note read as plain
-      // text at midnight should still be plain text in the morning.
+      // text at midnight should still be plain text in the morning. A preview has no box to
+      // remember it in, and asking for one would answer `box_not_found`, so it switches for
+      // this look only.
+      if (!box.uuid) return;
       try {
         await api.setConfig(box.uuid, {
           ...(box.config || {}),
@@ -3446,7 +3460,11 @@ async function markdownView(canvas, box, ctx, opts = {}) {
   }
 
   try {
-    answer = await api.markdown(box.uuid);
+    // A preview of a file inside a directory box: the file is not a box and has no uuid, so
+    // the directory that holds it is asked (`opts.owner`) and the file named to it
+    // (`opts.sub`). Asking for the preview itself as a box could only answer
+    // `box_not_found`, which reads like a lost box and is really a file that never was one.
+    answer = await api.markdown(opts.owner || box.uuid, opts.sub || "");
   } catch (error) {
     if (!stillOnScreen(token)) return;
     stage.replaceChildren(emptyMessage(`Cannot render ${box.resource_uri}: ${error.message}`));

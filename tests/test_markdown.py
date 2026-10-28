@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from boxganizer import markdown as md
+from boxganizer.store import BoxStore
 
 _URLS = re.compile(r'(?:href|src)="([^"]*)"')
 
@@ -211,5 +212,79 @@ def test_a_file_outside_the_confine_is_not_rendered(tmp_path: Path) -> None:
             answer = client.get("/api/boxes/Outside/markdown").json()
             assert answer["html"] == ""
             assert "outside" in answer["note"]
+    finally:
+        store.close()
+
+
+# -- a file inside a directory box -------------------------------------------
+
+
+def _library(tmp_path: Path) -> BoxStore:
+    """A directory box over a folder with a markdown file in it, and one outside it."""
+    from boxganizer.models import Box
+
+    library = tmp_path / "library"
+    (library / "notes").mkdir(parents=True)
+    (library / "notes" / "plan.md").write_text(
+        "# Pump\n\nbled the **radiator**\n", encoding="utf-8"
+    )
+    (library / "outside.md").write_text("# not yours\n", encoding="utf-8")
+    store = BoxStore(tmp_path / "dirs.db", content_root=library)
+    store.add(Box(name="Notes", box_type="indexed-directory", resource_uri=str(library / "notes")))
+    store.add(Box(name="Cellar", box_type="folder", resource_uri=str(library / "notes")))
+    return store
+
+
+def test_a_markdown_file_inside_a_directory_box_renders(tmp_path: Path) -> None:
+    """It is not a box, so it is asked for by the directory that holds it.
+
+    Before this, the preview sent a `null` uuid as the reference and the answer was
+    `box_not_found` — which reads like a lost box and is really a file that never was one.
+    """
+    from fastapi.testclient import TestClient
+
+    from boxganizer.web.app import create_app
+
+    store = _library(tmp_path)
+    try:
+        with TestClient(create_app(store, content_root=store.path.parent)) as client:
+            answer = client.get("/api/boxes/Notes/markdown", params={"sub": "plan.md"})
+            assert answer.status_code == 200
+            assert "<h1>Pump</h1>" in answer.json()["html"]
+            assert "radiator" in answer.json()["source"]
+    finally:
+        store.close()
+
+
+def test_a_preview_cannot_walk_out_of_the_directory_box(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from boxganizer.web.app import create_app
+
+    store = _library(tmp_path)
+    try:
+        with TestClient(create_app(store, content_root=store.path.parent)) as client:
+            for attempt in ("../outside.md", "notes/../../outside.md", "/etc/passwd"):
+                answer = client.get("/api/boxes/Notes/markdown", params={"sub": attempt})
+                assert answer.status_code == 403, attempt
+                assert answer.json()["detail"]["error"] == "path_out_of_range"
+    finally:
+        store.close()
+
+
+def test_a_directory_box_that_holds_no_folder_says_which_problem_it_is(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from boxganizer.web.app import create_app
+
+    store = _library(tmp_path)
+    try:
+        with TestClient(create_app(store, content_root=store.path.parent)) as client:
+            # a folder box holds boxes, not a file tree: it has no such thing as a sub
+            wrong = client.get("/api/boxes/Cellar/markdown", params={"sub": "plan.md"})
+            assert wrong.status_code == 415
+            missing = client.get("/api/boxes/Notes/markdown", params={"sub": "gone.md"})
+            assert missing.status_code == 404
+            assert missing.json()["detail"]["error"] == "no_such_path"
     finally:
         store.close()

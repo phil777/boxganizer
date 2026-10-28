@@ -1091,7 +1091,15 @@ def create_app(
         }
 
     @app.get("/api/boxes/{ref}/markdown")
-    def read_markdown(request: Request, ref: str, store: StoreDep) -> dict[str, object]:
+    def read_markdown(
+        request: Request,
+        ref: str,
+        store: StoreDep,
+        sub: Annotated[
+            str,
+            Query(description="A markdown file inside a directory box, when this is a preview."),
+        ] = "",
+    ) -> dict[str, object]:
         """The box's file, as HTML and as the text it came from.
 
         Rendered on the server rather than in the page, because the parser that decides
@@ -1103,8 +1111,25 @@ def create_app(
         A file outside the content confine, or one that is not text, answers with the
         reason in `note` and nothing in `html`: the page says that instead of showing an
         empty box.
+
+        `sub` is for a preview of a file *inside* a directory box. Such a file is not a
+        box — nothing in the library has a uuid for it — so sending one to this endpoint as
+        a `ref` could only ever answer `box_not_found`, which is the bug this parameter
+        closes. Here the directory box is not the subject, it is the confine: the path is
+        joined inside its root and refuses to leave, and the file that comes out is
+        rendered by the same rules as any other.
         """
         box = store.resolve(ref)
+        if sub:
+            _root, inside = _box_file(store, request, ref, sub, need_list=True)
+            found = text_search.extract_resource(
+                str(inside),
+                root=getattr(request.app.state, "content_root", None),
+                pdf=False,
+            )
+            if not found.usable:
+                return {"html": "", "source": "", "note": found.note}
+            return {"html": markdown.render(found.text), "source": found.text, "note": ""}
         if not box.resource_uri:
             return {"html": "", "source": "", "note": "the box points at no file"}
         found = text_search.extract_resource(

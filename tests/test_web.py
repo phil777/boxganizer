@@ -2478,3 +2478,25 @@ def test_keys_are_left_to_the_browser_when_a_combo_belongs_to_it(client: TestCli
     start = script.index('stage.addEventListener("keydown"')
     keys = script[start : script.index('stage.addEventListener("keyup"', start)]
     assert "event.ctrlKey || event.metaKey" in keys
+
+
+def test_a_preview_asks_for_the_file_rather_than_for_a_box_that_does_not_exist(
+    client: TestClient,
+) -> None:
+    """A file in a directory has no uuid; the directory is the ref and the file the subject."""
+    script = client.get("/static/app.js").text
+    assert 'answer = await api.markdown(opts.owner || box.uuid, opts.sub || "");' in script
+    assert "sub: entry.sub," in script
+    assert "owner: box.uuid," in script
+    # and a preview does not try to write its view mode into a box that is not there
+    guard = script.index("if (!box.uuid) return;")
+    assert "api.setConfig(box.uuid" in script[guard : guard + 400]
+
+
+def test_a_route_the_server_does_not_know_says_so_rather_than_not_found(
+    client: TestClient,
+) -> None:
+    """New page against an old server process: the fix is a restart, not a search for a box."""
+    script = client.get("/static/app.js").text
+    assert 'response.status === 404 && reason === "Not Found"' in script
+    assert "restart" in script
