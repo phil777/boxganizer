@@ -155,6 +155,7 @@ const api = {
       method: "POST",
       body: JSON.stringify({ node, with: withBox }),
     }),
+  markdown: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/markdown`),
   ssh: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/ssh`),
   sshRun: (ref, command, timeout) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/ssh/run`, {
@@ -3334,6 +3335,140 @@ const mqttView = {
 };
 
 registerView("mqtt", mqttView);
+
+/* -- markdown ----------------------------------------------------------------
+ *
+ * A .md file is words with a shape, and the shape is the reason anyone writes it: a
+ * heading is a heading, a table lines up, `code` looks like code. So the file is
+ * rendered rather than dumped — which is what its type has always claimed to do.
+ *
+ * The HTML comes from the server (`boxganizer.markdown`), because that is where the
+ * parser that decides what is safe to show lives; a second implementation in the page
+ * would be a second set of rules, quietly disagreeing with the first within a release.
+ * Raw HTML in the file never becomes HTML on the screen, and a link whose address would
+ * run something arrives with the address gone.
+ *
+ * The plain text is one click away and came in the same response, because "rendered"
+ * that quietly differs from the file is worse than no rendering, and checking what a
+ * note actually says should not cost a round trip.
+ */
+
+const MARKDOWN_SECTIONS = {rendered: "Rendered", raw: "Plain text"};
+
+async function markdownView(canvas, box, ctx, opts = {}) {
+  const token = paneGeneration;
+  const options = textOptions(box);
+  const section = (box.config || {}).markdown || {};
+  let mode = section.mode === "raw" ? "raw" : "rendered";
+
+  const stage = document.createElement("div");
+  stage.className = "markdown-view";
+  stage.dataset.mode = mode;
+  stage.style.setProperty("--text-size", `${options.font_size}px`);
+
+  const bar = document.createElement("div");
+  bar.className = "markdown-bar";
+  Object.entries(MARKDOWN_SECTIONS).forEach(([key, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.dataset.mode = key;
+    button.setAttribute("aria-pressed", String(key === mode));
+    button.addEventListener("click", async () => {
+      if (key === mode) return;
+      mode = key;
+      stage.dataset.mode = key;
+      bar.querySelectorAll("button").forEach((b) => {
+        b.setAttribute("aria-pressed", String(b.dataset.mode === key));
+      });
+      paint();
+      // Remembered in the box, the way every other view choice is: a note read as plain
+      // text at midnight should still be plain text in the morning.
+      try {
+        await api.setConfig(box.uuid, {
+          ...(box.config || {}),
+          markdown: {...(section || {}), mode: key},
+        });
+        box.config = {...(box.config || {}), markdown: {...(section || {}), mode: key}};
+      } catch {
+        /* the view switched; the memory is a courtesy, not the answer */
+      }
+    });
+    bar.append(button);
+  });
+
+  const body = document.createElement("article");
+  body.className = "markdown-body";
+  const source = document.createElement("pre");
+  source.className = "markdown-source text-body";
+  stage.append(bar, body, source);
+  canvas.append(stage);
+
+  let answer = null;
+
+  function paint() {
+    if (!answer) return;
+    if (mode === "raw") {
+      source.textContent = answer.source;
+      body.hidden = true;
+      source.hidden = false;
+    } else {
+      // Only ever the server's HTML: see `boxganizer.markdown`. Nothing here is built
+      // from the file's own text.
+      body.innerHTML = answer.html;
+      body.hidden = false;
+      source.hidden = true;
+    }
+  }
+
+  try {
+    answer = await api.markdown(box.uuid);
+  } catch (error) {
+    if (!stillOnScreen(token)) return;
+    stage.replaceChildren(emptyMessage(`Cannot render ${box.resource_uri}: ${error.message}`));
+    return;
+  }
+  if (!stillOnScreen(token)) return; // the pane moved on while the file was read
+
+  if (answer.note) {
+    stage.replaceChildren(emptyMessage(answer.note));
+    return;
+  }
+
+  paint();
+
+  stage.addEventListener("contextmenu", (event) => {
+    if (event.target.closest("a")) return; // a link is a link; the menu is for the view
+    event.preventDefault();
+    ctx.showMenu(event.clientX, event.clientY, [
+      {
+        label: mode === "rendered" ? "Show plain text instead" : "Render the markdown",
+        run: () => bar.querySelector(`button[data-mode="${mode === "rendered" ? "raw" : "rendered"}"]`).click(),
+      },
+      { separator: true },
+      {
+        label: `${options.wrap ? "✕" : "✓"} Wrap lines`,
+        run: () => ctx.saveSection("text", { wrap: !options.wrap }),
+      },
+      {
+        label: "A+ Larger text",
+        run: () => ctx.saveSection("text", { font_size: Math.min(40, options.font_size + 2) }),
+      },
+      {
+        label: "A- Smaller text",
+        run: () => ctx.saveSection("text", { font_size: Math.max(8, options.font_size - 2) }),
+      },
+      { separator: true },
+      { label: "Reload", run: ctx.reload },
+    ]);
+  });
+}
+
+registerView("markdown", {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    await markdownView(canvas, box, ctx, opts);
+  },
+});
 
 /* -- mindmap -------------------------------------------------------------------
  *

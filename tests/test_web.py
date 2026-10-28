@@ -2315,3 +2315,34 @@ def test_a_box_arrives_with_what_the_index_thinks_of_it(client: TestClient) -> N
 
     answer = client.get("/api/search?q=Unindexed").json()
     assert answer[0]["resource"] is None
+
+
+def test_the_markdown_view_renders_and_can_show_the_source(client: TestClient) -> None:
+    """The view is rendered words with a way back to the file, and nothing in between."""
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    assert 'registerView("markdown"' in script
+    assert "markdownView" in script
+    # the HTML is what the server said, and nothing is built out of the file's own text
+    assert "body.innerHTML = answer.html;" in script
+    assert "source.textContent = answer.source;" in script
+    assert "/markdown" in script
+    # both shapes are styled, and the raw one is the file with its markers intact
+    for needle in (".markdown-body", ".markdown-source", ".markdown-bar"):
+        assert needle in css
+
+
+def test_the_markdown_mode_is_remembered_in_the_box(client: TestClient) -> None:
+    """A note read as plain text at midnight is plain text in the morning."""
+    script = client.get("/static/app.js").text
+    assert 'markdown: {...(section || {}), mode: key}' in script
+    assert 'stage.dataset.mode = mode;' in script
+
+
+def test_the_rendered_page_does_not_build_html_from_a_file(client: TestClient) -> None:
+    """innerHTML has exactly one source: the server's sanitised rendering."""
+    script = client.get("/static/app.js").text
+    start = script.index("async function markdownView")
+    view = script[start : script.index('registerView("markdown"', start)]
+    inner_html = [line.strip() for line in view.splitlines() if "innerHTML" in line]
+    assert inner_html == ["body.innerHTML = answer.html;"]

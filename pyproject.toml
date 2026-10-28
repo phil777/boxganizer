@@ -12,6 +12,11 @@ authors = [{ name = "Philippe Biondi", email = "phil@secdev.org" }]
 keywords = ["knowledge-management", "graph", "cli", "tui", "web"]
 dynamic = ["version"]
 dependencies = [
+    # The markdown a box holds is rendered by this, and only here: see
+    # `boxganizer.markdown` for why the page asks the server instead of parsing it
+    # twice. It arrived before as a dependency of rich; depending on that would be
+    # depending on someone else's choices.
+    "markdown-it-py>=3.0",
     "pillow>=10.0",
     "pypdfium2>=4.30",
     "pyyaml>=6.0",

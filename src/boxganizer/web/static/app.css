@@ -1053,3 +1053,77 @@ pre.text {
 .cell-content .ssh-note,
 .cell-content .ssh-copy,
 .cell-content .ssh-line { display: none; }
+
+/* Rendered markdown. The words carry their own shape now, so the type sheet is about
+   rhythm and not colour: headings that step down, a quote that steps in, tables that
+   line up, code that stays monospaced at the size the pane is reading at. */
+.markdown-bar { display: flex; gap: 0.35rem; flex: none; margin-bottom: 0.5rem; }
+.markdown-bar button[aria-pressed="true"] { border-color: var(--accent); font-weight: 600; }
+
+.markdown-view { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+.markdown-view[data-mode="raw"] .markdown-body { display: none; }
+.markdown-source {
+  margin: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  font-size: var(--text-size, 15px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.markdown-view[data-mode="rendered"] .markdown-source { display: none; }
+
+.markdown-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  font-size: var(--text-size, 15px);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 { line-height: 1.25; margin: 1.3rem 0 0.4rem; }
+.markdown-body h1 { font-size: 1.5em; }
+.markdown-body h2 { font-size: 1.25em; }
+.markdown-body h3 { font-size: 1.1em; }
+.markdown-body ul,
+.markdown-body ol { padding-left: 1.4rem; margin: 0.5rem 0; }
+.markdown-body li { margin: 0.15rem 0; }
+.markdown-body blockquote {
+  margin: 0.7rem 0;
+  padding: 0.1rem 0.8rem;
+  border-left: 3px solid var(--line);
+  color: color-mix(in srgb, currentColor 78%, transparent);
+}
+.markdown-body code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  padding: 0.05rem 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+.markdown-body pre {
+  margin: 0.7rem 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow-x: auto;
+  background: var(--panel);
+}
+.markdown-body pre code { border: none; padding: 0; background: none; }
+.markdown-body table { border-collapse: collapse; margin: 0.7rem 0; display: block; overflow-x: auto; }
+.markdown-body th,
+.markdown-body td { border: 1px solid var(--line); padding: 0.25rem 0.5rem; }
+.markdown-body th { background: var(--panel); }
+.markdown-body hr { border: none; border-top: 1px solid var(--line); margin: 1.1rem 0; }
+.markdown-body img { max-width: 100%; }
+/* A link whose address would have run something keeps its words and loses its reach.
+   It is marked as such rather than looking like a link that is merely broken. */
+.markdown-body a[data-blocked] { text-decoration: line-through; cursor: not-allowed; }
+.markdown-fallback { white-space: pre-wrap; }
+
+.cell-content .markdown-bar { display: none; }
+.cell-content .markdown-view { height: 100%; }

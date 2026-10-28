@@ -137,7 +137,7 @@ def _index_state(box: Box) -> str:
         return ""
     if not record.index_it:
         return "left out of the search (box index --add " + box.name + " to include it)"
-    if record.stale:
+    if record.stale():
         return "CHANGED since it was indexed - box index --stale reads it again"
     if not record.indexed:
         return "asked for, not read yet - box index reads it"

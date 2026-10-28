@@ -24,6 +24,7 @@ from boxganizer import (
     fslist,
     grid,
     infer,
+    markdown,
     mindmap,
     mqtt,
     paths,
@@ -566,6 +567,32 @@ def create_app(
         box = _ssh_box(store, ref)
         result = ssh.run(box, payload.command, timeout=payload.timeout)
         return result.as_dict()
+
+    @app.get("/api/boxes/{ref}/markdown")
+    def read_markdown(request: Request, ref: str, store: StoreDep) -> dict[str, object]:
+        """The box's file, as HTML and as the text it came from.
+
+        Rendered on the server rather than in the page, because the parser that decides
+        what is safe to show is the one in `boxganizer.markdown`, and a second
+        implementation in JavaScript would be a second set of rules to fall behind. The
+        source comes back with it so that switching to the raw view costs no second
+        request — and so the two views can never disagree about which file they read.
+
+        A file outside the content confine, or one that is not text, answers with the
+        reason in `note` and nothing in `html`: the page says that instead of showing an
+        empty box.
+        """
+        box = store.resolve(ref)
+        if not box.resource_uri:
+            return {"html": "", "source": "", "note": "the box points at no file"}
+        found = text_search.extract_resource(
+            box.resource_uri,
+            root=getattr(request.app.state, "content_root", None),
+            pdf=False,
+        )
+        if not found.usable:
+            return {"html": "", "source": "", "note": found.note}
+        return {"html": markdown.render(found.text), "source": found.text, "note": ""}
 
     @app.get("/api/index-suggestion")
     def index_suggestion(

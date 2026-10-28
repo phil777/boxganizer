@@ -63,14 +63,22 @@ class TextResource(FileResource):
     indexes_content: ClassVar[bool] = True
 
 class MarkdownResource(TextResource):
-    """A Markdown file, rendered instead of dumped."""
+    """A Markdown file, rendered instead of dumped.
+
+    The page asks the server for the HTML — see :mod:`boxganizer.markdown` — and can
+    switch to the plain text in the same view, without another read of the file. Raw
+    HTML in a note stays text on the screen, and a link that would have run something
+    keeps its words and loses its reach.
+    """
 
     key: ClassVar[str] = "markdown"
     label: ClassVar[str] = "Markdown"
     icon: ClassVar[str] = "\U0001f4dd"  # 📝
     summary: ClassVar[str] = "A .md file, rendered to HTML for the web app."
     extensions: ClassVar[frozenset[str] | None] = frozenset({".md", ".markdown", ".mdown"})
-    planned: ClassVar[str] = "Render on the web page and as styled text in the terminal."
+    planned: ClassVar[str] = (
+        "Styled markdown in the terminal, where the CLI shows the file as text."
+    )
 
 
 class ImageResource(FileResource):
