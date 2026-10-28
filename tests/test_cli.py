@@ -662,3 +662,55 @@ def test_box_value_refuses_a_box_that_listens_to_nothing(db_path: Path) -> None:
     invoke(db_path, "add", "Kitchen")
     result = invoke(db_path, "value", "Kitchen")
     assert result.exit_code == 1
+
+
+def test_index_reports_what_has_changed_without_reading_it(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--check` answers from a stat, which is why it can be run on a timer."""
+    import os
+    import time
+
+    monkeypatch.setenv("BOXGANIZER_CONTENT_ROOT", str(tmp_path))
+    notes = tmp_path / "notes.txt"
+    notes.write_text("the cellar pump", encoding="utf-8")
+    invoke(db_path, "init")
+    invoke(db_path, "add", "Notes", "-t", "text", "-r", str(notes), "--no-parent")
+
+    clean = invoke(db_path, "index", "--check")
+    assert clean.exit_code == 0, clean.output
+    assert "nothing has changed" in clean.output
+
+    notes.write_text("the cellar pump, and a new fact", encoding="utf-8")
+    stamp = time.time() + 120
+    os.utime(notes, (stamp, stamp))
+    changed = invoke(db_path, "index", "--check")
+    assert "1 file(s) changed" in changed.output
+    assert "notes.txt" in changed.output
+    assert "--stale" in changed.output  # and it says what to do about it
+
+    reread = invoke(db_path, "index", "--stale")
+    assert reread.exit_code == 0, reread.output
+    assert "1 file read into the index" in reread.output
+    assert "nothing has changed" in invoke(db_path, "index", "--check").output
+
+
+def test_the_terminal_can_opt_a_file_in_and_out(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dialog's checkbox, said from the command line."""
+    monkeypatch.setenv("BOXGANIZER_CONTENT_ROOT", str(tmp_path))
+    archive = tmp_path / "bundle.zip"
+    archive.write_text("not words, but say otherwise", encoding="utf-8")
+    invoke(db_path, "init")
+    invoke(db_path, "add", "Bundle", "-t", "file", "-r", str(archive), "--no-parent")
+
+    assert "left out of the search" in invoke(db_path, "show", "Bundle").output
+
+    added = invoke(db_path, "index", "--add", "Bundle")
+    assert added.exit_code == 0, added.output
+    assert "Bundle: in the index" in added.output
+
+    dropped = invoke(db_path, "index", "--drop", "Bundle")
+    assert "Bundle: out of the index" in dropped.output
+    assert "left out of the search" in invoke(db_path, "show", "Bundle").output

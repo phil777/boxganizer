@@ -65,6 +65,11 @@
             Browse…
           </button>
         </div>
+        <label class="index-choice">
+          <input id="nb-index" type="checkbox" />
+          <span>Keep this file in the full-text search index</span>
+        </label>
+        <p id="nb-index-reason" class="muted index-reason"></p>
         <p id="nb-suggest" class="suggest" hidden></p>
         <label>Put it in
           <select id="nb-parent" name="parent"></select>
@@ -103,6 +108,11 @@
             Browse…
           </button>
         </div>
+        <label class="index-choice">
+          <input id="eb-index" type="checkbox" />
+          <span>Keep this file in the full-text search index</span>
+        </label>
+        <p id="eb-index-reason" class="muted index-reason"></p>
         <div id="eb-config" class="config-fields"></div>
         <footer>
           <button type="button" id="eb-cancel">Cancel</button>

@@ -746,6 +746,8 @@ const CREATE_MODAL = {
   summary: "nb-summary",
   description: "nb-description",
   resource: "nb-resource",
+  index: "nb-index",
+  indexReason: "nb-index-reason",
   suggest: "nb-suggest",
   config: "nb-config",
   icon: null,
@@ -759,6 +761,8 @@ const EDIT_MODAL = {
   summary: "eb-summary",
   description: "eb-description",
   resource: "eb-resource",
+  index: "eb-index",
+  indexReason: "eb-index-reason",
   suggest: "eb-suggest",
   config: "eb-config",
   icon: "eb-icon",
@@ -827,6 +831,7 @@ async function openNewBoxModal(options = {}) {
   if (choices.resource) el(CREATE_MODAL.resource).value = choices.resource;
   el(CREATE_MODAL.id).showModal();
   el(CREATE_MODAL.name).focus();
+  refreshIndexChoice("create", CREATE_MODAL);
 }
 
 /**
@@ -845,6 +850,21 @@ function openEditBoxModal(box) {
   renderConfigFields(EDIT_MODAL, box.config || {});
   el(EDIT_MODAL.suggest).hidden = true;
   checkResourceType(EDIT_MODAL);
+  // What the box's own resource row says is the starting answer — the suggestion endpoint
+  // would only agree with it — and the sentence beside it says where the index stands
+  // today, because "it is ticked" and "it has been read" are different facts.
+  const known = el(EDIT_MODAL.index);
+  if (known) {
+    const record = box.resource;
+    known.checked = record ? !!record.index_it : false;
+    indexChoice.edit.key = `${el(EDIT_MODAL.resource).value.trim()}|${box.box_type}`;
+    indexChoice.edit.touched = false;
+    const reason = el(EDIT_MODAL.indexReason);
+    if (reason) {
+      reason.hidden = false;
+      reason.textContent = record ? indexStateSentence(record) : "this box points at nothing yet";
+    }
+  }
   el(EDIT_MODAL.id).showModal();
   el(EDIT_MODAL.name).focus();
 }
@@ -858,6 +878,7 @@ async function submitEditBox(event) {
     box_type: el(EDIT_MODAL.type).value,
     resource_uri: el(EDIT_MODAL.resource).value.trim() || null,
   };
+  if (el(EDIT_MODAL.index)) payload.index_resource = el(EDIT_MODAL.index).checked;
   if (EDIT_MODAL.icon) payload.icon = el(EDIT_MODAL.icon).value.trim() || null;
   try {
     payload.config = collectConfig(EDIT_MODAL);
@@ -992,6 +1013,72 @@ function pick(chosen) {
   status(`resource set to ${chosen}`);
 }
 
+
+/**
+ * The dialog's indexing box, and what the core says about it.
+ *
+ * The default is not guessed here: the page asks `/api/index-suggestion`, which answers
+ * with the box's own rule (`indexes_content`) or the shape of the address — a local file
+ * whose ending says words, yes; a picture, a web page, a topic, no — and with the reason
+ * in words. A checkbox whose default is invented in JavaScript is a rule that disagrees
+ * with the server by the next release.
+ *
+ * Someone's own tick is kept while the address and the type stay what they were, and is
+ * thrown away when either changes: a decision about `/srv/notes.txt` says nothing about
+ * `/srv/backup.zip`, and pretending otherwise would carry a tick across two different
+ * answers to two different questions.
+ */
+const indexChoice = { create: {key: "", touched: false}, edit: {key: "", touched: false} };
+
+async function refreshIndexChoice(which, modal) {
+  const box = el(modal.index);
+  const reason = el(modal.indexReason);
+  if (!box) return;
+  const resource = el(modal.resource).value.trim();
+  const key = `${resource}|${el(modal.type).value}`;
+  const remembered = indexChoice[which];
+  if (key === remembered.key && remembered.touched) return;
+  try {
+    const answer = await request(
+      `/api/index-suggestion?resource=${encodeURIComponent(resource)}&box_type=${encodeURIComponent(
+        el(modal.type).value
+      )}`
+    );
+    box.checked = !!answer.index_it;
+    if (reason) {
+      reason.textContent = answer.reason;
+      reason.hidden = false;
+    }
+    remembered.key = key;
+    remembered.touched = false;
+  } catch {
+    if (reason) reason.hidden = true; // the box still works; the explanation is a courtesy
+  }
+}
+
+/** Where the index stands for one resource, in the fewest honest words. */
+function indexStateSentence(record) {
+  if (!record.index_it) return "left out of the full-text search";
+  if (record.stale) return "in the index, but the file has changed since — it needs reading again";
+  if (!record.indexed_at) return "asked for, and not read into the index yet";
+  return `in the index since ${record.indexed_at.replace("T", " ").replace(/\+.*$/, "")}`;
+}
+
+function wireIndexChoice(which, modal) {
+  const box = el(modal.index);
+  if (!box) return;
+  box.addEventListener("change", () => {
+    indexChoice[which].touched = true;
+    const reason = el(modal.indexReason);
+    if (reason && !reason.hidden) {
+      reason.textContent = box.checked
+        ? "asked for by hand: this file will be read into the index"
+        : "turned off by hand: this file will not be searched by what it says";
+    }
+  });
+  el(modal.resource).addEventListener("input", () => refreshIndexChoice(which, modal));
+}
+
 function registerConfigForm(typeKey, form) {
   configForms.set(typeKey, form);
 }
@@ -1059,6 +1146,7 @@ async function submitNewBox(event) {
     parent: value("nb-parent") || null,
     cell: state.pendingCell || null,
     place: state.pendingPlace || null,
+    index_resource: el("nb-index") ? el("nb-index").checked : null,
     config: {},
   };
   try {
@@ -1133,6 +1221,8 @@ async function init() {
 
   fillTypeChoices();
   wireTypeFilters();
+  wireIndexChoice("create", CREATE_MODAL);
+  wireIndexChoice("edit", EDIT_MODAL);
   el("search").addEventListener("input", () => refreshSide());
   el("search-form").addEventListener("submit", (event) => {
     event.preventDefault();

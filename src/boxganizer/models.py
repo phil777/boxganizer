@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from boxganizer import resources
 from boxganizer.errors import InvalidBoxName
 
 #: Longest name we accept. Longer strings are almost certainly a paste accident.
@@ -62,6 +63,11 @@ class Box:
     #: the store: two boxes on one file get the same id, and one file means one entry in
     #: the full-text index and one set of observations about whether it has changed.
     resource_id: int | None = None
+    #: The resource row itself, when there is one: where it lives, whether its text is
+    #: kept in the index, and whether what is in the index still matches what is there.
+    #: Filled from the same query that reads the box, so a list of 500 of them costs
+    #: nothing extra and `box show` can say what the index knows.
+    resource: resources.Resource | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     #: Type-specific settings. Arbitrary JSON, unlike the flat string metadata.
     config: dict[str, Any] = field(default_factory=dict)
@@ -112,6 +118,7 @@ class Box:
             "box_type": self.box_type,
             "resource_uri": self.resource_uri,
             "resource_id": self.resource_id,
+            "resource": self.resource.as_dict() if self.resource is not None else None,
             "metadata": dict(self.metadata),
             "config": dict(self.config),
             "created_at": self.created_at.isoformat(),

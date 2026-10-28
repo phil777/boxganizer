@@ -91,9 +91,36 @@ word-to-synonyms object, and is merged with the words that ship with Boxganizer:
 {"annex": ["outbuilding", "wing"], "soho": ["london office"]}
 ```
 
-The index lives in the database while the files do not, so three ordinary things empty
-it: a library copied to another machine, a database written before the index existed,
-and a file edited outside Boxganizer. `box index` makes the rows true again.
+The index lives in the database while the files do not, so three ordinary things make
+them disagree: a library copied to another machine, a database written before the index
+existed, and a file edited outside Boxganizer.
+
+```bash
+box index                                    # read everything wanted again
+box index --check                            # only look: which files changed since
+box index --stale                            # read those alone
+box index --add Ledger-csv                   # this file, whatever its type says
+box index --drop Huge-log                    # and not this one
+```
+
+What is indexed is decided per **resource**, not per box, and the dialog says so as you
+fill it in — a tick box, with the reason beside it:
+
+> ☑ Keep this file in the full-text search index
+> *a file whose ending says words*
+
+The default comes from the core (a text or PDF box, or a local file whose ending says
+words: yes; a picture, a web page, an MQTT topic: no), and the tick is yours to
+overrule. `box show NAME` then tells you where the index stands — in it since when,
+`CHANGED since it was indexed`, or `left out of the search` — which is the difference
+between a box that is not in the results and a search that is not working.
+
+Two boxes pointing at one file share one resource row, so the file is read, hashed and
+watched once, and `box search` offers both boxes with the same passage. The address is
+normalised before it is compared, so `/a/../a.txt`, `./a.txt` written from `/a` and
+`file:///a/a.txt` are one thing. Deleting a box lets its resource go; the row and its
+indexed text are dropped only when nothing points at the file any more — and the file
+itself is nobody's to delete.
 
 `box edit` writes the whole row to a temporary YAML file, opens `$EDITOR` (or
 `--editor "nano"`), then reads it back and saves. `metadata` and `config` are

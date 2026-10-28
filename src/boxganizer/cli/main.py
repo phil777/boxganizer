@@ -35,6 +35,7 @@ from boxganizer import (
     infer,
     mqtt,
     paths,
+    resources,
     ssh,
     thumbs,
 )
@@ -122,6 +123,25 @@ def _resolve_parent(
     if not store.exists(chosen):
         raise typer.BadParameter(f"no box named {chosen!r} to put it in")
     return chosen
+
+
+def _index_state(box: Box) -> str:
+    """What the full-text index knows about this box's file, on one line.
+
+    Said because a box that does not turn up in a search is otherwise impossible to
+    tell apart from a search that does not work: this says whether the file is in the
+    index, when it was read, and when it has changed since.
+    """
+    record = box.resource
+    if record is None:
+        return ""
+    if not record.index_it:
+        return "left out of the search (box index --add " + box.name + " to include it)"
+    if record.stale:
+        return "CHANGED since it was indexed - box index --stale reads it again"
+    if not record.indexed:
+        return "asked for, not read yet - box index reads it"
+    return "in the index since " + str(record.indexed_at)
 
 
 def _parse_metadata(items: Sequence[str]) -> dict[str, str]:
@@ -322,6 +342,9 @@ def box_show(
         # it listens, not the password.
         shown = mqtt.redact(box.resource_uri) if _listens_mqtt(box) else box.resource_uri
         lit(f"  resource : {shown}")
+        index_note = _index_state(box)
+        if index_note:
+            lit(f"  index    : {index_note}")
     for key, value in sorted(box.metadata.items()):
         lit(f"  {key} = {value}")
     if box.config:
@@ -470,17 +493,59 @@ def box_index(
         ),
     ] = None,
     show_skipped: Annotated[int, typer.Option("--show-skipped", min=0, max=200)] = 10,
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Only look at the files; say which have changed."),
+    ] = False,
+    only_stale: Annotated[
+        bool,
+        typer.Option("--stale", help="Re-read only the files something was noticed about."),
+    ] = False,
+    add: Annotated[
+        list[str] | None,
+        typer.Option("--add", help="Put these boxes' files in the index, whatever their type."),
+    ] = None,
+    drop: Annotated[
+        list[str] | None,
+        typer.Option("--drop", help="Take these boxes' files out of the index."),
+    ] = None,
 ) -> None:
-    """Read every text and PDF box again into the full-text index.
+    """Read what the index is wanted for, or ask which files have changed.
 
-    The index lives in the database and the files do not, so three ordinary things
-    empty it: a library copied to another machine, a database written before the index
-    existed, and a file edited outside Boxganizer. This makes the rows true again in
-    one go. Boxes created or edited afterwards are indexed on the spot.
+    The index lives in the database and the files do not, so three ordinary things make
+    them disagree: a library copied to another machine, a database written before the
+    index existed, and a file edited outside Boxganizer. Run plainly, this reads
+    everything wanted again. With --check it only stats the wanted files and says which
+    have changed — no reading, cheap enough for a timer — and --stale then reads those
+    alone. --add and --drop are the same decision the dialog's checkbox makes, from the
+    terminal, for a file whose type did not guess right.
     """
     confine = paths.content_root(root)
+    wanted_in = add or []
+    wanted_out = drop or []
     with _open(ctx, _db_of(ctx)) as store:
-        report = text_search.rebuild(store, root=confine)
+        if wanted_in or wanted_out:
+            for name in wanted_in:
+                _opt_in_out(store, name, True, confine)
+            for name in wanted_out:
+                _opt_in_out(store, name, False, confine)
+            lit(f"  {store.indexed_count()} files now in the index")
+            return
+
+        if check:
+            stale = store.check_observations()
+            if not stale:
+                say("checked", "nothing has changed since the index was built")
+                return
+            say("checked", f"{len(stale)} file(s) changed since they were indexed")
+            for item in stale[:show_skipped]:
+                lit(f"  {resources.display(item.reference)}")
+            if len(stale) > show_skipped:
+                lit(f"  … and {len(stale) - show_skipped} more")
+            lit("  read them again with: box index --stale")
+            return
+
+        report = text_search.rebuild(store, root=confine, only_stale=only_stale)
         say("indexed", report.summary())
         lit(f"  reading inside {confine}")
         for name, note in report.skipped[:show_skipped]:
@@ -488,6 +553,20 @@ def box_index(
         if len(report.skipped) > show_skipped:
             lit(f"  … and {len(report.skipped) - show_skipped} more nothing-to-read")
         lit(f"  {store.indexed_count()} files now in the index")
+
+
+def _opt_in_out(store: BoxStore, name: str, wanted: bool, confine: Path) -> None:
+    """Set one box's file wishing to be in the index, and act on it now."""
+    box = store.get(name)
+    changed = store.set_index_flag(box, wanted)
+    if changed is None:
+        lit(f"  {box.name} points at nothing, so the index has no say about it")
+        return
+    lit(f"  {box.name}: {'in' if wanted else 'out of'} the index")
+    if wanted:
+        note = text_search.sync_resource(store, changed.id, root=confine)
+        if note:
+            lit(f"    not read: {note}")
 
 
 @app.command("rm")

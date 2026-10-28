@@ -152,6 +152,25 @@ def display(reference: str) -> str:
     return name or reference.strip()
 
 
+def why_indexed(reference: str, *, indexes_content: bool = False) -> tuple[bool, str]:
+    """Whether to read this, and the sentence that explains the answer.
+
+    The page shows the reason beside the checkbox, because a box that is silently left
+    out of the search is indistinguishable from a search that is broken.
+    """
+    if indexes_content:
+        return True, "this kind of box holds words, so its file is read into the index"
+    where = origin_of(reference)
+    if where == REMOTE:
+        return False, "a remote thing is fetched by the box that points at it, not indexed"
+    if not (reference or "").strip():
+        return False, "there is nothing to read yet"
+    if index_by_default(reference, origin=where):
+        return True, "a file whose ending says words"
+    suffix = Path(normalise(reference)).suffix.lower() or "has no ending"
+    return False, f"a {suffix} file is not words, so it is left out unless asked for"
+
+
 @dataclass(frozen=True)
 class Fingerprint:
     """What a local file looked like at the moment it was last read.

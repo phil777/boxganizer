@@ -679,6 +679,31 @@ class BoxStore:
         return self._resource_from_row(rows[0]) if rows else None
 
     @staticmethod
+    def _resource_from_joined(row: sqlite3.Row) -> resources.Resource | None:
+        """The resource of a box, from the columns the box query already joined in.
+
+        Those columns are aliased (`res_id`, `res_origin`, …) because a box row and a
+        resource row have `id` in common, so this reads the aliases rather than reusing
+        :meth:`_resource_from_row`, which reads a `resources` row whole.
+        """
+        keys = row.keys()
+        if "res_id" not in keys or row["res_id"] is None:
+            return None
+        return resources.Resource(
+            id=int(row["res_id"]),
+            reference=str(row["resource_uri"] or ""),
+            origin=str(row["res_origin"]),
+            index_it=bool(row["res_index_it"]),
+            indexed_at=str(row["res_indexed_at"]) if row["res_indexed_at"] else None,
+            fingerprint=resources.Fingerprint(
+                mtime=float(row["res_mtime"]) if row["res_mtime"] is not None else None,
+                bytes=int(row["res_bytes"]) if row["res_bytes"] is not None else None,
+                digest=str(row["res_digest"]) if row["res_digest"] else None,
+            ),
+            marked_stale=bool(row["res_stale"]),
+        )
+
+    @staticmethod
     def _resource_from_row(row: sqlite3.Row) -> resources.Resource:
         return resources.Resource(
             id=int(row["id"]),
@@ -705,6 +730,11 @@ class BoxStore:
         self, ref: int | str | os.PathLike[str] | Box, index_it: bool
     ) -> resources.Resource | None:
         """Opt a resource in or out of the full-text index, and act on it.
+
+        A `Box` is accepted because that is what the interfaces hold; a box is not an
+        address, and passing one where an address is meant would look up a resource by
+        the box's uuid and find nothing — which is a silent no, not an error.
+
 
         Opting out takes its text out of the index at once, so a search cannot go on
         finding a file somebody asked not to read; opting in is answered by the caller
@@ -1093,6 +1123,7 @@ class BoxStore:
             box_type=str(row["box_type"]),
             resource_uri=row["resource_uri"],
             resource_id=int(row["resource_id"]) if row["resource_id"] is not None else None,
+            resource=BoxStore._resource_from_joined(row),
             metadata={str(k): str(v) for k, v in metadata.items()},
             config=dict(config),
             created_at=datetime.fromisoformat(row["created_at"]),

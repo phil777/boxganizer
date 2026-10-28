@@ -27,6 +27,7 @@ from boxganizer import (
     mindmap,
     mqtt,
     paths,
+    resources,
     ssh,
     thumbs,
 )
@@ -81,6 +82,11 @@ class BoxUpdate(BaseModel):
     resource_uri: Annotated[str | None, Field(max_length=2000)] = None
     metadata: dict[str, Any] | None = None
     config: dict[str, Any] | None = None
+    index_resource: bool | None = Field(
+        default=None,
+        description="Change whether this box's file is kept in the full-text index."
+        " Omitted: leave the resource row as it is.",
+    )
 
 
 class DesktopSpot(BaseModel):
@@ -111,6 +117,12 @@ class BoxCreate(BaseModel):
     )
     place: DesktopSpot | None = Field(
         default=None, description="{x, y} when the parent arranges its icons."
+    )
+    index_resource: bool | None = Field(
+        default=None,
+        description="Keep this box's file in the full-text index. Omitted: the default"
+        " for what it points at — a text or PDF, and a local file whose ending says"
+        " words, yes; anything else no.",
     )
 
 
@@ -555,6 +567,40 @@ def create_app(
         result = ssh.run(box, payload.command, timeout=payload.timeout)
         return result.as_dict()
 
+    @app.get("/api/index-suggestion")
+    def index_suggestion(
+        store: StoreDep,
+        resource: Annotated[str, Query(description="The address the dialog holds.")],
+        box_type: Annotated[str, Query(description="The type the dialog holds.")] = "box",
+    ) -> dict[str, object]:
+        """What the dialog's indexing checkbox should be set to, and why.
+
+        Asked of the core rather than decided in the page, so the rule lives in one
+        place: a checkbox whose default is guessed at in JavaScript is a rule that
+        quietly disagrees with the server by the next release.
+        """
+        kind = boxtypes.get(box_type) if boxtypes.known(box_type) else None
+        wanted, reason = resources.why_indexed(
+            resource, indexes_content=bool(kind and kind.indexes_content)
+        )
+        existing = store.resource(resource) if resource.strip() else None
+        if existing is not None:
+            # A file another box already points at keeps the answer that was given for
+            # it: the checkbox is about this resource, and two boxes cannot have two
+            # different opinions about whether one file is in the index.
+            return {
+                "index_it": existing.index_it,
+                "reason": (
+                    "this file is already in the search index, for every box that points"
+                    " at it"
+                    if existing.index_it
+                    else "this file is kept out of the search index, for every box that"
+                    " points at it"
+                ),
+                "shared": True,
+            }
+        return {"index_it": wanted, "reason": reason, "shared": False}
+
     @app.get("/api/boxes/{ref}/mindmap")
     def read_mindmap(ref: str, store: StoreDep) -> dict[str, object]:
         """The map: the tree below this box, each node carrying its side and children.
@@ -962,7 +1008,7 @@ def create_app(
         if payload.icon is None:
             boxtypes.adopt_type_icon(box)
             thumbs.icon_from_resource(box)
-        saved = store.add(box)
+        saved = store.add(box, index_it=payload.index_resource)
         # A text or PDF box goes into the full-text index the moment it exists, so it
         # is findable by what it says without anyone remembering to rebuild anything.
         text_search.sync(store, saved, root=getattr(request.app.state, "content_root", None))
@@ -1015,7 +1061,7 @@ def create_app(
             box.metadata = dict(data["metadata"])
         if "config" in data and data["config"] is not None:
             box.config = dict(data["config"])
-        saved = store.update(box)
+        saved = store.update(box, index_it=payload.index_resource)
         # The same rule as on creation, in both directions: a box retyped away from
         # text, or pointed at another file, has its indexed text replaced or removed.
         text_search.sync(store, saved, root=getattr(request.app.state, "content_root", None))

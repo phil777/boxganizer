@@ -2236,3 +2236,82 @@ def test_nothing_is_the_default_parent_of_a_new_box(client: TestClient) -> None:
     assert "if (preferred) select.value = preferred;" in fill
     # the empty choice is still offered first, and still says what it means
     assert 'none.textContent = "(no parent)";' in script
+
+
+def test_the_dialog_asks_the_core_about_indexing_rather_than_guessing(
+    client: TestClient,
+) -> None:
+    """The checkbox's default is one rule in one place, not two that drift."""
+    script = client.get("/static/app.js").text
+    page = client.get("/").text
+    assert "/api/index-suggestion" in script
+    assert 'id="nb-index"' in page and 'id="eb-index"' in page
+    assert 'id="nb-index-reason"' in page and 'id="eb-index-reason"' in page
+    # both dialogs carry the answer out to the server
+    assert 'payload.index_resource = el(EDIT_MODAL.index).checked;' in script
+    assert 'index_resource: el("nb-index") ? el("nb-index").checked : null,' in script
+
+
+def test_the_index_suggestion_endpoint_answers_for_the_thing_pointed_at(
+    client: TestClient, tmp_path: Path
+) -> None:
+    answer = client.get(
+        "/api/index-suggestion", params={"resource": "", "box_type": "folder"}
+    ).json()
+    assert answer["index_it"] is False
+    assert "nothing to read" in answer["reason"]
+
+    text = client.get(
+        "/api/index-suggestion", params={"resource": "/x/y.md", "box_type": "folder"}
+    ).json()
+    assert text["index_it"] is True
+
+    picture = client.get(
+        "/api/index-suggestion", params={"resource": "/x/y.png", "box_type": "image"}
+    ).json()
+    assert picture["index_it"] is False
+
+    remote = client.get(
+        "/api/index-suggestion", params={"resource": "https://x/y.txt", "box_type": "web"}
+    ).json()
+    assert remote["index_it"] is False and "remote" in remote["reason"]
+
+    # a type that exists to hold words says so whatever the file is called
+    by_type = client.get(
+        "/api/index-suggestion", params={"resource": "/x/no-extension", "box_type": "text"}
+    ).json()
+    assert by_type["index_it"] is True
+
+
+def test_a_shared_file_answers_with_the_decision_already_made(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Two boxes cannot hold two opinions about whether one file is in the index."""
+    from boxganizer import resources
+    from boxganizer.models import Box
+
+    store = client.app.state.store
+    notes = tmp_path / "shared-notes.txt"
+    notes.write_text("one file two boxes", encoding="utf-8")
+    store.content_root = tmp_path
+    store.add(Box(name="Holder", box_type="folder", resource_uri=str(notes)), index_it=False)
+
+    answer = client.get(
+        "/api/index-suggestion", params={"resource": str(notes), "box_type": "text"}
+    ).json()
+    assert answer["shared"] is True
+    assert answer["index_it"] is False, "the text type does not overrule what was settled"
+    assert resources.origin_of(str(notes)) == resources.LOCAL
+
+
+def test_a_box_arrives_with_what_the_index_thinks_of_it(client: TestClient) -> None:
+    """No extra query: the resource columns ride along on the box query."""
+    from boxganizer.models import Box
+
+    store = client.app.state.store
+    store.add(Box(name="Unindexed", box_type="folder"))
+    payload = client.get("/api/boxes/Unindexed").json()
+    assert payload["resource"] is None and payload["resource_id"] is None
+
+    answer = client.get("/api/search?q=Unindexed").json()
+    assert answer[0]["resource"] is None
