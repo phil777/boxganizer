@@ -58,7 +58,7 @@ other boxes. Rules in brackets are enforced by the store.
       - `manual-graph` ✍️ Manual Graph
       - `parental-graph` 🌳 Parental Graph
     - `dashboard` 📊 Dashboard
-    - `checklist` ✅ Checklist
+    - `checklist` 📋 Checklist
   - `viewport` 🎛️ Viewport — group
     - `simple-viewport` 👁️ Simple Viewport
     - `tiling-viewport` 🔷 Tiling Viewport
@@ -183,7 +183,12 @@ Two mistakes the registry already catches for you: a subclass that forgets
 * `Graph` and `ViewportBox` overlap: both show other boxes rather than holding
   them. Kept separate for now, because a graph may be edited and a viewport may
   not.
-* Where checklist ticks live: this scaffold says `metadata["done"]` on the child.
+* Where checklist ticks live: in the checklist's own file, as `- [ ]` / `- [x]` task
+  markers. Not on the child boxes: a list of things to do is mostly made of things that
+  are not boxes, and a tick that lives on a box cannot be searched by what it says. A
+  child box may be hung on one item — drawn as an icon at the right of that line, written
+  in the file as `[📦 Name](boxganizer:uuid)` — and a child on no item is shown as
+  unattached rather than hidden.
 
 ## Types boxganizer 2 added
 

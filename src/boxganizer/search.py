@@ -233,7 +233,7 @@ def extract_resource(
     if not raw:
         return Extracted(note="the resource holds no address")
     where = origin or address.origin_of(raw)
-    if where != address.LOCAL:
+    if where == address.REMOTE:
         return Extracted(note=f"a {where} resource is read by the box that points at it, not here")
 
     scheme, sep, rest = raw.partition("://")
@@ -241,9 +241,14 @@ def extract_resource(
         target = Path(rest if rest.startswith("/") else f"/{rest}")
     else:
         target = Path(raw)
-    confine = paths.content_root(root)
-    if not paths.inside(target, confine):
-        return Extracted(note=f"{target} is outside {confine}")
+    # A file Boxganizer wrote — a note, a checklist — is read on its own terms. The
+    # content confine is a rule about what other people's paths may be opened, and
+    # routinely names one project directory; holding it over the library's own files
+    # would quietly make every note unindexable.
+    if where != address.GENERATED:
+        confine = paths.content_root(root)
+        if not paths.inside(target, confine):
+            return Extracted(note=f"{target} is outside {confine}")
     try:
         if not target.is_file():
             return Extracted(note="the file is not there any more")
@@ -465,9 +470,7 @@ def fuzzy_forms(term: str, vocabulary: tuple[str, ...] | list[str]) -> tuple[str
         near = [
             word
             for word in vocabulary
-            if len(word) >= len(probe) - 2
-            and len(word) <= len(probe) + 2
-            and word[:1] == probe[:1]
+            if len(word) >= len(probe) - 2 and len(word) <= len(probe) + 2 and word[:1] == probe[:1]
         ]
         for word in get_close_matches(probe, near, n=MAX_FUZZY_ALTERNATIVES, cutoff=FUZZY_CUTOFF):
             if word != term and not _shares_a_stem(term, word) and word not in found:
@@ -642,7 +645,8 @@ def sync_resource(store: Any, resource_id: int, *, root: Path | str | None = Non
     if resource.indexed and resource.stale() is False:
         return ""  # same file, same index: nothing to do, and nothing read to find out
     found = extract_resource(
-        resource.reference, root=root if root is not None else _confine_of(store),
+        resource.reference,
+        root=root if root is not None else _confine_of(store),
         origin=resource.origin,
     )
     seen = address.stat(resource.reference)

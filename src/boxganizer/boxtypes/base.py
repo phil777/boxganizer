@@ -80,6 +80,11 @@ class BoxType:
     #: True when the type draws its children as a growing map of nodes, which is the
     #: question the mindmap endpoints ask before answering. See `boxganizer.mindmap`.
     maps_nodes: ClassVar[bool] = False
+    #: True when the type keeps words of its own, in a file Boxganizer writes beside the
+    #: database. Such a box needs no resource when it is made: it is given one the first
+    #: time there is something to keep, and that resource is what puts the words in the
+    #: search index. See `boxganizer.authored`.
+    writes_own_file: ClassVar[bool] = False
     #: What this type is meant to do once it is built. Empty means: already does all it claims.
     planned: ClassVar[str] = ""
 
@@ -159,6 +164,7 @@ class BoxType:
             "filter_is_fixed": cls.filter_is_fixed,
             "arranges_icons": cls.arranges_icons,
             "maps_nodes": cls.maps_nodes,
+            "writes_own_file": cls.writes_own_file,
             "indexes_content": cls.indexes_content,
             "parent": parent.key if parent is not None else None,
             "ancestors": [ancestor.key for ancestor in registry.ancestors_of(cls)],

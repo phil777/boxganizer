@@ -132,8 +132,10 @@ def index_by_default(reference: str, *, origin: str | None = None) -> bool:
     business, not the indexer's.
     """
     where = origin or origin_of(reference)
-    if where != LOCAL:
+    if where == REMOTE:
         return False
+    # `generated` (a note, a checklist) is a local file by any sensible default, and the
+    # ending decides the rest.
     path = Path(normalise(reference))
     return path.suffix.lower() in INDEXABLE_SUFFIXES
 
@@ -243,7 +245,9 @@ class Resource:
         ``True`` covers a file that has gone away: what is in the index is certainly
         not what is on disk.
         """
-        if self.origin != LOCAL or not self.index_it:
+        # A file Boxganizer wrote is watched exactly like one it merely points at: it is
+        # on disk, someone may edit it in a text editor, and the index should notice.
+        if self.origin not in (LOCAL, GENERATED) or not self.index_it:
             return None
         if self.marked_stale and not self.indexed:
             return None

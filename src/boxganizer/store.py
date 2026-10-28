@@ -647,6 +647,23 @@ class BoxStore:
             lastrowid=True,
         )
 
+    def register_resource(
+        self,
+        reference: str,
+        *,
+        origin: str | None = None,
+        index_it: bool | None = None,
+    ) -> resources.Resource | None:
+        """Adopt an address as a resource row, and return it.
+
+        The door other modules use when a box is given a file of its own. It is the same
+        `_ensure_resource` every other write goes through — one address, one row — named
+        so that a caller outside this class is not reaching into a private method to do
+        something the schema's whole point depends on.
+        """
+        resource_id = self._ensure_resource(reference, origin=origin, index_it=index_it)
+        return None if resource_id is None else self.resource(int(resource_id))
+
     def _release_resource(self, resource_id: int) -> None:
         """Let go of a resource one box stopped pointing at.
 

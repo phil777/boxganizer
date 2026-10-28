@@ -1127,3 +1127,191 @@ pre.text {
 
 .cell-content .markdown-bar { display: none; }
 .cell-content .markdown-view { height: 100%; }
+
+/* -- checklists ------------------------------------------------------------
+   A line is one flex row: tick, words that take the room, icons at the right
+   end of the same line, and the remove button last. The icons are centred
+   against the line's height, not the page's, which is what "on the same line
+   as the item but right centred" asks for. */
+.checklist-view {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 12px;
+  min-height: 100%;
+  overflow: auto;
+}
+.checklist-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.checklist-tally {
+  font-weight: 600;
+}
+.checklist-status {
+  font-size: 0.8em;
+}
+.checklist-title {
+  font: inherit;
+  font-weight: 600;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line, #444);
+  color: inherit;
+  padding: 2px 0;
+}
+.checklist-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.checklist-item {
+  position: relative; /* the remove button hangs off the corner, see below */
+  display: flex;
+  align-items: center; /* the icons sit centred on the line they belong to */
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  margin-left: calc(var(--depth, 0) * 18px);
+}
+.checklist-item:hover {
+  background: color-mix(in srgb, currentColor 7%, transparent);
+}
+.checklist-item.is-target {
+  outline: 2px dashed var(--accent, #e03e2f);
+  outline-offset: -2px;
+}
+.checklist-tick {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent, #e03e2f);
+  cursor: pointer;
+}
+.checklist-words {
+  flex: 1 1 auto;
+  min-width: 40px;
+  outline: none;
+  word-break: break-word;
+}
+.checklist-words:focus {
+  border-bottom: 1px solid var(--accent, #e03e2f);
+}
+.checklist-item.is-done .checklist-words {
+  text-decoration: line-through;
+  opacity: 0.62;
+}
+.checklist-item.is-prose .checklist-words {
+  font-style: italic;
+  opacity: 0.85;
+}
+.checklist-icons {
+  display: flex;
+  align-items: center; /* right centred on the item, not top-aligned */
+  gap: 4px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  /* room for the remove button to appear over the corner without covering an icon */
+  margin-right: 18px;
+}
+.checklist-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font: inherit;
+  font-size: 0.85em;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--line, #555);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+  cursor: grab;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.checklist-chip.is-gone {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+.checklist-detach {
+  margin-left: 3px;
+  opacity: 0;
+  cursor: pointer;
+  font-weight: 700;
+}
+.checklist-chip:hover .checklist-detach {
+  opacity: 0.7;
+}
+.checklist-remove {
+  /* Out of the row's flow on purpose. A button that takes width here would push the
+     icons away from the right end of the line — and "icons at the right of the item" is
+     what the line is read by. It appears over the corner on hover. */
+  position: absolute;
+  right: 1px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 0;
+  background: none;
+  color: inherit;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 1.1em;
+  line-height: 1;
+}
+.checklist-item:hover .checklist-remove {
+  opacity: 0.55;
+}
+.checklist-empty {
+  list-style: none;
+  padding: 8px 4px;
+  font-style: italic;
+}
+.checklist-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.checklist-add-input {
+  flex: 1 1 auto;
+  font: inherit;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--line, #555);
+  background: transparent;
+  color: inherit;
+}
+.checklist-add-button {
+  font: inherit;
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--line, #555);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+  cursor: pointer;
+}
+.checklist-filed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line, #444);
+  font-size: 0.9em;
+}
+.checklist-hint {
+  font-size: 0.85em;
+  font-style: italic;
+}
+.cell-content .checklist-view {
+  overflow: hidden;
+  padding: 4px;
+}

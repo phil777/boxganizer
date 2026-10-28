@@ -2346,3 +2346,58 @@ def test_the_rendered_page_does_not_build_html_from_a_file(client: TestClient) -
     view = script[start : script.index('registerView("markdown"', start)]
     inner_html = [line.strip() for line in view.splitlines() if "innerHTML" in line]
     assert inner_html == ["body.innerHTML = answer.html;"]
+
+
+def test_the_checklist_view_is_a_list_you_can_act_on(client: TestClient) -> None:
+    """The page keeps its own shape: ticks, lines, icons at the right of the line."""
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    assert 'registerView("checklist", {' in script
+    assert "async function checklistView" in script
+    for needle in (
+        ".checklist-tick",
+        ".checklist-words",
+        ".checklist-icons",
+        ".checklist-chip",
+        ".checklist-filed",
+    ):
+        assert needle in css, needle
+    # the icons are pushed to the right end of the line they belong to, and centred on it
+    icons = css[css.index(".checklist-icons {") : css.index(".checklist-chip {")]
+    assert "margin-left: auto;" in icons
+    assert "align-items: center;" in icons
+    # a line's remove button must not eat the space the icons are measured against
+    start = css.index(".checklist-remove {")
+    remove = css[start : css.index(".checklist-item:hover .checklist-remove", start)]
+    assert "position: absolute;" in remove
+
+
+def test_the_checklist_sends_the_whole_list_and_no_html_is_built_from_it(
+    client: TestClient,
+) -> None:
+    """Saving replaces the file; nothing a person typed becomes markup."""
+    script = client.get("/static/app.js").text
+    start = script.index("async function checklistView")
+    view = script[start : script.index('registerView("checklist"', start)]
+    assert "api.saveChecklist(box.uuid, title, items.map(shape))" in view
+    assert "innerHTML" not in view
+    assert "textContent" in view
+    # a box dropped on a line is dropped by uuid, the same currency every view uses
+    assert 'event.dataTransfer.getData("text/plain")' in view
+
+
+def test_a_box_dropped_on_a_line_files_it_there(client: TestClient) -> None:
+    """The drop is the whole gesture: the icon appears, and the save files the box."""
+    store = client.app.state.store
+    box = store.add(Box(name="Spring", box_type="checklist"))
+    part = store.add(Box(name="Elbow", box_type="folder"))
+    script = client.get("/static/app.js").text
+    view = script[script.index("async function checklistView") :]
+    view = view[: view.index('registerView("checklist"')]
+    assert "item.refs.push(uuid)" in view
+    # and the server agrees, without a second call from the page
+    answer = client.put(
+        f"/api/boxes/{box.uuid}/checklist",
+        json={"items": [{"text": "Buy", "refs": [part.uuid]}]},
+    )
+    assert answer.json()["attached"] == [part.uuid]

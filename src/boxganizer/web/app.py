@@ -273,6 +273,30 @@ def _store_of(request: Request) -> BoxStore:
     return store
 
 
+class ChecklistItem(BaseModel):
+    """One line of a checklist, as the page holds it."""
+
+    text: str = ""
+    checked: bool = False
+    depth: int = 0
+    #: `box` is a tickable item; `text` is a line of prose kept between them.
+    kind: str = "box"
+    #: Boxes hung on this line, in order. See :mod:`boxganizer.checklist`.
+    refs: list[str] = []
+
+
+class ChecklistWrite(BaseModel):
+    """The whole list. The page sends what it shows, and the file becomes that.
+
+    Replacing the list rather than patching it is deliberate: the file is the list, the
+    page holds the file, and a set of granular edits would be a second order of operations
+    to keep in step with a text editor that changes the same file between saves.
+    """
+
+    title: str = ""
+    items: list[ChecklistItem] = []
+
+
 StoreDep = Annotated[BoxStore, Depends(_store_of)]
 
 
@@ -556,9 +580,7 @@ def create_app(
         }
 
     @app.post("/api/boxes/{ref}/ssh/run")
-    def run_ssh(
-        ref: str, payload: SshRun, store: StoreDep
-    ) -> dict[str, object]:
+    def run_ssh(ref: str, payload: SshRun, store: StoreDep) -> dict[str, object]:
         """Run one command on the far side and bring back what it printed.
 
         There is no session behind this: each command is one `ssh`, started and finished,
@@ -567,6 +589,145 @@ def create_app(
         box = _ssh_box(store, ref)
         result = ssh.run(box, payload.command, timeout=payload.timeout)
         return result.as_dict()
+
+    def _checklist_box(store: BoxStore, ref: str) -> Box:
+        """A box whose type keeps words of its own.
+
+        Asked of the type rather than compared with the string `"checklist"`, so a note
+        type — which keeps a file the same way — answers to the same endpoints.
+        """
+        box = store.resolve(ref)
+        if not boxtypes.get(box.box_type).writes_own_file:
+            raise HTTPException(
+                status_code=415,
+                detail={"error": "not_a_checklist", "type": box.box_type},
+            )
+        return box
+
+    def _checklist_file(store: BoxStore, box: Box, *, seed: str) -> Path:
+        """The box's own file, written if this is the first thing on it.
+
+        Creating it is what gives the box a resource: the row is the handle the index keys on,
+        so a checklist that exists only in the database would be a list nobody can search.
+        """
+        from boxganizer import authored
+
+        target = authored.ensure_file(store.path, box.uuid, seed=seed)
+        if (box.resource_uri or "") != str(target):
+            # The row is made first, with the origin that says Boxganizer wrote this file,
+            # and then the box is pointed at it: `update` finds the row by its normalised
+            # address and leaves the origin it was given alone.
+            record = authored.adopt(store, box, target, seed=seed)
+            box.resource_uri = str(target)
+            store.update(box)
+            box.resource = record
+        return target
+
+    @app.get("/api/boxes/{ref}/checklist")
+    def checklist_get(ref: str, request: Request, store: StoreDep) -> dict[str, object]:
+        """The list as it stands, with each attached child resolved to the box it names."""
+        box = _checklist_box(store, ref)
+        from boxganizer import authored
+        from boxganizer import checklist as list_of_things
+
+        target = _checklist_file(store, box, seed=list_of_things.EMPTY)
+        list_ = list_of_things.parse(authored.read(target))
+        children = store.children(box.uuid)
+        by_uuid = {child.uuid: child for child in children}
+
+        def describe(item: list_of_things.Item) -> dict[str, Any]:
+            shape = item.as_dict()
+            shape["attached"] = [
+                {
+                    "uuid": uuid,
+                    "name": by_uuid[uuid].name if uuid in by_uuid else None,
+                    "icon": by_uuid[uuid].icon if uuid in by_uuid else None,
+                    "box_type": by_uuid[uuid].box_type if uuid in by_uuid else None,
+                    "gone": uuid not in by_uuid,
+                }
+                for uuid in item.refs
+            ]
+            return shape
+
+        referenced = set(list_of_things.referenced(list_))
+        return {
+            "uuid": box.uuid,
+            "name": box.name,
+            "title": list_.title,
+            "items": [describe(item) for item in list_.items],
+            # A child filed here that is on no item is shown, not hidden: nothing filed in a
+            # box should be invisible because the file does not mention it.
+            "unattached": [
+                {
+                    "uuid": child.uuid,
+                    "name": child.name,
+                    "icon": child.icon,
+                    "box_type": child.box_type,
+                }
+                for child in children
+                if child.uuid not in referenced
+            ],
+            "file": str(target),
+            "summary": list_.summary(),
+            "indexed": bool(box.resource_id is not None),
+        }
+
+    @app.put("/api/boxes/{ref}/checklist")
+    def checklist_put(
+        ref: str, body: ChecklistWrite, request: Request, store: StoreDep
+    ) -> dict[str, object]:
+        """Write the list, keep the graph in step with it, and reindex what it now says.
+
+        Every box the file mentions is made a child of this box if it is not one already —
+        that is what a drag from the panel means. Boxes that are children and no longer
+        mentioned stay children: taking an icon off a line is not the same as throwing the
+        box away, and the page shows them as unattached.
+        """
+        box = _checklist_box(store, ref)
+        from boxganizer import authored
+        from boxganizer import checklist as list_of_things
+        from boxganizer import search as text_search
+
+        target = _checklist_file(store, box, seed=list_of_things.EMPTY)
+        names = {child.uuid: child.name for child in store.children(box.uuid)}
+        list_ = list_of_things.Checklist(
+            title=body.title,
+            items=[
+                list_of_things.Item(
+                    text=item.text,
+                    checked=item.checked,
+                    depth=max(0, item.depth),
+                    kind=item.kind,
+                    refs=list(dict.fromkeys(item.refs)),
+                )
+                for item in body.items
+            ],
+        )
+        authored.write(store.path, box.uuid, list_of_things.render(list_, labels=names))
+        # The words changed, so the index must change with them — that is the promise the file
+        # is kept for.
+        if box.resource_id is not None:
+            text_search.sync_resource(store, int(box.resource_id))
+        attached: list[str] = []
+        missing: list[str] = []
+        for uuid in list_of_things.referenced(list_):
+            try:
+                store.resolve(uuid)
+            except BoxNotFound:
+                missing.append(uuid)
+                continue
+            store.link(box.uuid, uuid)  # parent first, as the store takes it
+            attached.append(uuid)
+        return {
+            "ok": True,
+            "file": str(target),
+            "items": len(list_.items),
+            "summary": list_.summary(),
+            "attached": attached,
+            # A link naming a box that is not in the library is reported, not deleted: the
+            # file is the person's, and the box may be one rename or one restore away.
+            "unknown": missing,
+        }
 
     @app.get("/api/boxes/{ref}/markdown")
     def read_markdown(request: Request, ref: str, store: StoreDep) -> dict[str, object]:
@@ -618,8 +779,7 @@ def create_app(
             return {
                 "index_it": existing.index_it,
                 "reason": (
-                    "this file is already in the search index, for every box that points"
-                    " at it"
+                    "this file is already in the search index, for every box that points at it"
                     if existing.index_it
                     else "this file is kept out of the search index, for every box that"
                     " points at it"
@@ -670,9 +830,7 @@ def create_app(
         return {"map": mindmap.node(store, box.uuid)}
 
     @app.post("/api/boxes/{ref}/mindmap/order")
-    def move_mindmap_sibling(
-        ref: str, payload: MindmapOrder, store: StoreDep
-    ) -> dict[str, object]:
+    def move_mindmap_sibling(ref: str, payload: MindmapOrder, store: StoreDep) -> dict[str, object]:
         """Move a node up or down among the children it hangs among.
 
         The order is the map's, not the links': what arrived first is rarely the order
@@ -748,9 +906,7 @@ def create_app(
             # A branch off the centre gets its side written down at once. Left to the
             # default it would inherit its position, and the first time a sibling was
             # reordered past it the branch would jump to the other half of the map.
-            holder.config = mindmap.set_side(
-                holder.config, saved.uuid, mindmap.default_side(at)
-            )
+            holder.config = mindmap.set_side(holder.config, saved.uuid, mindmap.default_side(at))
         store.update(holder)
         return {"map": mindmap.node(store, holder.uuid), "node": saved.to_dict()}
 
@@ -1020,9 +1176,7 @@ def create_app(
         return store.update(box).to_dict()
 
     @app.post("/api/boxes", status_code=201)
-    def create_box(
-        request: Request, payload: BoxCreate, store: StoreDep
-    ) -> dict[str, object]:
+    def create_box(request: Request, payload: BoxCreate, store: StoreDep) -> dict[str, object]:
         box = Box(
             name=payload.name,
             description=payload.description,
@@ -1044,9 +1198,7 @@ def create_app(
             if payload.cell is not None:
                 _grid_place(store, payload.parent, saved.uuid, payload.cell)
             elif payload.place is not None:
-                _desktop_place(
-                    store, payload.parent, saved.uuid, payload.place.x, payload.place.y
-                )
+                _desktop_place(store, payload.parent, saved.uuid, payload.place.x, payload.place.y)
         elif payload.place is not None:
             raise HTTPException(
                 status_code=422,

@@ -157,6 +157,7 @@ it. What a box shows depends on what it is:
 | browser, web       | the page, framed; the address bar saves back to the box |
 | mqtt               | the last message on its topic, and every one after it, as the broker sends them. The address is shown with its password hidden, which the box keeps for itself. In a grid cell it is the last value alone: the cell does not listen, the opened box does |
 | ssh                | a console on another machine: the address it goes to, the line to type for a session of your own, a field for one command at a time, and the transcript of what was asked and what answered, exit code and all. Up and down arrows walk what was run here, kept in the box. **There is no password field, and none can be stored** — the type refuses an address carrying one; keys, an agent and `~/.ssh/config` decide who you are. It is a console and not a terminal emulator, and says so on the panel: one command, one answer, no full-screen programs |
+| checklist          | a list to tick. Type under the list and press **Enter** to add a line; click a square to tick it and the count at the top moves. A child box dragged onto a line hangs there as an icon — at the right end of the line, centred on it — and clicking the icon opens that box; lifting it off takes the link and leaves the box filed here. Anything filed in the box but on no line is listed underneath rather than hidden. What you type is written to a file of Boxganizer's own beside the database, in plain `- [ ]` markdown, and reindexed each time it changes, so the items are found by full-text search like the words in any other file |
 | anything else      | its icon, and a detail panel with description, resource, metadata and config |
 
 A box created **from** another box — "New box here" on a folder, "New box in X" in
@@ -186,6 +187,11 @@ the `pip install` line for it.
 The database lives at `$BOXGANIZER_DB`, else
 `$XDG_DATA_HOME/boxganizer/boxes.db`, else `~/.local/share/boxganizer/boxes.db`.
 Point at another file anywhere with `--db path/to/boxes.db`.
+
+Boxes whose words Boxganizer writes itself — a checklist — keep them next to that file, in
+`files/`, one file per box named after the box's uuid. They are markdown, they are indexed
+through a resource row like any other file, and they are not deleted when the box is: the
+row can be re-created, the words cannot.
 
 ## Layout
 

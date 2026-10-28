@@ -135,10 +135,27 @@ class Dashboard(OrganizerBox):
 
 
 class CheckList(OrganizerBox):
-    """Items you tick off."""
+    """A list of things to tick, kept in a file of its own.
+
+    This type used to claim that its children *were* the items and that a tick lived in
+    `metadata["done"]` on each of them. That model cannot hold a list of things that are
+    not boxes — "buy fittings", "call the plumber" — and it cannot be searched by what
+    the items say, so it is gone: **the list is text, and it lives in a file Boxganizer
+    writes beside the database**, in plain task-list markdown (`- [ ]`) that reads in any
+    editor. A resource row points at that file, which is what puts the items into the
+    full-text index, and every edit reindexes it.
+
+    Children are still welcome, and mean what they always meant in this library: boxes
+    filed inside this one. A child can be hung on a particular item, which is written
+    into that line as a link (`[📦 Copper elbow](boxganizer:3f1c…)`) because the links
+    table can say a box is *inside* another box but not *which line of it* it belongs to
+    — and is drawn as an icon at the right end of that line. A child that is on no item is
+    shown as unattached rather than hidden, so nothing filed here is invisible, and a box
+    taken off an item stays a box.
+    """
 
     key: ClassVar[str] = "checklist"
     label: ClassVar[str] = "Checklist"
-    icon: ClassVar[str] = "\u2705"  # ✅
-    summary: ClassVar[str] = "Children are items; the tick lives on the child."
-    planned: ClassVar[str] = "Read and set metadata['done'] on children; show a progress count."
+    icon: ClassVar[str] = "\U0001f4cb"  # 📋
+    summary: ClassVar[str] = "Things to do, ticked as they are done, kept as a file."
+    writes_own_file: ClassVar[bool] = True

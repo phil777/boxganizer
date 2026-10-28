@@ -156,6 +156,12 @@ const api = {
       body: JSON.stringify({ node, with: withBox }),
     }),
   markdown: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/markdown`),
+  checklist: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/checklist`),
+  saveChecklist: (ref, title, items) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/checklist`, {
+      method: "PUT",
+      body: JSON.stringify({ title, items }),
+    }),
   ssh: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/ssh`),
   sshRun: (ref, command, timeout) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/ssh/run`, {
@@ -4103,6 +4109,344 @@ function mindmapToolbar(box, ctx) {
  */
 
 const SSH_MAX_HISTORY = 20;
+
+// -- checklists ---------------------------------------------------------------
+//
+// The items live in a file beside the database — see `boxganizer.checklist` and
+// `boxganizer.authored` — and the page holds a copy of that file as `items`.
+//
+// Every change sends the WHOLE list back, not a patch. That is not laziness: the file is
+// the list, a text editor can be open on it at the same moment, and a set of granular
+// edits (insert at 3, tick 1, move 2) would be a second order of events to reconcile with
+// whoever changed the file meanwhile. Replacing it is the same operation an editor does
+// when it saves, and it is idempotent.
+//
+// A child box is hung on an item by dropping it on that line. The drop writes a link into
+// the line (`[📦 Name](boxganizer:uuid)`) and files the box here; taking the icon off
+// removes only the link. Boxes filed here that are on no line are listed under the list
+// rather than hidden — nothing a person filed in a box should become invisible because a
+// file does not mention it.
+
+const CHECKLIST_SAVE_DELAY = 700; // ms of quiet before the file is written
+
+async function checklistView(canvas, box, ctx, opts = {}) {
+  const token = paneGeneration;
+  let list;
+  try {
+    list = await api.checklist(box.uuid);
+  } catch (error) {
+    canvas.append(emptyMessage(`Cannot read the checklist: ${error.message}`));
+    return;
+  }
+  if (!stillOnScreen(token)) return; // the pane moved on while the file was read
+
+  let items = list.items.map((item) => ({ ...item, refs: [...item.refs] }));
+  let title = list.title || "";
+  let savedAt = null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "checklist-view";
+
+  const head = document.createElement("div");
+  head.className = "checklist-head";
+  const tally = document.createElement("span");
+  tally.className = "checklist-tally";
+  const status = document.createElement("span");
+  status.className = "checklist-status muted";
+  head.append(tally, status);
+  wrap.append(head);
+
+  const titleInput = document.createElement("input");
+  titleInput.type = "text";
+  titleInput.className = "checklist-title";
+  titleInput.placeholder = "what this list is called";
+  titleInput.value = title;
+  wrap.append(titleInput);
+
+  const body = document.createElement("ul");
+  body.className = "checklist-items";
+  body.setAttribute("role", "list");
+  wrap.append(body);
+
+  const addForm = document.createElement("form");
+  addForm.className = "checklist-add";
+  const addInput = document.createElement("input");
+  addInput.type = "text";
+  addInput.placeholder = "add something to do, then Enter";
+  addInput.className = "checklist-add-input";
+  const addMore = document.createElement("button");
+  addMore.type = "submit";
+  addMore.className = "checklist-add-button";
+  addMore.textContent = "add";
+  addForm.append(addInput, addMore);
+  wrap.append(addForm);
+
+  const unattachedRow = document.createElement("div");
+  unattachedRow.className = "checklist-filed";
+  wrap.append(unattachedRow);
+
+  // -- saving ----------------------------------------------------------------
+
+  function shape(item) {
+    return {
+      text: item.text,
+      checked: !!item.checked,
+      depth: item.depth || 0,
+      kind: item.kind || "box",
+      refs: [...item.refs],
+    };
+  }
+
+  function paintStatus(words) {
+    status.textContent = words;
+  }
+
+  let pending = null;
+  function scheduleSave() {
+    paintStatus("changed…");
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(save, CHECKLIST_SAVE_DELAY);
+  }
+
+  async function save() {
+    pending = null;
+    if (!stillOnScreen(token)) return;
+    paintStatus("writing…");
+    try {
+      const answer = await api.saveChecklist(box.uuid, title, items.map(shape));
+      if (!stillOnScreen(token)) return;
+      savedAt = new Date();
+      paintStatus("saved");
+      tally.textContent = answer.summary || "";
+      // A box dropped in from the panel is filed here by the save: the sidebar may well
+      // have a different idea of what is inside, so it is re-read.
+      if (answer.attached && answer.attached.length) refreshSide();
+      // The line the file wrote is the truth now: an icon naming a box that is not filed
+      // here would render as gone, and the unattached row has one fewer box in it.
+      await reload();
+    } catch (error) {
+      paintStatus(`not saved: ${error.message}`);
+    }
+  }
+
+  async function reload() {
+    try {
+      const fresh = await api.checklist(box.uuid);
+      if (!stillOnScreen(token)) return;
+      items = fresh.items.map((item) => ({ ...item, refs: [...item.refs] }));
+      title = fresh.title || "";
+      if (document.activeElement !== titleInput) titleInput.value = title;
+      unattached = fresh.unattached;
+      render();
+    } catch (error) {
+      paintStatus(`the file cannot be read: ${error.message}`);
+    }
+  }
+
+  // -- rendering -------------------------------------------------------------
+
+  let unattached = list.unattached || [];
+
+  function paintTally() {
+    let open = 0;
+    let done = 0;
+    for (const item of items) {
+      if ((item.kind || "box") !== "box") continue;
+      if (item.checked) done += 1;
+      else open += 1;
+    }
+    if (open) tally.textContent = `${open} of ${open + done} still open`;
+    else if (done) tally.textContent = `all ${done} done`;
+    else tally.textContent = "nothing ticked on it yet";
+  }
+
+  function render() {
+    body.textContent = "";
+    items.forEach((item, index) => body.append(row(item, index)));
+    if (!items.length) {
+      const nothing = document.createElement("li");
+      nothing.className = "checklist-empty muted";
+      nothing.textContent = "Nothing on it. Type below, or drop a box onto a line.";
+      body.append(nothing);
+    }
+    paintTally();
+    renderUnattached();
+  }
+
+  function row(item, index) {
+    const line = document.createElement("li");
+    line.className = `checklist-item${item.checked ? " is-done" : ""}${(item.kind || "box") === "text" ? " is-prose" : ""}`;
+    line.style.setProperty("--depth", String(item.depth || 0));
+    line.draggable = true;
+
+    if ((item.kind || "box") === "box") {
+      const tick = document.createElement("input");
+      tick.type = "checkbox";
+      tick.className = "checklist-tick";
+      tick.checked = !!item.checked;
+      tick.setAttribute("aria-label", `done: ${item.text}`);
+      tick.addEventListener("change", () => {
+        item.checked = tick.checked;
+        line.classList.toggle("is-done", item.checked);
+        // the count at the top moves with the tick: a list that says "3 of 3 still open"
+        // under a row you have just crossed off is a list nobody trusts
+        paintTally();
+        scheduleSave();
+      });
+      line.append(tick);
+    }
+
+    const words = document.createElement("div");
+    words.className = "checklist-words";
+    words.contentEditable = "plaintext-only";
+    words.textContent = item.text;
+    words.addEventListener("input", () => {
+      item.text = words.textContent.replace(/\s+/g, " ").trim();
+      scheduleSave();
+    });
+    words.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        words.blur();
+        addInput.focus();
+      } else if (event.key === "Escape") {
+        words.textContent = item.text;
+        words.blur();
+      }
+    });
+    words.addEventListener("blur", () => {
+      const text = words.textContent.replace(/\s+/g, " ").trim();
+      if (text === item.text) return;
+      item.text = text;
+      save();
+    });
+    line.append(words);
+
+    const icons = document.createElement("div");
+    icons.className = "checklist-icons"; // the right end of the line, vertically centred
+    (item.attached || []).forEach((child) => icons.append(chip(child, child.gone)));
+    line.append(icons);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "checklist-remove";
+    remove.textContent = "\u00d7";
+    remove.title = "take this line off the list";
+    remove.setAttribute("aria-label", `remove: ${item.text || "this line"}`);
+    remove.addEventListener("click", () => {
+      items.splice(index, 1);
+      render();
+      save();
+    });
+    line.append(remove);
+
+    // a box from the panel, or from the row underneath, lands on this line
+    line.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      line.classList.add("is-target");
+    });
+    line.addEventListener("dragleave", () => line.classList.remove("is-target"));
+    line.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      line.classList.remove("is-target");
+      const uuid = event.dataTransfer.getData("text/plain");
+      if (!uuid || uuid === box.uuid || item.refs.includes(uuid)) return;
+      const known = unattached.find((child) => child.uuid === uuid);
+      item.refs.push(uuid);
+      if (known) {
+        (item.attached ||= []).push({ ...known, gone: false });
+        unattached = unattached.filter((child) => child.uuid !== uuid);
+      }
+      render();
+      save(); // the save is what files the box here as well
+    });
+    return line;
+  }
+
+  function chip(child, gone) {
+    const tag = document.createElement("button");
+    tag.type = "button";
+    tag.className = `checklist-chip${gone ? " is-gone" : ""}`;
+    tag.title = gone
+      ? `${child.uuid} is not in the library any more`
+      : `${child.name} (${child.box_type}) — open it`;
+    tag.textContent = gone ? "\u2753 missing" : `${child.icon || "\u{1f4e6}"} ${child.name}`;
+    tag.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (!gone) openBox(child.uuid);
+    });
+    if (!gone) {
+      tag.draggable = true;
+      tag.addEventListener("dragstart", (event) => {
+        event.dataTransfer.setData("text/plain", child.uuid);
+        event.dataTransfer.effectAllowed = "move";
+      });
+      // lifting an icon off a line takes the link away and leaves the box filed here
+      const detach = document.createElement("span");
+      detach.className = "checklist-detach";
+      detach.textContent = "\u00d7";
+      detach.title = "take this box off the line (it stays in the box)";
+      detach.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        items.forEach((item) => {
+          if (item.refs.includes(child.uuid)) {
+            item.refs = item.refs.filter((uuid) => uuid !== child.uuid);
+            item.attached = (item.attached || []).filter((one) => one.uuid !== child.uuid);
+          }
+        });
+        unattached.push(child);
+        render();
+        save();
+      });
+      tag.append(detach);
+    }
+    return tag;
+  }
+
+  function renderUnattached() {
+    unattachedRow.textContent = "";
+    const rest = unattached.filter((child) => !items.some((item) => item.refs.includes(child.uuid)));
+    if (!rest.length) return;
+    const label = document.createElement("span");
+    label.className = "muted";
+    label.textContent = "filed here, on no line:";
+    unattachedRow.append(label);
+    rest.forEach((child) => unattachedRow.append(chip(child, false)));
+    const hint = document.createElement("span");
+    hint.className = "muted checklist-hint";
+    hint.textContent = "drag one onto a line to hang it there";
+    unattachedRow.append(hint);
+  }
+
+  addForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = addInput.value.trim();
+    if (!text) return;
+    items.push({ text, checked: false, depth: 0, kind: "box", refs: [], attached: [] });
+    addInput.value = "";
+    render();
+    save();
+  });
+
+  titleInput.addEventListener("input", () => {
+    title = titleInput.value;
+    scheduleSave();
+  });
+
+  render();
+  if (savedAt) paintStatus("saved");
+  canvas.append(wrap);
+  addInput.focus();
+}
+
+registerView("checklist", {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    await checklistView(canvas, box, ctx, opts);
+  },
+});
 
 async function sshView(canvas, box, ctx, opts = {}) {
   const token = paneGeneration;
