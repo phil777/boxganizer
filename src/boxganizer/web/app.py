@@ -6,6 +6,8 @@ both, through :func:`boxganizer.web.server.run`). The app owns one :class:`BoxSt
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import mimetypes
 import os
@@ -15,6 +17,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
+from uuid import uuid4
 
 from boxganizer import (
     __version__,
@@ -31,6 +34,7 @@ from boxganizer import (
     resources,
     ssh,
     thumbs,
+    vnc,
 )
 
 # The endpoint below is called `search`, so the module that plans a query comes in
@@ -50,6 +54,18 @@ from boxganizer.errors import (
 )
 from boxganizer.models import DEFAULT_ICON, Box
 from boxganizer.store import BoxStore
+
+#: Frames a second the page is sent, at most. RFB pushes an update whenever the screen
+#: changes, and a machine watching a video changes constantly: without a cap this server
+#: encodes PNGs and the page decodes them as fast as the pipe allows, for a picture nobody
+#: sees better for it. Eight is above what a person reads as motion and far below what
+#: would make the machine hum.
+VNC_MAX_FPS = 8
+
+#: How long a VNC box waits for a machine to say what it is. Shorter than the session
+#: timeout on purpose: this answers a page that merely opened a box, and a machine that is
+#: not there should say so before the person has moved on to something else.
+VNC_PROBE_TIMEOUT = 3.0
 
 try:
     from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -271,6 +287,23 @@ def _store_of(request: Request) -> BoxStore:
     if store is None:  # pragma: no cover - defensive
         raise HTTPException(status_code=503, detail="no store attached")
     return store
+
+
+class VncInput(BaseModel):
+    """One thing the page did to a live screen.
+
+    The session id travels with it: two tabs watching one machine are two sessions, each
+    with its own pointer, and a stray click must not land on the other one's screen.
+    """
+
+    session: str
+    kind: str = "pointer"
+    x: int = 0
+    y: int = 0
+    button_mask: int = 0
+    #: The browser's `key` for a key event — a character, or a name like `Enter`.
+    key: str = ""
+    down: bool = True
 
 
 class NoteWrite(BaseModel):
@@ -648,6 +681,203 @@ def create_app(
         store.update(box)
         box.resource = record
         return target
+
+
+    def _screen_box(store: BoxStore, ref: str) -> Box:
+        """A box whose type is a live screen.
+
+        Asked of the type rather than compared with `"vnc"`, so anything that later
+        inherits the behaviour answers to the same endpoints.
+        """
+        box = store.resolve(ref)
+        if not boxtypes.get(box.box_type).draws_remote_screen:
+            raise HTTPException(
+                status_code=415,
+                detail={"error": "not_a_screen", "type": box.box_type},
+            )
+        return box
+
+    def _vnc_sessions(request: Request) -> dict[str, vnc.Screen]:
+        """The live screens, keyed by session id.
+
+        Per session and not per box, because a session is a pointer: two people, or two
+        tabs, looking at one machine are two cursors, and RFB is built for that. They are
+        dropped when their event stream ends — see the stream endpoint, which owns the
+        screen's lifetime.
+        """
+        sessions: dict[str, vnc.Screen] | None = getattr(request.app.state, "vnc_sessions", None)
+        if sessions is None:
+            sessions = {}
+            request.app.state.vnc_sessions = sessions
+        return sessions
+
+    @app.get("/api/boxes/{ref}/vnc")
+    async def vnc_status(ref: str, request: Request, store: StoreDep) -> dict[str, Any]:
+        """What is on the other end of the address, without holding a session open.
+
+        The box asks the machine which protocol it speaks, which authentication it wants,
+        and how big its screen is — then hangs up. That is the whole of `probe`, and it is
+        what lets the panel say "TigerVNC, 1920x1080, wants a password" instead of a
+        spinner. Nothing here is a promise about the session endpoint: the machine could
+        still refuse, and the session says so when it tries.
+        """
+        box = _screen_box(store, ref)
+        try:
+            dest = vnc.destination(box)
+        except vnc.VncError as exc:
+            return {"destination": None, "reachable": False, "error": str(exc)}
+        try:
+            found = await vnc.probe(dest, timeout=VNC_PROBE_TIMEOUT)
+        except (TimeoutError, vnc.VncError, OSError) as exc:
+            return {
+                "destination": dest.as_dict(),
+                "reachable": False,
+                "error": str(exc) or type(exc).__name__,
+            }
+        return {"destination": dest.as_dict(), "reachable": True, "screen": found.as_dict()}
+
+    @app.get("/api/boxes/{ref}/vnc/stream")
+    async def vnc_stream(ref: str, request: Request, store: StoreDep) -> StreamingResponse:
+        """A live screen, as the frames the machine sends when something changes.
+
+        RFB pushes a FramebufferUpdate when the screen moves and nothing when it does not,
+        so there is no timer in this loop and no frame rate to choose: the pace belongs to
+        the other machine, and an idle desktop costs the page nothing. Each frame is the
+        whole framebuffer re-encoded as PNG on a worker thread — a 1280x800 encode is tens
+        of milliseconds, and the event loop must not spend them.
+
+        The screen is closed by a watcher that notices the browser going away, which is the
+        only way an unfinished read ends promptly: cancelling the read instead would leave
+        the protocol position unknown, and the next byte would be interpreted as a message
+        type in the middle of a rectangle.
+        """
+        box = _screen_box(store, ref)
+        try:
+            dest = vnc.destination(box)
+        except vnc.VncError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "bad_vnc_address", "reason": str(exc)},
+            ) from exc
+        sessions = _vnc_sessions(request)
+
+        async def events() -> AsyncIterator[str]:
+            screen = vnc.Screen(dest)
+            session = uuid4().hex
+            sessions[session] = screen
+
+            async def watch() -> None:
+                # Two readings, a second apart. An ASGI transport that has finished handing
+                # over the request body answers `http.disconnect` as its ordinary idle state,
+                # and a screen that closed itself the moment it opened is a screen nobody can
+                # look at. A real disconnect is handled the other way anyway: the server
+                # cancels the response task, and the `finally` below closes the screen.
+                seen = 0
+                while seen < 2:
+                    await asyncio.sleep(1.0)
+                    seen = seen + 1 if await request.is_disconnected() else 0
+                await screen.close()
+
+            watcher = asyncio.create_task(watch())
+            try:
+                info = await screen.start()
+                yield (
+                    "event: info\ndata: "
+                    + json.dumps(
+                        {
+                            "session": session,
+                            "name": info.server_name,
+                            "version": info.version,
+                            "width": screen.width,
+                            "height": screen.height,
+                            "address": dest.url,
+                        }
+                    )
+                    + "\n\n"
+                )
+                clock = asyncio.get_running_loop()
+                interval = 1.0 / VNC_MAX_FPS
+                while True:
+                    began = clock.time()
+                    try:
+                        frame = await screen.next_frame()
+                    except (vnc.VncError, OSError, asyncio.IncompleteReadError):
+                        break
+                    if frame is None:
+                        break
+                    yield "event: frame\ndata: " + base64.b64encode(frame).decode() + "\n\n"
+                    # the framebuffer held here is the screen as of now, so skipping the
+                    # frames that happened in between loses nothing that is still true
+                    rest = interval - (clock.time() - began)
+                    if rest > 0:
+                        await asyncio.sleep(rest)
+            except (TimeoutError, vnc.VncError, OSError) as exc:
+                message = str(exc) or type(exc).__name__
+                yield "event: error\ndata: " + json.dumps({"message": message}) + "\n\n"
+            finally:
+                watcher.cancel()
+                await screen.close()
+                sessions.pop(session, None)
+                yield "event: end\ndata: {}\n\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/api/boxes/{ref}/vnc/input")
+    async def vnc_input(
+        ref: str, body: VncInput, request: Request, store: StoreDep
+    ) -> dict[str, Any]:
+        """Hand the screen one pointer move, button or keystroke.
+
+        Pointer position and button mask travel together because that is how RFB sends
+        them, and because a window dragged by its title bar is a held button with a
+        position that will not stop changing. A keystroke arrives as the browser's `key`,
+        and `vnc.keysym` decides what that is worth to the far machine — a character in the
+        Latin-1 range needs no table, a name is looked up, and anything else is dropped
+        rather than guessed at.
+        """
+        box = _screen_box(store, ref)
+        screen = _vnc_sessions(request).get(body.session)
+        if screen is None:
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "error": "session_gone",
+                    "reason": "that screen's session has ended; open the box again",
+                },
+            )
+        try:
+            if body.kind == "key":
+                symbol = vnc.keysym(body.key)
+                if symbol is None:
+                    return {"ok": True, "ignored": f"no keysym for {body.key!r}"}
+                await screen.key(symbol, down=body.down)
+            else:
+                x = min(max(0, body.x), max(screen.width - 1, 0))
+                y = min(max(0, body.y), max(screen.height - 1, 0))
+                await screen.pointer(x, y, body.button_mask)
+        except (vnc.VncError, OSError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "screen_closed", "reason": str(exc)},
+            ) from exc
+        return {"ok": True, "box": box.name}
+
+    @app.post("/api/boxes/{ref}/vnc/close")
+    async def vnc_close(
+        ref: str, body: VncInput, request: Request, store: StoreDep
+    ) -> dict[str, Any]:
+        """End a session early, from the page's Stop button."""
+        _screen_box(store, ref)
+        sessions = _vnc_sessions(request)
+        screen = sessions.pop(body.session, None)
+        if screen is not None:
+            await screen.close()
+        return {"ok": True, "closed": screen is not None}
+
 
     @app.get("/api/boxes/{ref}/note")
     def note_get(ref: str, request: Request, store: StoreDep) -> dict[str, object]:

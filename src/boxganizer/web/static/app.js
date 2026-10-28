@@ -162,6 +162,18 @@ const api = {
       method: "PUT",
       body: JSON.stringify({ source, format }),
     }),
+  vnc: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/vnc`),
+  vncStreamUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/vnc/stream`,
+  vncInput: (ref, payload) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/vnc/input`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  vncClose: (ref, session) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/vnc/close`, {
+      method: "POST",
+      body: JSON.stringify({ session }),
+    }),
   checklist: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/checklist`),
   saveChecklist: (ref, title, items) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/checklist`, {
@@ -4115,6 +4127,243 @@ function mindmapToolbar(box, ctx) {
  */
 
 const SSH_MAX_HISTORY = 20;
+
+// -- VNC screens ------------------------------------------------------------
+//
+// The page never speaks VNC. It cannot: RFB is a TCP conversation, and a browser has no
+// TCP. So this machine opens the connection (`boxganizer.vnc`), decodes the framebuffer,
+// and sends the page a picture when the far screen changes — while pointer moves and
+// keystrokes come back as small POSTs that this module is responsible for making.
+//
+// Three things in here are worth the comments they carry: the coordinate mapping, because
+// the canvas is scaled to fit the pane and a click has to land where it looked like it
+// landed; the button mask, because RFB carries buttons with every position rather than as
+// presses; and the focus rule on the keyboard, because a page that swallows Ctrl+R because
+// a VNC pane is open is a page people close.
+
+const VNC_BUTTONS = { 0: 1, 1: 2, 2: 4 }; // left, middle, right in RFB's order
+
+async function vncView(canvas, box, ctx, opts = {}) {
+  const token = paneGeneration;
+  let status;
+  try {
+    status = await api.vnc(box.uuid);
+  } catch (error) {
+    canvas.append(emptyMessage(`Cannot read the VNC box: ${error.message}`));
+    return;
+  }
+  if (!stillOnScreen(token)) return; // the pane moved on while the address was probed
+
+  const wrap = document.createElement("div");
+  wrap.className = "vnc-view";
+
+  const head = document.createElement("div");
+  head.className = "vnc-head";
+  const address = document.createElement("strong");
+  address.textContent = status.destination ? status.destination.url : "no address";
+  head.append(address);
+  const line = document.createElement("span");
+  line.className = "muted vnc-line";
+  head.append(line);
+  wrap.append(head);
+
+  if (status.screen) {
+    const found = status.screen;
+    line.textContent = `${found.server_name || "a VNC server"} · RFB ${found.version} · ${found.width}×${found.height}`;
+  } else {
+    line.textContent = status.error || "nothing answered";
+    wrap.classList.add("is-out");
+  }
+
+  if (status.destination) {
+    const controls = document.createElement("div");
+    controls.className = "vnc-controls";
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "vnc-play";
+    play.textContent = "Show the screen";
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.className = "vnc-stop";
+    stop.textContent = "Stop";
+    stop.hidden = true;
+    controls.append(play, stop);
+    const copy = document.createElement("code");
+    copy.className = "vnc-address";
+    copy.textContent = status.destination.url;
+    controls.append(copy);
+    wrap.append(controls);
+
+    const stage = document.createElement("div");
+    stage.className = "vnc-stage";
+    stage.tabIndex = 0;
+    const hint = document.createElement("p");
+    hint.className = "muted vnc-hint";
+    hint.textContent = status.reachable
+      ? "Nothing is drawn until you ask to see it. The machine sends a frame only when its screen changes."
+      : "The machine did not answer, so there is nothing to draw.";
+    stage.append(hint);
+    wrap.append(stage);
+
+    const screen = document.createElement("canvas");
+    screen.className = "vnc-screen";
+    screen.hidden = true;
+    stage.append(screen); // it starts hidden, but it has to be in the page to be in it
+
+    let stream = null;
+    let session = null;
+    let size = { width: 0, height: 0 };
+    let buttons = 0;
+    const queue = [];
+    let sending = false;
+
+    // Input goes back one message at a time, and while one is in flight the newest pointer
+    // POSITION wins — replaying a hand the person stopped moving would drag a window twice.
+    // A button change is never merged away: the press and the release are the click, and
+    // dropping one of them leaves a window being dragged by a button nobody is holding.
+    // So moves collapse into each other, and everything else queues in order.
+    const VNC_QUEUE_LIMIT = 8;
+
+    function send(payload) {
+      if (!session) return;
+      if (sending) {
+        const last = queue[queue.length - 1];
+        const positionOnly =
+          payload.kind === "pointer" && last && last.kind === "pointer" && last.button_mask === payload.button_mask;
+        if (positionOnly) queue[queue.length - 1] = payload;
+        else if (queue.length < VNC_QUEUE_LIMIT) queue.push(payload);
+        return; // the in-flight message's `finally` will take the next one
+      }
+      sending = true;
+      api
+        .vncInput(box.uuid, { ...payload, session })
+        .catch((error) => {
+          if (!/410|409/.test(error.message)) return; // the session ended; said so already
+          stopEverything("the session ended");
+        })
+        .finally(() => {
+          sending = false;
+          const next = queue.shift();
+          if (next) send(next);
+        });
+    }
+
+    function pointAt(event) {
+      // The canvas is drawn to fit the pane, so the pointer's position on the screen and
+      // its position in the remote framebuffer are different numbers. Both are needed.
+      const rect = screen.getBoundingClientRect();
+      return {
+        x: Math.round(((event.clientX - rect.left) / rect.width) * size.width),
+        y: Math.round(((event.clientY - rect.top) / rect.height) * size.height),
+      };
+    }
+
+    screen.addEventListener("pointermove", (event) => {
+      const at = pointAt(event);
+      send({ kind: "pointer", x: at.x, y: at.y, button_mask: buttons });
+    });
+    screen.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      buttons |= VNC_BUTTONS[event.button] ?? 1;
+      const at = pointAt(event);
+      send({ kind: "pointer", x: at.x, y: at.y, button_mask: buttons });
+      stage.focus();
+    });
+    const release = (event) => {
+      buttons &= ~(VNC_BUTTONS[event.button] ?? 1);
+      const at = pointAt(event);
+      send({ kind: "pointer", x: at.x, y: at.y, button_mask: buttons });
+    };
+    screen.addEventListener("pointerup", release);
+    screen.addEventListener("pointercancel", release);
+    screen.addEventListener("contextmenu", (event) => event.preventDefault());
+
+    // Keys belong to the pane that has focus, and only to it. Combos with Ctrl or Meta are
+    // left alone: the browser's own shortcuts outrank a remote screen, and a page that ate
+    // reload would be a page nobody leaves open.
+    stage.addEventListener("keydown", (event) => {
+      if (event.ctrlKey || event.metaKey || !session) return;
+      if (event.key.length > 1 && !event.key.startsWith("F") && event.key !== "Tab") return;
+      event.preventDefault();
+      send({ kind: "key", key: event.key, down: true });
+    });
+    stage.addEventListener("keyup", (event) => {
+      if (event.ctrlKey || event.metaKey || !session) return;
+      event.preventDefault();
+      send({ kind: "key", key: event.key, down: false });
+    });
+
+    function stopEverything(words) {
+      if (stream) {
+        stream.close();
+        stream = null;
+      }
+      if (session) api.vncClose(box.uuid, session).catch(() => {});
+      session = null;
+      play.hidden = false;
+      stop.hidden = true;
+      screen.hidden = true;
+      hint.hidden = false;
+      hint.textContent = words;
+    }
+
+    play.addEventListener("click", () => {
+      play.hidden = true;
+      stop.hidden = false;
+      hint.hidden = true;
+      screen.hidden = false;
+      stream = new EventSource(api.vncStreamUrl(box.uuid));
+      stream.addEventListener("info", (event) => {
+        const info = JSON.parse(event.data);
+        session = info.session;
+        size = { width: info.width, height: info.height };
+        screen.width = info.width;
+        screen.height = info.height;
+        line.textContent = `${info.name || "VNC"} · RFB ${info.version} · ${info.width}×${info.height} · live`;
+        stage.focus();
+      });
+      stream.addEventListener("frame", (event) => {
+        if (!stillOnScreen(token)) return;
+        const image = new Image();
+        image.onload = () => {
+          const context = screen.getContext("2d");
+          context.drawImage(image, 0, 0);
+        };
+        image.src = `data:image/png;base64,${event.data}`;
+      });
+      stream.addEventListener("error", (event) => {
+        // EventSource's own `error` carries no message; a server-sent one does.
+        const detail = event && event.data ? JSON.parse(event.data).message : "";
+        if (detail) line.textContent = detail;
+      });
+      stream.addEventListener("end", () => stopEverything("the screen closed."));
+    });
+
+    stop.addEventListener("click", () => stopEverything("stopped."));
+
+    if (!status.reachable) {
+      play.disabled = true;
+      play.title = status.error || "the machine did not answer";
+    }
+  }
+
+  const note = document.createElement("p");
+  note.className = "muted vnc-note";
+  note.textContent =
+    "The screen is drawn here, on this machine's connection: the page is shown frames and " +
+    "sends back where the pointer is and what was typed. There is no password, and none can " +
+    "be stored — a server that insists on authentication is refused, and its address above is " +
+    "the line to give your own VNC viewer.";
+  wrap.append(note);
+
+  canvas.append(wrap);
+}
+
+registerView("vnc", {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    await vncView(canvas, box, ctx, opts);
+  },
+});
 
 // -- notes ------------------------------------------------------------------
 //

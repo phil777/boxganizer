@@ -36,6 +36,7 @@ DOCUMENTED: dict[str, str | None] = {
     "snapshot": "web",
     "terminal": "dynamic",
     "ssh": "terminal",
+    "vnc": "dynamic",
     "sensor": "dynamic",
     "mqtt": "sensor",
     "http": "sensor",

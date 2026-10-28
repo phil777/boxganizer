@@ -109,6 +109,48 @@ class SSHResource(TerminalResource):
             cls._reject(box, str(exc))
 
 
+class VNCResource(DynamicResource):
+    """Another machine's screen, drawn in the page.
+
+    The address is `vnc://host:5900`, or `vnc://host:1` for display 1. The protocol is
+    spoken here, in Python, and what crosses to the browser is a picture of the framebuffer
+    with the news that it changed: a browser cannot open a socket, and a second RFB
+    implementation in JavaScript would be a second protocol to keep correct. See
+    :mod:`boxganizer.vnc`.
+
+    **It cannot hold a password.** The client offers exactly one security type — None — and
+    a server that asks for anything else is refused with what it asked for. That is ADR 12's
+    line drawn again for a different port, and the reason is the same: this database is a
+    plain file that gets copied, backed up and read by a page. The consequence is honest and
+    stated on the panel: this box watches a screen its owner has left open to the local
+    network, a tunnel, or a loopback port — and a machine that demands a password is reached
+    with a real viewer, whose address the panel offers to copy.
+    """
+
+    key: ClassVar[str] = "vnc"
+    label: ClassVar[str] = "VNC Screen"
+    # 💻 rather than 🖥️, which the desktop type wears: this is somebody else's machine, and
+    # a list where two boxes look identical is a list people mis-click.
+    icon: ClassVar[str] = "\U0001f4bb"  # 💻
+    summary: ClassVar[str] = "A screen on another machine, live in the page."
+    resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"vnc"})
+    draws_remote_screen: ClassVar[bool] = True
+
+    @classmethod
+    def check(cls, box: Box) -> None:
+        """An address that names a host and a port, and nothing that smells like a secret.
+
+        Checked where the box is written, not where the socket is opened: a box that cannot
+        be stored beats one that sits in the library holding something it will never use.
+        """
+        from boxganizer import vnc
+
+        try:
+            vnc.destination(box)
+        except vnc.VncError as exc:
+            cls._reject(box, str(exc))
+
+
 class SensorResource(DynamicResource):
     """Something that reports a value."""
 

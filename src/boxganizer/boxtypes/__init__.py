@@ -28,6 +28,7 @@ from boxganizer.boxtypes.dynamic import (
     SnapshotResource,
     SSHResource,
     TerminalResource,
+    VNCResource,
     WebResource,
 )
 from boxganizer.boxtypes.folder import Cabinet, DynamicFolder, FolderBox
@@ -107,6 +108,7 @@ __all__ = [
     "TerminalResource",
     "TextResource",
     "TilingViewport",
+    "VNCResource",
     "VideoResource",
     "ViewportBox",
     "WebResource",

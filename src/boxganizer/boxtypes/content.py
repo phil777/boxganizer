@@ -48,7 +48,9 @@ class Note(ContentBox):
 
     key: ClassVar[str] = "note"
     label: ClassVar[str] = "Note"
-    icon: ClassVar[str] = "\U0001f4dd"  # 📝
+    # 🗒️ and not 📝: a box pointing at a `.md` file already owns that one, and two boxes
+    # wearing the same icon in a list of 39 is a puzzle the person has to solve every day.
+    icon: ClassVar[str] = "\U0001f5d2\ufe0f"  # 🗒️
     summary: ClassVar[str] = "Words of your own, plain or markdown, with a toolbox."
     allows_children: ClassVar[bool] = True
     resource_uri_required: ClassVar[bool] = False

@@ -41,6 +41,7 @@ other boxes. Rules in brackets are enforced by the store.
         - `snapshot` 📸 Snapshot — resource required; schemes: http https
       - `terminal` ⌨️ Terminal
         - `ssh` 🔐 SSH Terminal — schemes: ssh; needs metadata: host
+      - `vnc` 💻 VNC Screen — schemes: vnc; this machine speaks RFB, the page is shown frames
       - `sensor` 📡 Sensor
         - `mqtt` 📶 MQTT Sensor — schemes: mqtt mqtts; needs metadata: topic
         - `http` 📥 HTTP Sensor — resource required; schemes: http https
@@ -66,7 +67,7 @@ other boxes. Rules in brackets are enforced by the store.
     - `windowed-viewport` 🪟 Windowed Viewport
 ```
 
-43 types: 5 grouping levels and 38 you can put on a box.
+44 types: 5 grouping levels and 39 you can put on a box.
 
 One type is not in the source document: `root` 🌲, a `FolderBox` subtype, because
 a database needs one place where the graph starts. `box init` creates it, and it
@@ -239,3 +240,16 @@ A `directory` box browses the real filesystem in place of showing child boxes:
 Every path from the browser is resolved and confined to the box's own resource
 directory, and then to `$BOXGANIZER_CONTENT_ROOT` when that is set — symlinks
 included (`boxganizer/fslist.py:safe_join`). Escaping is a `403 path_out_of_range`.
+
+### A word on the two boxes that write files, and the one that opens a screen
+
+`checklist` and `note` need no resource when they are made. The first time there is
+something to keep, Boxganizer writes a file beside the database —
+`<directory-of-the-database>/files/<uuid>.md` — and gives the box a resource row pointing at
+it, whose origin is `generated`. That row is what puts the words in the full-text index, and
+it is also what exempts the file from `$BOXGANIZER_CONTENT_ROOT`: the confine is a rule about
+which paths other people's boxes may open, and applying it to the library's own files would
+make every note unsearchable. ADR 14.
+
+`vnc` holds no secret either, in the same way `ssh` holds none: it offers the None security
+type and refuses anything else, naming what the server asked for. ADR 15.

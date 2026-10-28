@@ -2439,3 +2439,42 @@ def test_a_box_named_in_a_note_is_inert_until_the_page_wires_it(client: TestClie
     assert 'a[href^="' in wiring
     assert "anchorEl.removeAttribute(" in wiring
     assert "openBox(uuid)" in wiring
+
+
+def test_the_vnc_view_asks_before_it_draws_and_never_holds_a_socket(client: TestClient) -> None:
+    """The page is a window on a session this machine owns — not the session itself."""
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    assert 'registerView("vnc", {' in script
+    assert "async function vncView" in script
+    # nothing connects until the person asks, and the stream is the only thing that does
+    view_start = script.index("async function vncView")
+    view = script[view_start : script.index('registerView("vnc"', view_start)]
+    assert 'new EventSource(api.vncStreamUrl(box.uuid))' in view
+    assert "api.vnc(box.uuid)" in view
+    assert "WebSocket" not in view  # no socket in the page: frames in, input out
+    # the far screen keeps its own shape
+    assert ".vnc-screen" in css and "aspect-ratio" in css
+    assert ".vnc-stage" in css
+
+
+def test_a_click_that_changes_the_buttons_is_never_merged_away(client: TestClient) -> None:
+    """Positions collapse, button states do not: a dropped release leaves a stuck window."""
+    script = client.get("/static/app.js").text
+    start = script.index("function send(payload)")
+    sender = script[start : script.index("function pointAt", start)]
+    assert "button_mask === payload.button_mask" in sender
+    assert "queue.shift()" in sender
+    # and the coordinate mapping divides by the drawn size, because the canvas is scaled
+    from_here = script.index("function pointAt")
+    mapping = script[from_here : script.index("screen.addEventListener", from_here)]
+    assert "rect.width) * size.width" in mapping
+    assert "rect.height) * size.height" in mapping
+
+
+def test_keys_are_left_to_the_browser_when_a_combo_belongs_to_it(client: TestClient) -> None:
+    """Ctrl+R must still reload the page with a VNC pane open."""
+    script = client.get("/static/app.js").text
+    start = script.index('stage.addEventListener("keydown"')
+    keys = script[start : script.index('stage.addEventListener("keyup"', start)]
+    assert "event.ctrlKey || event.metaKey" in keys

@@ -80,6 +80,9 @@ class BoxType:
     #: True when the type draws its children as a growing map of nodes, which is the
     #: question the mindmap endpoints ask before answering. See `boxganizer.mindmap`.
     maps_nodes: ClassVar[bool] = False
+    #: True when the type is a live screen on another machine, which is what the VNC
+    #: endpoints ask before opening a session. See `boxganizer.vnc`.
+    draws_remote_screen: ClassVar[bool] = False
     #: True when the type keeps words of its own, in a file Boxganizer writes beside the
     #: database. Such a box needs no resource when it is made: it is given one the first
     #: time there is something to keep, and that resource is what puts the words in the
@@ -165,6 +168,7 @@ class BoxType:
             "arranges_icons": cls.arranges_icons,
             "maps_nodes": cls.maps_nodes,
             "writes_own_file": cls.writes_own_file,
+            "draws_remote_screen": cls.draws_remote_screen,
             "indexes_content": cls.indexes_content,
             "parent": parent.key if parent is not None else None,
             "ancestors": [ancestor.key for ancestor in registry.ancestors_of(cls)],

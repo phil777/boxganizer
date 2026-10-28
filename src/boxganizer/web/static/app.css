@@ -1429,3 +1429,90 @@ pre.text {
 .cell-content .note-editor {
   min-height: 4em;
 }
+
+/* -- VNC screens ------------------------------------------------------------
+   The far machine's pixels, drawn to fit and never stretched: the canvas keeps
+   its own ratio, because a screen that is 16:10 on the machine and 4:3 on the
+   pane is a lie about the other machine. */
+.vnc-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  min-height: 100%;
+  overflow: auto;
+}
+.vnc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+}
+.vnc-line {
+  font-size: 0.85em;
+}
+.vnc-view.is-out .vnc-line {
+  color: var(--accent);
+}
+.vnc-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.vnc-controls button {
+  font: inherit;
+  font-size: 0.9em;
+  padding: 3px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+  cursor: pointer;
+}
+.vnc-controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.vnc-address {
+  font-size: 0.85em;
+  padding: 2px 6px;
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+  user-select: all; /* the whole address on one click, because it is meant to be copied */
+}
+.vnc-stage {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 12em;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #000;
+  outline: none;
+}
+.vnc-stage:focus-visible {
+  border-color: var(--accent);
+}
+.vnc-screen {
+  max-width: 100%;
+  max-height: 100%;
+  height: auto;
+  aspect-ratio: attr(width) / attr(height);
+  cursor: crosshair;
+  image-rendering: pixelated; /* the far machine's pixels are the drawing; do not blur them */
+}
+.vnc-hint {
+  padding: 0 14px;
+  font-style: italic;
+  text-align: center;
+  color: color-mix(in srgb, #fff 70%, currentColor);
+}
+.vnc-note {
+  font-size: 0.8em;
+}
+.cell-content .vnc-view {
+  overflow: hidden;
+  padding: 4px;
+}
