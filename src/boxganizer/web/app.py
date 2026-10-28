@@ -298,6 +298,11 @@ def create_app(
     app.state.content_root = Path(effective_root).expanduser() if effective_root else None
     app.state.store = store if store is not None else BoxStore()
     app.state.owns_store = store is None
+    # The store reads a file when a box is added or changed, so it has to be told the
+    # same confine the page browses inside: a box made here would otherwise index
+    # nothing at all, and the search would quietly never find it.
+    if app.state.content_root is not None:
+        app.state.store.content_root = app.state.content_root
     app.state.mqtt_events = mqtt_events or mqtt.aiomqtt_events
     app.state.mqtt_latest = mqtt.Latest()
 
@@ -1054,19 +1059,28 @@ def create_app(
         if planned.expanded:
             response.headers["X-Search-Expanded"] = text_search.explain(planned)
         if planned.worth_asking:
-            hits = [
-                hit
-                for hit in store.content_search(planned.content_match, limit=limit * 2)
-                if hit[0] not in seen
-            ]
-            order = [hit[0] for hit in hits][:limit]
-            boxes = store.boxes_by_uuid(order)
-            for uuid, _score, passage in hits:
-                box = boxes.get(uuid)
-                if box is None:  # deleted between the index and now: offer nothing
-                    continue
-                seen.add(uuid)
-                found.append(box.to_dict() | {"match": {"how": "content", "passage": passage}})
+            hits = store.content_search(planned.content_match, limit=limit * 2)
+            # The index answers with the *file* that matched; what a person wants is the
+            # box. One file can be pointed at by several boxes, and every one of them is
+            # a true answer, so each is offered with the same passage and the same
+            # reason — and a box already listed by its own name is not listed twice.
+            for resource_id, _score, passage in hits:
+                for box in store.boxes_by_resources([resource_id]).get(resource_id, []):
+                    if box.uuid in seen:
+                        continue
+                    seen.add(box.uuid)
+                    found.append(
+                        box.to_dict()
+                        | {
+                            "match": {
+                                "how": "content",
+                                "passage": passage,
+                                "resource": resource_id,
+                            }
+                        }
+                    )
+                    if len(found) >= limit:
+                        break
                 if len(found) >= limit:
                     break
         return found

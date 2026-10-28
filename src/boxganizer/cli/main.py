@@ -428,14 +428,18 @@ def box_search(
         if content:
             planned = text_search.plan(term, lambda word: store.vocabulary(prefix=word[:1]))
             if planned.worth_asking:
-                ordered = store.content_search(planned.content_match, limit=limit * 2)
-                boxes = store.boxes_by_uuid([uuid for uuid, _score, _p in ordered])
-                for uuid, _score, passage in ordered:
-                    box = boxes.get(uuid)
-                    if box is None or box.name in shown:
-                        continue
-                    shown.add(box.name)
-                    hits.append((f"{box.icon} {box.name}", " ".join(passage.split())))
+                # The index answers with the file; the answer wanted is the box, and
+                # every box pointing at that file is a true one.
+                for resource_id, _score, passage in store.content_search(
+                    planned.content_match, limit=limit * 2
+                ):
+                    for box in store.boxes_by_resources([resource_id]).get(resource_id, []):
+                        if box.name in shown:
+                            continue
+                        shown.add(box.name)
+                        hits.append((f"{box.icon} {box.name}", " ".join(passage.split())))
+                        if len(hits) >= limit:
+                            break
                     if len(hits) >= limit:
                         break
             widened = text_search.explain(planned) if planned.expanded else ""
@@ -483,7 +487,7 @@ def box_index(
             lit(f"  {name}: {note}")
         if len(report.skipped) > show_skipped:
             lit(f"  … and {len(report.skipped) - show_skipped} more nothing-to-read")
-        lit(f"  {store.indexed_boxes()} boxes now in the index")
+        lit(f"  {store.indexed_count()} files now in the index")
 
 
 @app.command("rm")

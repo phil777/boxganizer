@@ -58,6 +58,7 @@ def test_to_dict_is_json_friendly() -> None:
         "icon",
         "box_type",
         "resource_uri",
+        "resource_id",
         "metadata",
         "config",
         "created_at",

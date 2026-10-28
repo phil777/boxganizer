@@ -54,7 +54,14 @@ class Box:
     icon: str = DEFAULT_ICON
     #: Key of a class in :mod:`boxganizer.boxtypes`. Plain boxes use ``"box"``.
     box_type: str = "box"
+    #: What the box points at, as written. The database keeps this in the `resources`
+    #: table and this field is filled from there on every read, so the rest of the code
+    #: can go on asking a box for its address without knowing about the join.
     resource_uri: str | None = None
+    #: The row of `resources` this box points at, once it has been stored. Assigned by
+    #: the store: two boxes on one file get the same id, and one file means one entry in
+    #: the full-text index and one set of observations about whether it has changed.
+    resource_id: int | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     #: Type-specific settings. Arbitrary JSON, unlike the flat string metadata.
     config: dict[str, Any] = field(default_factory=dict)
@@ -104,6 +111,7 @@ class Box:
             "icon": self.icon,
             "box_type": self.box_type,
             "resource_uri": self.resource_uri,
+            "resource_id": self.resource_id,
             "metadata": dict(self.metadata),
             "config": dict(self.config),
             "created_at": self.created_at.isoformat(),

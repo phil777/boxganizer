@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from boxganizer import boxtypes, config, paths
+from boxganizer import resources as address
 from boxganizer.models import Box
 
 #: Largest file read into the index. Bigger ones are reported as too big, not guessed at.
@@ -188,31 +189,59 @@ class Plan:
 
 
 def indexes(box: Box) -> bool:
-    """Whether this box's file should be read into the index."""
+    """Whether the type says this box's file is made of words.
+
+    The resource row has the last word in practice — see :func:`sync` — but a box on
+    its own, before it is stored, is asked of its type: a text or a PDF yes, an image,
+    a web page or a topic no.
+    """
     if not boxtypes.known(box.box_type):
         return False
-    kind = boxtypes.get(box.box_type)
-    return kind.indexes_content and bool(box.resource_uri)
+    return boxtypes.get(box.box_type).indexes_content and bool(box.resource_uri)
 
 
 def extract(box: Box, *, root: Path | str | None = None) -> Extracted:
-    """Read a box's file as text, inside the usual confine.
+    """Read a box's file as text. A thin turn of :func:`extract_resource`."""
+    return extract_resource(
+        box.resource_uri or "",
+        root=root,
+        pdf=box.box_type == "pdf" or None,
+    )
 
-    Never raises: a box whose file is missing, huge, unreadable or outside the
-    confine is still a perfectly good box, and the index has to carry on with the
-    other nine hundred. What happened goes into :attr:`Extracted.note`.
+
+def extract_resource(
+    reference: str,
+    *,
+    root: Path | str | None = None,
+    pdf: bool | None = None,
+    origin: str | None = None,
+) -> Extracted:
+    """Read what a resource points at, inside the usual confine.
+
+    How to read it comes from the thing itself rather than from the box pointing at it:
+    a name ending `.pdf` is read through the PDF text layer, any other path is tried as
+    text and refused if it turns out to be bytes. That is deliberate — two boxes of
+    different types pointing at one file get one reading, which is the whole reason the
+    index is keyed by resource — and `pdf` lets a caller who knows better than a file
+    name overrule it.
+
+    Never raises: a missing, huge, unreadable or confined-away file is still a perfectly
+    good thing for a box to point at, and the index has to carry on with the rest. What
+    happened comes back in :attr:`Extracted.note`.
     """
-    if not box.resource_uri:
-        return Extracted(note="the box points at no file")
-    if not indexes(box):
-        return Extracted(note=f"a {box.box_type} box is not read for text")
+    raw = (reference or "").strip()
+    if not raw:
+        return Extracted(note="the resource holds no address")
+    where = origin or address.origin_of(raw)
+    if where != address.LOCAL:
+        return Extracted(note=f"a {where} resource is read by the box that points at it, not here")
 
+    scheme, sep, rest = raw.partition("://")
+    if sep and scheme.lower() == "file":
+        target = Path(rest if rest.startswith("/") else f"/{rest}")
+    else:
+        target = Path(raw)
     confine = paths.content_root(root)
-    scheme, _ = paths.split_resource(box.resource_uri)
-    if scheme not in ("", "file"):
-        return Extracted(note=f"a {scheme}:// resource is not a local file")
-
-    target = paths.local_path(box.resource_uri)
     if not paths.inside(target, confine):
         return Extracted(note=f"{target} is outside {confine}")
     try:
@@ -222,7 +251,8 @@ def extract(box: Box, *, root: Path | str | None = None) -> Extracted:
     except OSError as exc:
         return Extracted(note=f"the file could not be opened ({exc.strerror or exc})")
 
-    if box.box_type == "pdf" or boxtypes.get(box.box_type).key == "pdf":
+    is_pdf = target.suffix.lower() == ".pdf" if pdf is None else pdf
+    if is_pdf:
         return _from_pdf(target)
     if size > MAX_TEXT_BYTES:
         return Extracted(note=f"its {size:,} bytes are more than {MAX_TEXT_BYTES:,}")
@@ -255,7 +285,7 @@ def _from_text_file(target: Path) -> Extracted:
         return Extracted(note=f"{target.name} is not text, so there is nothing to read")
     for encoding in ("utf-8", "utf-16", "latin-1"):
         try:
-            return Extracted(text=raw.decode(encoding))
+            return Extracted(text=raw.decode(encoding).strip()[:MAX_TEXT_BYTES])
         except UnicodeDecodeError:
             continue
     return Extracted(note="it is not text in utf-8, utf-16 or latin-1")
@@ -276,8 +306,7 @@ def _from_pdf(target: Path) -> Extracted:
         for index in range(pages):
             page = document[index]
             try:
-                textpage = page.get_textpage()
-                chunks.append(textpage.get_text_bounded())
+                chunks.append(page.get_textpage().get_text_bounded())
             except Exception:  # one bad page must not lose the other hundred and ninety-nine
                 continue
             finally:
@@ -288,7 +317,7 @@ def _from_pdf(target: Path) -> Extracted:
     if not text:
         # A scanned PDF has no text layer: say so rather than reporting an empty file.
         return Extracted(note="the PDF holds no text layer (a scan, probably)")
-    return Extracted(text=text)
+    return Extracted(text=text[:MAX_TEXT_BYTES])
 
 
 # -- the thesaurus ------------------------------------------------------------
@@ -558,53 +587,114 @@ def explain(plan: Plan) -> str:
 
 @dataclass(frozen=True)
 class Report:
-    """What a rebuild of the index did."""
+    """What a pass over the index did."""
 
-    boxes: int = 0
+    resources: int = 0
     indexed: int = 0
+    unchanged: int = 0
     skipped: tuple[tuple[str, str], ...] = ()
 
     def summary(self) -> str:
-        read = f"{self.indexed} box file{'' if self.indexed == 1 else 's'} indexed"
-        if not self.skipped:
-            return f"{read}, out of {self.boxes}"
-        return f"{read}, out of {self.boxes}; {len(self.skipped)} nothing to read"
+        """What was read, what did not need reading, and what could not be read.
+
+        All three are said because all three are answers someone needs: a rebuild that
+        reports nothing is either instantaneous or broken, and only one of those is fine.
+        """
+        read = f"{self.indexed} file{'' if self.indexed == 1 else 's'} read into the index"
+        held = f", {self.unchanged} already up to date" if self.unchanged else ""
+        tail = f"; {len(self.skipped)} nothing to read" if self.skipped else ""
+        return f"{read}, out of {self.resources}{held}{tail}"
 
 
-def sync(store: Any, box: Box, *, root: Path | str | None = None) -> str:
-    """Bring one box's indexed text up to date, and say what could not be read.
+def _confine_of(store: Any) -> Path | None:
+    """The directory this store reads inside, when it was told one.
 
-    Called after a box is created or changed, from whichever interface did it. A box
-    that no longer points at readable text is dropped from the index rather than left
-    in it: a search that keeps finding a file that is gone is worse than one that
-    never found it.
+    Asked of the store rather than of the environment on every call, so that one library
+    has one confine: the page passes it when it builds the app, `box index --root` names
+    it, and everything that happens afterwards — a box added, a file re-read, a rebuild —
+    agrees about what may be opened.
     """
-    if not indexes(box):
-        store.drop_text(box.uuid)
+    found = getattr(store, "content_root", None)
+    return Path(found) if found else None
+
+
+def sync_resource(store: Any, resource_id: int, *, root: Path | str | None = None) -> str:
+    """Read one resource into the index if it is worth reading, and say what stopped it.
+
+    This is the whole of the reindexing rule in one place, called from every door:
+
+    * a resource nobody opted in is not read, and is taken out of the index if it was in
+      it — the checkbox means what it says;
+    * a file whose size and modification time are what they were when it was last read
+      is not read again. That is what the observations on the resource row are for:
+      opening a box is not a reason to re-read two megabytes;
+    * a file that has changed, or has gone away, is read, and what comes back replaces
+      what the index held — including nothing at all, which is recorded too, so the
+      next pass does not mistake an unreadable file for an unread one.
+    """
+    resource = store.resource(resource_id)
+    if resource is None:
         return ""
-    found = extract(box, root=root)
-    store.index_text(box.uuid, found.text)
+    if not resource.index_it:
+        if resource.indexed:
+            store.record_index(resource.id, body=None, seen=address.Fingerprint())
+        return ""
+    if resource.indexed and resource.stale() is False:
+        return ""  # same file, same index: nothing to do, and nothing read to find out
+    found = extract_resource(
+        resource.reference, root=root if root is not None else _confine_of(store),
+        origin=resource.origin,
+    )
+    seen = address.stat(resource.reference)
+    store.record_index(
+        resource.id,
+        body=found.text if found.usable else None,
+        seen=address.Fingerprint(
+            mtime=seen.mtime,
+            bytes=seen.bytes,
+            digest=address.digest(found.text) if found.usable else None,
+        ),
+    )
     return "" if found.usable else found.note
 
 
-def rebuild(store: Any, *, root: Path | str | None = None) -> Report:
-    """Re-read every box that has text. What `box index` does.
+def sync(store: Any, box: Box, *, root: Path | str | None = None) -> str:
+    """Bring the text behind one box up to date. The box is a handle on its resource."""
+    if box.resource_id is None:
+        return ""
+    return sync_resource(store, int(box.resource_id), root=root)
+
+
+def rebuild(store: Any, *, root: Path | str | None = None, only_stale: bool = False) -> Report:
+    """Read every resource the index is wanted for. What `box index` does.
 
     Needed because the index lives in the database and the files do not: a library
-    copied to another machine, a database written before this existed, or a file
-    edited outside Boxganizer are all cases where the rows have to be made true
-    again in one go.
+    copied to another machine, a database written before the index existed, and a file
+    edited outside Boxganizer are all cases where the rows have to be made true again.
+
+    `only_stale` is the same pass narrowed to the files something has been noticed
+    about, which is what a scheduled reindex wants rather than a whole library read on a
+    timer.
     """
+    watched = list(store.check_observations()) if only_stale else store.indexed_resources()
     skipped: list[tuple[str, str]] = []
-    boxes = store.list_boxes()
     indexed = 0
-    for box in boxes:
-        note = sync(store, box, root=root)
+    unchanged = 0
+    for resource in watched:
+        before = resource.indexed and resource.stale() is False
+        note = sync_resource(store, resource.id, root=root)  # the store's confine applies
         if note:
-            skipped.append((box.name, note))
-        elif indexes(box):
+            skipped.append((address.display(resource.reference), note))
+        elif before:
+            unchanged += 1
+        else:
             indexed += 1
-    return Report(boxes=len(boxes), indexed=indexed, skipped=tuple(skipped))
+    return Report(
+        resources=len(watched),
+        indexed=indexed,
+        unchanged=unchanged,
+        skipped=tuple(skipped),
+    )
 
 
 def confine_from_env() -> Path:

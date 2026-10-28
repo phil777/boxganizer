@@ -11,6 +11,7 @@ web app answer requests from a thread pool.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Sequence
@@ -18,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 
-from boxganizer import boxtypes, config, filters
+from boxganizer import boxtypes, config, filters, paths, resources
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -37,7 +38,12 @@ from boxganizer.models import DEFAULT_ICON, Box, canonical_name, new_uuid
 #: 6 = the full-text index tables (``box_text``). They are created with every other
 #: table when a database opens, but they are *filled* from the files, which is why
 #: ``box index`` exists: the confine and the reading belong to the caller, not here.
-SCHEMA_VERSION = 6
+#: 7 = ``resources``, and the index keyed by it (``resource_text``). A box points at a
+#: resource instead of carrying its own copy of an address, so one file watched and
+#: indexed once serves every box that points at it — and "does this need reindexing?"
+#: finally has somewhere to be remembered. See :mod:`boxganizer.resources` and
+#: :meth:`BoxStore._split_resources_out`.
+SCHEMA_VERSION = 7
 
 _SCHEMA = f"""
 PRAGMA user_version = {SCHEMA_VERSION};
@@ -50,7 +56,13 @@ CREATE TABLE IF NOT EXISTS boxes (
     description  TEXT    NOT NULL DEFAULT '',
     icon         TEXT    NOT NULL DEFAULT '{DEFAULT_ICON}',
     box_type     TEXT    NOT NULL DEFAULT 'box',
-    resource_uri TEXT,
+    /*
+     * What the box points at lives in `resources`, and this points there. One file,
+     * one row: two boxes on one PDF means the PDF is read, hashed and watched once,
+     * and a box that is deleted does not take the record of a file that is still on
+     * disk with it. See `boxganizer.resources`.
+     */
+    resource_id  INTEGER REFERENCES resources (id),
     metadata     TEXT    NOT NULL DEFAULT '{{}}',
     config       TEXT    NOT NULL DEFAULT '{{}}',
     created_at   TEXT    NOT NULL,
@@ -70,80 +82,121 @@ CREATE TABLE IF NOT EXISTS links (
 
 CREATE INDEX IF NOT EXISTS links_child_idx ON links (child_id);
 
+"""
+
+# v7: the resources table, and the index keyed by it rather than by the box.
+_SCHEMA_RESOURCES = """
+CREATE TABLE IF NOT EXISTS resources (
+    id          INTEGER PRIMARY KEY,
+    /* The address as it was written, and the form two addresses are compared on. */
+    reference   TEXT    NOT NULL,
+    ref_key     TEXT    NOT NULL UNIQUE,
+    /* 'local' | 'remote' | 'generated': can this be opened here at all. */
+    origin      TEXT    NOT NULL DEFAULT 'local',
+    /* The opt in/out of the full-text index. A default came from the box type; the
+       dialog's checkbox is what settles it. */
+    index_it    INTEGER NOT NULL DEFAULT 0,
+    /* What was last read into the index, and what the thing looked like then: the
+       size and modification time answer "read it again?" from one stat, and the hash
+       of the text keeps a file that was merely touched from being read a third time. */
+    indexed_at  TEXT,
+    mtime       REAL,
+    bytes       INTEGER,
+    digest      TEXT,
+    /* Something noticed that makes the index wrong: a file edited outside Boxganizer,
+       or one that has gone away. Set by `check`, cleared by a reindex. */
+    stale       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS resources_stale_idx ON resources (stale, index_it);
+
 /*
- * The full-text index. `box_id` is the box's uuid, so a rename cannot orphan an
- * entry, and deleting the box deletes its text (the row is dropped by the same
- * calls that maintain the links, plus `remove`).
- *
- * Porter stemming is done by SQLite, so "running" finds "run" without any code of
- * ours; the words a query was widened to are what `boxganizer.search` decides.
- * Only boxes that point at a text or PDF file are ever written here.
+ * The full-text index, keyed by the resource rather than by the box: it is the file
+ * that has the words, and several boxes may be pointing at it.
  */
-CREATE VIRTUAL TABLE IF NOT EXISTS box_text USING fts5(
-    box_id UNINDEXED,
+CREATE VIRTUAL TABLE IF NOT EXISTS resource_text USING fts5(
+    resource_id UNINDEXED,
     body,
     tokenize = 'porter unicode61'
 );
 
-/*
- * The words the index has actually seen. FTS5 does not expose them by itself:
- * `fts5vocab` is a second virtual table that reads the first one, and it is what
- * makes fuzzy matching answer with "kitchen" rather than with every word in English.
- */
-CREATE VIRTUAL TABLE IF NOT EXISTS box_text_vocab USING fts5vocab(box_text, row);
+CREATE VIRTUAL TABLE IF NOT EXISTS resource_text_vocab USING fts5vocab(resource_text, row);
 """
 
 _INSERT_BOX = """
-INSERT INTO boxes (uuid, name, key, description, icon, box_type, resource_uri, metadata,
+INSERT INTO boxes (uuid, name, key, description, icon, box_type, resource_id, metadata,
                    config, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
-_SELECT_BY_KEY = "SELECT * FROM boxes WHERE key = ?"
+# Reading a box means reading what it points at, so the columns come along in the same
+# query: a box list that asked for one resource per box would be a thousand queries.
+# Reading a box means reading what it points at, so the columns come along in the same
+# query: a box list that asked for one resource per box would be a thousand queries. The
+# head and the FROM are kept apart so the joins in `root_child` and the link reads below
+# extend one definition rather than repeating a column list that would drift.
+_BOX_COLUMNS = """SELECT b.*, r.reference AS resource_uri, r.id AS res_id,
+       r.origin AS res_origin, r.index_it AS res_index_it,
+       r.indexed_at AS res_indexed_at, r.mtime AS res_mtime, r.bytes AS res_bytes,
+       r.digest AS res_digest, r.stale AS res_stale"""
 
-_SELECT_BY_TYPE = "SELECT * FROM boxes WHERE box_type = ? ORDER BY key"
+_BOX_FROM = "FROM boxes b LEFT JOIN resources r ON r.id = b.resource_id"
+
+_SELECT_BOX = f"{_BOX_COLUMNS} {(_BOX_FROM)}"
+
+_SELECT_BY_KEY = f"{_BOX_COLUMNS} {_BOX_FROM} WHERE b.key = ?"
+
+_SELECT_BY_TYPE = f"{_BOX_COLUMNS} {_BOX_FROM} WHERE b.box_type = ? ORDER BY b.key"
 
 _SELECT_CHILD_IDS = "SELECT child_id FROM links WHERE parent_id = ?"
 
 _SELECT_ONE_LINK = "SELECT 1 FROM links WHERE parent_id = ? AND child_id = ?"
 
-_INSERT_DOC = "INSERT INTO box_text (box_id, body) VALUES (?, ?)"
+_INSERT_DOC = "INSERT INTO resource_text (resource_id, body) VALUES (?, ?)"
 
-_DELETE_DOC = "DELETE FROM box_text WHERE box_id = ?"
+_DELETE_DOC = "DELETE FROM resource_text WHERE resource_id = ?"
 
-# snippet() addresses the body as column 1: column 0 is the unindexed box id.
+# snippet() addresses the body as column 1: column 0 is the unindexed resource id.
 _SEARCH_DOCS = """
-SELECT box_id, bm25(box_text) AS score,
-       snippet(box_text, 1, '[', ']', ' … ', 12) AS passage
-  FROM box_text WHERE box_text MATCH ? ORDER BY score LIMIT ?
+SELECT resource_id, bm25(resource_text) AS score,
+       snippet(resource_text, 1, '[', ']', ' \u2026 ', 12) AS passage
+  FROM resource_text WHERE resource_text MATCH ? ORDER BY score LIMIT ?
 """
 
-_VOCAB_BY_PREFIX = "SELECT term FROM box_text_vocab WHERE term GLOB ? LIMIT 4000"
+_VOCAB_BY_PREFIX = "SELECT term FROM resource_text_vocab WHERE term GLOB ? LIMIT 4000"
 
-_COUNT_DOCS = "SELECT count(*) AS n FROM box_text"
+_COUNT_DOCS = "SELECT count(*) AS n FROM resource_text"
 
-_SELECT_BY_REF = "SELECT * FROM boxes WHERE key = ? OR uuid = ?"
+_SELECT_BY_REF = f"{_BOX_COLUMNS} {_BOX_FROM} WHERE b.key = ? OR b.uuid = ?"
 
-_SELECT_RELATED_CHILDREN = """
-SELECT b.* FROM boxes b JOIN links l ON l.child_id = b.id
- WHERE l.parent_id = ? ORDER BY b.key
-"""
+_SELECT_BOXES_BY_RESOURCE = f"{_BOX_COLUMNS} {_BOX_FROM} WHERE b.resource_id = ? ORDER BY b.key"
 
-_SELECT_RELATED_PARENTS = """
-SELECT b.* FROM boxes b JOIN links l ON l.parent_id = b.id
- WHERE l.child_id = ? ORDER BY b.key
-"""
+# The links are joined onto the same reading, so a child arrives with its own resource
+# and the panel does not ask again for each of them.
+_SELECT_RELATED_CHILDREN = (
+    f"{_BOX_COLUMNS} {_BOX_FROM} JOIN links l ON l.child_id = b.id"
+    " WHERE l.parent_id = ? ORDER BY b.key"
+)
 
-_SEARCH_SQL = r"""
-SELECT * FROM boxes
- WHERE key LIKE ? ESCAPE '\'
-    OR lower(description) LIKE ? ESCAPE '\'
-    OR lower(coalesce(resource_uri, '')) LIKE ? ESCAPE '\'
-    OR lower(metadata) LIKE ? ESCAPE '\'
-    OR lower(config) LIKE ? ESCAPE '\'
- ORDER BY key
+_SELECT_RELATED_PARENTS = (
+    f"{_BOX_COLUMNS} {_BOX_FROM} JOIN links l ON l.parent_id = b.id"
+    " WHERE l.child_id = ? ORDER BY b.key"
+)
+
+# A box is found by its own fields or by the address it points at, which since v7 lives
+# in another table: the join above is what makes that one query rather than two.
+_SEARCH_SQL = (
+    f"{_BOX_COLUMNS} {_BOX_FROM}"
+    + r"""
+ WHERE b.key LIKE ? ESCAPE '\'
+    OR lower(b.description) LIKE ? ESCAPE '\'
+    OR lower(coalesce(r.reference, '')) LIKE ? ESCAPE '\'
+    OR lower(b.metadata) LIKE ? ESCAPE '\'
+    OR lower(b.config) LIKE ? ESCAPE '\'
+ ORDER BY b.key
  LIMIT ?
 """
+)
 
 
 def _now() -> str:
@@ -180,9 +233,23 @@ class BoxStore:
             store.add(Box(name="Kitchen"))
     """
 
-    def __init__(self, path: str | Path | None = None) -> None:
-        """Open (and if needed create or upgrade) the database at *path*."""
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        content_root: str | Path | None = None,
+    ) -> None:
+        """Open (and if needed create or upgrade) the database at *path*.
+
+        `content_root` is the directory the index is allowed to read inside, and it is
+        kept here rather than passed to each call because the box that is created does
+        not know who created it: the page has one confine, `box index --root` names
+        another, and the default is the one from the environment. Nothing else about the
+        store changes — it is still storage — but a box added through it can be read into
+        the index in the same breath, and that needs to know where reading is allowed.
+        """
         self.path = Path(path) if path is not None else config.default_db_path()
+        self.content_root = paths.content_root(content_root)
         if str(self.path) != ":memory:":
             config.ensure_parent(self.path)
         self._lock = threading.RLock()
@@ -196,6 +263,7 @@ class BoxStore:
             stored_version = int(before[0]) if before is not None else 0
             self._conn.execute("PRAGMA foreign_keys = ON")
             self._conn.executescript(_SCHEMA)
+            self._conn.executescript(_SCHEMA_RESOURCES)
             self._conn.commit()
         self._migrate(stored_version)
         with self._lock:
@@ -221,15 +289,22 @@ class BoxStore:
 
     # -- boxes -------------------------------------------------------------
 
-    def add(self, box: Box) -> Box:
+    def add(self, box: Box, *, index_it: bool | None = None) -> Box:
         """Insert *box* and return the stored copy with ``id`` filled in.
 
         The type named by ``box.box_type`` must exist and must accept the box:
         see :mod:`boxganizer.boxtypes`.
+
+        ``index_it`` is the answer of the dialog's "keep this in the full-text index"
+        checkbox. Left out, the default falls out of what the box points at and what it
+        is — see :meth:`_ensure_resource`.
         """
         kind = boxtypes.get(box.box_type)
         self._check_singleton(box, kind)
         kind.validate(box)
+        box.resource_id = self._ensure_resource(
+            box.resource_uri, index_it=index_it, indexes_content=kind.indexes_content
+        )
         now = _now()
         row_id = self._execute(
             _INSERT_BOX,
@@ -240,7 +315,7 @@ class BoxStore:
                 box.description or "",
                 box.icon,
                 box.box_type,
-                box.resource_uri,
+                box.resource_id,
                 json.dumps(box.metadata, sort_keys=True),
                 _as_json(box.config),
                 box.created_at.isoformat(timespec="seconds"),
@@ -251,6 +326,7 @@ class BoxStore:
         )
         box.id = row_id
         box.updated_at = datetime.now(UTC)
+        self._read_in(box)
         self._sync_membership(box)
         return box
 
@@ -397,11 +473,12 @@ class BoxStore:
         """True when a box with that name (any case) is stored."""
         return bool(self._rows(_SELECT_BY_KEY, (canonical_name(name),)))
 
-    def update(self, box: Box) -> Box:
+    def update(self, box: Box, *, index_it: bool | None = None) -> Box:
         """Write the mutable fields of *box* back to the database.
 
         The type is re-checked, so a box cannot be retyped into something its
-        resource or metadata does not support.
+        resource or metadata does not support. ``index_it`` is the dialog's checkbox;
+        left out, what the resource row already said stands.
         """
         if box.id is None:
             raise StoreError(f"cannot update {box.name!r}: box has no id")
@@ -409,12 +486,17 @@ class BoxStore:
         self._check_singleton(box, kind)
         kind.validate(box)
         self._check_still_holds_children(box, kind)
+        before = self._rows("SELECT resource_id FROM boxes WHERE id = ?", (box.id,))
+        previous = int(before[0]["resource_id"]) if before and before[0]["resource_id"] else None
+        box.resource_id = self._ensure_resource(
+            box.resource_uri, index_it=index_it, indexes_content=kind.indexes_content
+        )
         box.touch()
         self._execute(
             """
             UPDATE boxes
                SET name = ?, key = ?, description = ?, icon = ?, box_type = ?,
-                   resource_uri = ?, metadata = ?, config = ?, updated_at = ?
+                   resource_id = ?, metadata = ?, config = ?, updated_at = ?
              WHERE id = ?
             """,
             (
@@ -423,7 +505,7 @@ class BoxStore:
                 box.description or "",
                 box.icon or DEFAULT_ICON,
                 box.box_type,
-                box.resource_uri,
+                box.resource_id,
                 json.dumps(box.metadata, sort_keys=True),
                 _as_json(box.config),
                 box.updated_at.isoformat(timespec="seconds"),
@@ -431,6 +513,13 @@ class BoxStore:
             ),
             duplicate_name=box.name,
         )
+        # A box that moved to another file lets the old one go — and a box that moved
+        # *off* a file lets that one go too, which is the same case with nothing in its
+        # place. Either way the file itself is nobody's to delete; only the row that
+        # remembered it is, and only when nothing points at it now.
+        if previous is not None and previous != box.resource_id:
+            self._release_resource(previous)
+        self._read_in(box)
         self._sync_membership(box)
         return box
 
@@ -439,15 +528,18 @@ class BoxStore:
         box = self.get(name)
         assert box.id is not None
         self._execute("DELETE FROM boxes WHERE id = ?", (box.id,))
-        # Links go with the row by the foreign keys; the full-text entry cannot, so
-        # it is taken out here. A search that keeps offering a deleted box's file is
-        # a broken promise, not a stale cache.
-        self._execute(_DELETE_DOC, (box.uuid,))
+        # Links go with the row by the foreign keys. The resource does not: it may be
+        # what another box points at, and deleting the box was no word about the file.
+        # When this was the last box on it, the row and its indexed text go together —
+        # a search that keeps offering the file of a box that no longer exists is not a
+        # stale cache but a broken promise.
+        if box.resource_id is not None:
+            self._release_resource(int(box.resource_id))
         return box
 
     def list_boxes(self, *, limit: int | None = None, offset: int = 0) -> list[Box]:
         """Return every box, ordered by name."""
-        sql = "SELECT * FROM boxes ORDER BY key"
+        sql = _SELECT_BOX + " ORDER BY b.key"
         params: list[object] = []
         if limit is not None:
             sql += " LIMIT ?"
@@ -507,34 +599,222 @@ class BoxStore:
             (parent_id, child_id, _now()),
         )
 
+    # -- resources ---------------------------------------------------------
+    #
+    # What a box points at is a row of its own, so that one file means one entry in the
+    # full-text index and one set of observations about whether it has changed. The box
+    # still carries `resource_uri`, filled from that row on every read: nothing outside
+    # this class needs to know the address lives elsewhere.
+
+    def _ensure_resource(
+        self,
+        reference: str | None,
+        *,
+        index_it: bool | None = None,
+        indexes_content: bool = False,
+        origin: str | None = None,
+    ) -> int | None:
+        """The row for this address, made if nothing has pointed at it before.
+
+        Comparison is on the normalised form, so `/a/../a.txt`, `a.txt` written from
+        `/a`, and `file:///a/a.txt` all land on one row. An address nobody has used
+        gets its default from what it is: a box whose type reads its file (a text, a
+        PDF) is indexed, as is a local file whose ending says words; a web page, an MQTT
+        topic, a picture are not. `index_it` — the dialog's checkbox — overrules both.
+
+        An existing row is left alone unless someone named a wish: re-pointing a second
+        box at a file is not a reason to change what is known about it.
+        """
+        raw = (reference or "").strip()
+        if not raw:
+            return None
+        key = resources.normalise(raw)
+        found = self._rows("SELECT id FROM resources WHERE ref_key = ?", (key,))
+        if found:
+            existing = int(found[0]["id"])
+            if index_it is not None:
+                self._execute(
+                    "UPDATE resources SET index_it = ?, stale = 0 WHERE id = ?",
+                    (int(bool(index_it)), existing),
+                )
+            return existing
+        where = origin or resources.origin_of(raw)
+        if index_it is None:
+            index_it = bool(indexes_content) or resources.index_by_default(raw, origin=where)
+        return self._execute(
+            "INSERT INTO resources (reference, ref_key, origin, index_it) VALUES (?, ?, ?, ?)",
+            (raw, key, where, int(bool(index_it))),
+            lastrowid=True,
+        )
+
+    def _release_resource(self, resource_id: int) -> None:
+        """Let go of a resource one box stopped pointing at.
+
+        Only the last reference is the last use: the file goes on living on disk for the
+        next box, and its indexed text goes on being useful, until nothing points at it.
+        """
+        left = self._rows("SELECT count(*) AS n FROM boxes WHERE resource_id = ?", (resource_id,))
+        if left and int(left[0]["n"]) > 0:
+            return
+        self._execute(_DELETE_DOC, (resource_id,))
+        self._execute("DELETE FROM resources WHERE id = ?", (resource_id,))
+
+    def resource(self, ref: int | str | os.PathLike[str] | Box) -> resources.Resource | None:
+        """One resource, by its id, by its address, or by a box pointing at it.
+
+        A path is accepted as a `Path` or as a string because both are how addresses
+        arrive from the rest of the code; either way it is the normalised form that finds
+        the row, which is the same form two boxes were deduped on.
+        """
+        if isinstance(ref, Box):
+            if ref.resource_id is None:
+                return None
+            key: object = ref.resource_id
+            sql = "SELECT * FROM resources WHERE id = ?"
+        elif isinstance(ref, int):
+            key, sql = ref, "SELECT * FROM resources WHERE id = ?"
+        else:
+            key, sql = resources.normalise(str(ref)), "SELECT * FROM resources WHERE ref_key = ?"
+        rows = self._rows(sql, (key,))
+        return self._resource_from_row(rows[0]) if rows else None
+
+    @staticmethod
+    def _resource_from_row(row: sqlite3.Row) -> resources.Resource:
+        return resources.Resource(
+            id=int(row["id"]),
+            reference=str(row["reference"]),
+            origin=str(row["origin"]),
+            index_it=bool(row["index_it"]),
+            indexed_at=str(row["indexed_at"]) if row["indexed_at"] else None,
+            fingerprint=resources.Fingerprint(
+                mtime=float(row["mtime"]) if row["mtime"] is not None else None,
+                bytes=int(row["bytes"]) if row["bytes"] is not None else None,
+                digest=str(row["digest"]) if row["digest"] else None,
+            ),
+            marked_stale=bool(row["stale"]),
+        )
+
+    def indexed_resources(self) -> list[resources.Resource]:
+        """Every resource the index is being kept up to date for."""
+        return [
+            self._resource_from_row(row)
+            for row in self._rows("SELECT * FROM resources WHERE index_it = 1 ORDER BY reference")
+        ]
+
+    def set_index_flag(
+        self, ref: int | str | os.PathLike[str] | Box, index_it: bool
+    ) -> resources.Resource | None:
+        """Opt a resource in or out of the full-text index, and act on it.
+
+        Opting out takes its text out of the index at once, so a search cannot go on
+        finding a file somebody asked not to read; opting in is answered by the caller
+        reading it in, which is what `boxganizer.search` does.
+        """
+        found = self.resource(ref)
+        if found is None:
+            return None
+        self._execute(
+            "UPDATE resources SET index_it = ?, stale = 0 WHERE id = ?",
+            (int(bool(index_it)), found.id),
+        )
+        if not index_it:
+            self._execute(_DELETE_DOC, (found.id,))
+            self._execute(
+                "UPDATE resources SET indexed_at = NULL, mtime = NULL, bytes = NULL,"
+                " digest = NULL WHERE id = ?",
+                (found.id,),
+            )
+        return self.resource(found.id)
+
+    def record_index(
+        self,
+        resource_id: int,
+        *,
+        body: str | None,
+        seen: resources.Fingerprint | None = None,
+    ) -> None:
+        """What the index now holds for one resource, and what the file looked like.
+
+        The observations are written by whoever read the file, because only they know
+        whether the read succeeded: `body=None` says there is nothing to hold, which is
+        recorded too so a later run does not mistake an unreadable file for an unread one.
+        """
+        self._execute(_DELETE_DOC, (resource_id,))
+        if body and body.strip():
+            self._execute(_INSERT_DOC, (resource_id, body))
+        watch = seen or resources.Fingerprint()
+        self._execute(
+            "UPDATE resources SET indexed_at = ?, mtime = ?, bytes = ?, digest = ?,"
+            " stale = 0 WHERE id = ?",
+            (
+                _now(),
+                watch.mtime,
+                watch.bytes,
+                watch.digest,
+                resource_id,
+            ),
+        )
+
+    def check_observations(self) -> list[resources.Resource]:
+        """Look at every indexed file and say which indexes have gone stale.
+
+        One `stat` per resource, no reading: this is what `box index --check` runs, and
+        what the page can ask before it offers "3 files changed since they were indexed".
+        A file that has gone away counts as stale, because whatever is in the index is
+        certainly not what is on disk.
+        """
+        stale: list[resources.Resource] = []
+        for item in self.indexed_resources():
+            seen = resources.stat(item.reference)
+            changed = item.stale(now=seen) is True
+            self._execute("UPDATE resources SET stale = ? WHERE id = ?", (int(changed), item.id))
+            if changed:
+                stale.append(
+                    resources.Resource(
+                        id=item.id,
+                        reference=item.reference,
+                        origin=item.origin,
+                        index_it=item.index_it,
+                        indexed_at=item.indexed_at,
+                        fingerprint=item.fingerprint,
+                        marked_stale=True,
+                    )
+                )
+        return stale
+
     # -- the full-text index ------------------------------------------------
     #
-    # What is stored here is the text of a box's file, nothing else: which boxes are
-    # worth reading, how big a file may be and where the confine is, all belong to
-    # `boxganizer.search`. The store keeps the rows and answers from them.
+    # The index is keyed by resource, not by box: the file has the words, and several
+    # boxes may point at one file. Which boxes to show for a hit is answered by
+    # `boxes_by_resources`, so the mapping back is the store's job too.
 
-    def index_text(self, box_uuid: str, text: str) -> None:
-        """Replace what is indexed for one box. Empty text removes it entirely."""
-        self._execute(_DELETE_DOC, (box_uuid,))
-        if text.strip():
-            self._execute(_INSERT_DOC, (box_uuid, text))
+    def content_search(self, match: str, *, limit: int = 100) -> list[tuple[int, float, str]]:
+        """Resources whose indexed text answers *match*, best first.
 
-    def drop_text(self, box_uuid: str) -> None:
-        """Stop indexing a box, without touching the box."""
-        self._execute(_DELETE_DOC, (box_uuid,))
-
-    def content_search(self, match: str, *, limit: int = 100) -> list[tuple[str, float, str]]:
-        """Boxes whose indexed text answers *match*, best first.
-
-        Returns ``(uuid, score, passage)``. A malformed expression — a stray quote in
-        what someone typed — is not an error to show them: it answers with nothing,
-        and the name search still runs.
+        Returns ``(resource_id, score, passage)``. A malformed expression — a stray
+        quote in what someone typed — is not an error to show them: it answers with
+        nothing, and the name search still runs.
         """
         try:
             rows = self._rows(_SEARCH_DOCS, (match, limit))
         except StoreError:
             return []
-        return [(str(row["box_id"]), float(row["score"]), str(row["passage"])) for row in rows]
+        return [(int(row["resource_id"]), float(row["score"]), str(row["passage"])) for row in rows]
+
+    def boxes_by_resources(self, resource_ids: Sequence[int]) -> dict[int, list[Box]]:
+        """The boxes pointing at each of these resources, in the order asked for.
+
+        Several boxes may share one file, and a search that found the file found all of
+        them; the passage is the same and so is the reason, which the page says once.
+        """
+        found: dict[int, list[Box]] = {}
+        for resource_id in resource_ids:
+            if resource_id in found:
+                continue
+            rows = self._rows(_SELECT_BOXES_BY_RESOURCE, (resource_id,))
+            if rows:
+                found[resource_id] = [self._from_row(row) for row in rows]
+        return found
 
     def vocabulary(self, *, prefix: str = "") -> tuple[str, ...]:
         """Distinct indexed words, optionally those starting with *prefix*.
@@ -553,25 +833,25 @@ class BoxStore:
             return ()
         return tuple(str(row["term"]) for row in rows)
 
-    def boxes_by_uuid(self, uuids: Sequence[str]) -> dict[str, Box]:
-        """Several boxes at once, keyed by uuid, in the order asked for.
-
-        The full-text search finds uuids in the index and then needs the boxes behind
-        them; asking one at a time would be one query per hit.
-        """
-        found: dict[str, Box] = {}
-        for uuid in uuids:
-            if uuid in found:
-                continue
-            rows = self._rows(_SELECT_BY_REF, ("", uuid))
-            if rows:
-                found[uuid] = self._from_row(rows[0])
-        return found
-
-    def indexed_boxes(self) -> int:
-        """How many boxes have text in the index."""
+    def indexed_count(self) -> int:
+        """How many resources have text in the index."""
         rows = self._rows(_COUNT_DOCS)
         return int(rows[0]["n"]) if rows else 0
+
+    def _read_in(self, box: Box) -> None:
+        """Index what this box points at, when that is what it is for.
+
+        The reading itself belongs to :mod:`boxganizer.search`, which is imported here
+        late and quietly: the store holds rows and does not open files, but every door
+        into the database goes through `add` and `update`, and an index that has to be
+        remembered is an index that goes stale. `search` imports no store of its own, so
+        there is no cycle to trip over.
+        """
+        if box.resource_id is None:
+            return
+        from boxganizer import search as _search
+
+        _search.sync_resource(self, box.resource_id, root=self.content_root)
 
     def root_box(self) -> Box | None:
         """The box the library starts from, or None when it holds none.
@@ -593,14 +873,11 @@ class BoxStore:
     def root_child(self) -> Box | None:
         """The single box filed under the root, or None."""
         rows = self._rows(
-            """
-            SELECT b.* FROM boxes b
-              JOIN links l ON l.child_id = b.id
-              JOIN boxes r ON r.id = l.parent_id
-             WHERE r.box_type = 'root'
-             ORDER BY l.added_at DESC, b.key
-             LIMIT 1
-            """
+            f"{_BOX_COLUMNS} {_BOX_FROM}"
+            " JOIN links slot ON slot.child_id = b.id"
+            " JOIN boxes way_in ON way_in.id = slot.parent_id"
+            " WHERE way_in.box_type = 'root'"
+            " ORDER BY slot.added_at DESC, b.key LIMIT 1"
         )
         return self._from_row(rows[0]) if rows else None
 
@@ -702,8 +979,87 @@ class BoxStore:
                 self._execute(f"ALTER TABLE boxes ADD COLUMN {name} {definition}")
         if stored_version < 4:
             self._backfill_uuids()
+        # The resources table comes before the folders are re-cut: a filter can ask for
+        # an address, and reading every box with its address still in a column that is
+        # about to disappear would resolve the membership of each folder against
+        # nothing. This is why the v7 step sits above the v5 one rather than under it.
+        if stored_version < 7:
+            self._split_resources_out()
         if stored_version < 5:
             self._resolve_dynamic_folders()
+
+    def _split_resources_out(self) -> None:
+        """Move every box's address into `resources`, and the index onto it, once.
+
+        A library written before v7 has the address in a column of the box, and one box
+        after another can hold the same path in four spellings. So each distinct address
+        becomes a row — its default for indexing taken from the type of a box pointing at
+        it — and the box is left pointing at the row. Then the full-text entries, which
+        were keyed by box uuid, are re-keyed onto the resource the box now names; the
+        words are carried across rather than dropped, because an index that empties on
+        upgrade is not a migration but a loss, and refilling it means reading every file
+        again.
+
+        `boxes.resource_uri` is dropped at the end, so there is no second copy of an
+        address left to disagree with the first.
+        """
+        columns = {str(row["name"]) for row in self._rows("PRAGMA table_info(boxes)")}
+        if "resource_id" not in columns:
+            self._execute(
+                "ALTER TABLE boxes ADD COLUMN resource_id INTEGER REFERENCES resources (id)"
+            )
+        if "resource_uri" in columns:
+            rows = self._rows(
+                "SELECT id, box_type, resource_uri FROM boxes"
+                " WHERE resource_uri IS NOT NULL AND resource_uri <> ''"
+            )
+            for row in rows:
+                box_type = str(row["box_type"] or "box")
+                kind = boxtypes.get(box_type) if boxtypes.known(box_type) else None
+                resource_id = self._ensure_resource(
+                    str(row["resource_uri"]),
+                    indexes_content=bool(kind and kind.indexes_content),
+                )
+                self._execute(
+                    "UPDATE boxes SET resource_id = ? WHERE id = ?",
+                    (resource_id, int(row["id"])),
+                )
+        self._carry_the_index_across()
+        if "resource_uri" in columns:
+            self._execute("ALTER TABLE boxes DROP COLUMN resource_uri")
+
+    def _carry_the_index_across(self) -> None:
+        """Re-key `box_text` onto resources, then take the old table out.
+
+        Two boxes that shared a file shared nothing before v7 and share one row now: the
+        duplicate text is dropped on the way, since the same words indexed twice only
+        make a search answer twice.
+        """
+        tables = {
+            str(row["name"])
+            for row in self._rows("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        if "box_text" not in tables:
+            return
+        carried: set[int] = set()
+        for row in self._rows("SELECT box_id, body FROM box_text"):
+            where = self._rows(
+                "SELECT resource_id FROM boxes WHERE uuid = ? AND resource_id IS NOT NULL",
+                (str(row["box_id"]),),
+            )
+            if not where or where[0]["resource_id"] is None:
+                continue  # the box is gone, or never pointed at a thing worth indexing
+            resource_id = int(where[0]["resource_id"])
+            if resource_id in carried:
+                continue
+            carried.add(resource_id)
+            if str(row["body"] or "").strip():
+                self._execute(_INSERT_DOC, (resource_id, row["body"]))
+        # A shadow table is dropped with its index; the vocab table is named first only
+        # because SQLite leaves it behind if the index it reads is taken away.
+        if "box_text_vocab" in tables:
+            self._execute("DROP TABLE IF EXISTS box_text_vocab")
+        self._execute("DROP TABLE IF EXISTS box_text")
 
     def _resolve_dynamic_folders(self) -> None:
         """Fill every dynamic folder from its filter, once, when a library is upgraded.
@@ -736,6 +1092,7 @@ class BoxStore:
             icon=row["icon"],
             box_type=str(row["box_type"]),
             resource_uri=row["resource_uri"],
+            resource_id=int(row["resource_id"]) if row["resource_id"] is not None else None,
             metadata={str(k): str(v) for k, v in metadata.items()},
             config=dict(config),
             created_at=datetime.fromisoformat(row["created_at"]),

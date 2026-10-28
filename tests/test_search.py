@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,9 @@ from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
 # --- a PDF with real text in it --------------------------------------------------
+
+
+PDF_TEXT = "celery and the basement flood"
 
 
 def _pdf_with(text: str) -> bytes:
@@ -73,8 +78,11 @@ def test_the_pdf_text_actually_arrives(root: Path) -> None:
 
 
 def test_a_picture_is_not_read_for_text(root: Path) -> None:
+    # the type says no, and so does the file when someone overrides it
+    assert search.indexes(_box("blob.png", "image", root / "blob.png")) is False
     found = search.extract(_box("blob.png", "image", root / "blob.png"), root=root)
-    assert not found.usable and "image" in found.note
+    assert not found.usable
+    assert "not text" in found.note
 
 
 def test_a_missing_file_is_reported_not_raised(root: Path) -> None:
@@ -172,7 +180,7 @@ def test_quotes_cannot_break_the_expression() -> None:
 
 
 def test_fuzzy_forms_come_from_the_index_vocabulary(root: Path) -> None:
-    store = BoxStore(root / "fuzzy.db")
+    store = BoxStore(root / "fuzzy.db", content_root=root)
     try:
         store.add(_box("siding", "text", root / "siding.txt"))
         search.rebuild(store, root=root)
@@ -192,77 +200,191 @@ def test_a_short_word_is_not_fuzzied() -> None:
 # --- the store's index --------------------------------------------------------------
 
 
-def test_rebuild_indexes_the_boxes_that_have_text(root: Path) -> None:
-    store = BoxStore(root / "lib.db")
+def _resource_of(store: BoxStore, name: str) -> int:
+    """The row a box points at, which is what the index is keyed on."""
+    box = store.get(name)
+    assert box.resource_id is not None
+    return int(box.resource_id)
+
+
+def test_one_file_two_boxes_is_one_entry_in_the_index(tmp_path: Path) -> None:
+    store = BoxStore(tmp_path / "shared.db", content_root=tmp_path)
     try:
-        store.add(_box("siding", "text", root / "siding.txt"))
-        store.add(_box("notes", "markdown", root / "notes.md"))
-        store.add(_box("plan", "pdf", root / "plan.pdf"))
-        store.add(_box("blob", "image", root / "blob.png"))
-        store.add(Box(name="a folder", box_type="folder"))
-        report = search.rebuild(store, root=root)
-        assert report.indexed == 3
-        assert store.indexed_boxes() == 3
-        assert report.summary()
+        notes = tmp_path / "notes.txt"
+        notes.write_text("The cellar pump runs twice a night.", encoding="utf-8")
+        first = store.add(Box(name="First", box_type="text", resource_uri=str(notes)))
+        second = store.add(Box(name="Second", box_type="folder", resource_uri=str(notes)))
+        assert first.resource_id == second.resource_id  # one file, one row
+        assert store.indexed_count() == 1
+
+        planned = search.plan("cellar")
+        hits = store.content_search(planned.content_match, limit=5)
+        assert [hit[0] for hit in hits] == [first.resource_id]
+        # and the answer comes back as both boxes, because both are true
+        boxes = store.boxes_by_resources([first.resource_id])[first.resource_id]
+        assert sorted(box.name for box in boxes) == ["First", "Second"]
     finally:
         store.close()
 
 
-def test_a_content_match_names_the_box_and_shows_where(root: Path) -> None:
-    store = BoxStore(root / "lib.db")
+def test_rebuild_reads_every_resource_the_index_is_wanted_for(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text(
+        "The cellar pump runs every night at three.", encoding="utf-8"
+    )
+    (tmp_path / "report.pdf").write_bytes(_pdf_with(PDF_TEXT))
+    store = BoxStore(tmp_path / "index.db", content_root=tmp_path)
     try:
-        box = store.add(_box("siding", "text", root / "siding.txt"))
-        search.rebuild(store, root=root)
+        store.add(Box(name="Notes", box_type="text", resource_uri=str(tmp_path / "notes.txt")))
+        store.add(Box(name="Report", box_type="pdf", resource_uri=str(tmp_path / "report.pdf")))
+        store.add(Box(name="Shelf", box_type="folder"))  # an organiser: nothing to read
+        # the adds already read both files in, so the rebuild finds nothing to do and
+        # says which of the two that is
+        report = search.rebuild(store, root=tmp_path)
+        assert report.resources == 2
+        assert report.indexed + report.unchanged == 2
+        assert store.indexed_count() == 2
+
+        # "cellar" reaches the PDF too, through the synonym "basement" inside it —
+        # which is the whole point of widening, and worth asserting on rather than hiding
+        planned = search.plan("cellar", lambda term: store.vocabulary(prefix=term[:1]))
+        hits = {hit[0] for hit in store.content_search(planned.content_match, limit=10)}
+        assert hits == {_resource_of(store, "Notes"), _resource_of(store, "Report")}
+        # a word that only the PDF contains finds the PDF, and nothing else
+        alone = store.content_search(search.plan("celery").content_match, limit=10)
+        assert [hit[0] for hit in alone] == [_resource_of(store, "Report")]
+    finally:
+        store.close()
+
+
+def test_a_file_that_has_not_changed_is_not_read_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The observations on the resource row are what make watching a library cheap."""
+    notes = tmp_path / "notes.txt"
+    notes.write_text("The cellar pump runs twice a night.", encoding="utf-8")
+    store = BoxStore(tmp_path / "watch.db", content_root=tmp_path)
+    try:
+        store.add(Box(name="Notes", box_type="text", resource_uri=str(notes)))
+        search.sync_resource(store, _resource_of(store, "Notes"))  # the add read it in
+        reads: list[str] = []
+        real = search.extract_resource
+
+        def counting(reference: str, **kwargs: object) -> search.Extracted:
+            reads.append(reference)
+            return real(reference, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(search, "extract_resource", counting)
+        search.sync_resource(store, _resource_of(store, "Notes"))
+        assert reads == []  # same size, same mtime: the index already says what it says
+        notes.write_text("The cellar pump runs twice an hour now.", encoding="utf-8")
+        os.utime(notes, (notes.stat().st_mtime + 30, notes.stat().st_mtime + 30))
+        search.sync_resource(store, _resource_of(store, "Notes"))
+        assert reads == [str(notes)]
+        assert "hour" in store.content_search(search.plan("hour").content_match, limit=5)[0][2]
+    finally:
+        store.close()
+
+
+def test_opting_a_resource_out_takes_it_out_of_the_index(tmp_path: Path) -> None:
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Something private about the cellar.", encoding="utf-8")
+    store = BoxStore(tmp_path / "opt.db", content_root=tmp_path)
+    try:
+        store.add(Box(name="Notes", box_type="text", resource_uri=str(notes)))
+        assert store.content_search(search.plan("cellar").content_match, limit=5)
+        changed = store.set_index_flag(_resource_of(store, "Notes"), False)
+        assert changed is not None and changed.index_it is False
+        assert store.content_search(search.plan("cellar").content_match, limit=5) == []
+        assert store.indexed_count() == 0
+    finally:
+        store.close()
+
+
+def test_a_content_match_shows_the_words_that_answered(tmp_path: Path) -> None:
+    (tmp_path / "siding.txt").write_text("Paint the fence next spring.", encoding="utf-8")
+    store = BoxStore(tmp_path / "lib.db", content_root=tmp_path)
+    try:
+        store.add(_box("Siding", "text", tmp_path / "siding.txt"))
         hits = store.content_search('"fence"', limit=5)
-        assert [uuid for uuid, _score, _passage in hits] == [box.uuid]
-        assert "fence" in hits[0][2].lower()  # a passage round the word
+        assert [hit[0] for hit in hits] == [_resource_of(store, "Siding")]
+        assert "fence" in hits[0][2].lower()
     finally:
         store.close()
 
 
-def test_stemming_matches_a_different_form_of_the_word(root: Path) -> None:
-    store = BoxStore(root / "lib.db")
+def test_stemming_matches_a_different_form_of_the_word(tmp_path: Path) -> None:
+    (tmp_path / "runs.txt").write_text("The pump runs twice a night.", encoding="utf-8")
+    store = BoxStore(tmp_path / "stem.db", content_root=tmp_path)
     try:
-        box = store.add(_box("siding", "text", root / "siding.txt"))
-        search.rebuild(store, root=root)
-        # the file says "runs"; porter stemming means "run" finds it
-        assert [hit[0] for hit in store.content_search('"run"', limit=5)] == [box.uuid]
+        store.add(_box("Runs", "text", tmp_path / "runs.txt"))
+        search.rebuild(store, root=tmp_path)
+        assert store.content_search('"run"', limit=5)  # the index holds the stem
+        assert store.content_search('"running"', limit=5)  # and folds the query too
     finally:
         store.close()
 
 
-def test_deleting_a_box_takes_its_text_with_it(root: Path) -> None:
-    store = BoxStore(root / "lib.db")
+def test_deleting_the_last_box_takes_the_text_with_it(tmp_path: Path) -> None:
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Paint the fence next spring.", encoding="utf-8")
+    store = BoxStore(tmp_path / "del.db", content_root=tmp_path)
     try:
-        store.add(_box("siding", "text", root / "siding.txt"))
-        search.rebuild(store, root=root)
+        store.add(Box(name="First", box_type="text", resource_uri=str(notes)))
+        resource_id = _resource_of(store, "First")
         assert store.content_search('"fence"', limit=5)
-        store.remove("siding")
+        store.add(Box(name="Second", box_type="text", resource_uri=str(notes)))
+        store.remove("First")
+        # the file still has a box pointing at it, so the index keeps it
+        assert store.content_search('"fence"', limit=5)
+        store.remove("Second")
         assert store.content_search('"fence"', limit=5) == []
-        assert store.indexed_boxes() == 0
+        assert store.resource(resource_id) is None
     finally:
         store.close()
 
 
-def test_reindexing_a_box_replaces_what_is_held(root: Path) -> None:
-    store = BoxStore(root / "lib.db")
+def test_reindexing_a_resource_replaces_what_is_held(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("Paint the fence next spring.", encoding="utf-8")
+    store = BoxStore(tmp_path / "replace.db", content_root=tmp_path)
     try:
-        box = store.add(_box("siding", "text", root / "siding.txt"))
-        search.rebuild(store, root=root)
-        store.index_text(box.uuid, "something else entirely")
+        store.add(Box(name="Notes", box_type="text", resource_uri=str(tmp_path / "notes.txt")))
+        search.rebuild(store, root=tmp_path)
+        resource_id = _resource_of(store, "Notes")
+        store.record_index(resource_id, body="something else entirely")
         assert store.content_search('"fence"', limit=5) == []
         assert store.content_search('"entirely"', limit=5)
-        assert store.indexed_boxes() == 1  # replaced, not doubled
+        assert store.indexed_count() == 1  # replaced, not doubled
     finally:
         store.close()
 
 
-def test_a_malformed_query_answers_with_nothing_rather_than_erroring(root: Path) -> None:
-    store = BoxStore(root / "lib.db")
+def test_a_malformed_query_answers_with_nothing_rather_than_erroring(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("Paint the fence.", encoding="utf-8")
+    store = BoxStore(tmp_path / "bad.db", content_root=tmp_path)
     try:
-        store.add(_box("siding", "text", root / "siding.txt"))
-        search.rebuild(store, root=root)
+        store.add(Box(name="Notes", box_type="text", resource_uri=str(tmp_path / "notes.txt")))
+        search.rebuild(store, root=tmp_path)
         assert store.content_search('cellar ANDOR "fence"', limit=5) == []
+    finally:
+        store.close()
+
+
+def test_checking_observations_notices_a_file_edited_elsewhere(tmp_path: Path) -> None:
+    notes = tmp_path / "notes.txt"
+    notes.write_text("Paint the fence next spring.", encoding="utf-8")
+    store = BoxStore(tmp_path / "stale.db", content_root=tmp_path)
+    try:
+        store.add(Box(name="Notes", box_type="text", resource_uri=str(notes)))
+        search.rebuild(store, root=tmp_path)
+        assert store.check_observations() == []
+        notes.write_text("Paint the fence and the gate next spring.", encoding="utf-8")
+        os.utime(notes, (notes.stat().st_mtime + 30, notes.stat().st_mtime + 30))
+        stale = store.check_observations()
+        assert [item.reference for item in stale] == [str(notes)]
+        # and a pass over the stale ones only is enough to fix it
+        report = search.rebuild(store, root=tmp_path, only_stale=True)
+        assert report.resources == 1
+        assert store.check_observations() == []
     finally:
         store.close()
 
@@ -278,7 +400,7 @@ def test_the_page_finds_a_box_by_what_its_file_says(tmp_path: Path) -> None:
     shelf = tmp_path / "library"
     shelf.mkdir()
     (shelf / "siding.txt").write_text("Paint the fence next spring.", encoding="utf-8")
-    store = BoxStore(tmp_path / "lib.db")
+    store = BoxStore(tmp_path / "lib.db", content_root=tmp_path)
     try:
         with TestClient(create_app(store, content_root=shelf)) as client:
             created = client.post(
@@ -306,7 +428,7 @@ def test_the_page_says_which_words_it_was_widened_to(tmp_path: Path) -> None:
     shelf = tmp_path / "library"
     shelf.mkdir()
     (shelf / "cellar.txt").write_text("The basement floods every February.", encoding="utf-8")
-    store = BoxStore(tmp_path / "lib.db")
+    store = BoxStore(tmp_path / "lib.db", content_root=tmp_path)
     try:
         with TestClient(create_app(store, content_root=shelf)) as client:
             client.post(
@@ -336,7 +458,7 @@ def test_a_box_retyped_away_from_text_leaves_the_index(tmp_path: Path) -> None:
     shelf = tmp_path / "library"
     shelf.mkdir()
     (shelf / "siding.txt").write_text("Paint the fence next spring.", encoding="utf-8")
-    store = BoxStore(tmp_path / "lib.db")
+    store = BoxStore(tmp_path / "lib.db", content_root=tmp_path)
     try:
         with TestClient(create_app(store, content_root=shelf)) as client:
             created = client.post(
@@ -375,14 +497,24 @@ def test_the_command_line_indexes_and_then_finds_the_words(
     added = invoke(db_path, "add", "Siding", "-t", "text", "-r", str(shelf / "siding.txt"))
     assert added.exit_code == 0, added.output
 
+    # adding the box read it in, so a rebuild the same day has nothing to do — and says
+    # so, rather than pretending to work
+    first = invoke(db_path, "index")
+    assert first.exit_code == 0, first.output
+    assert "already up to date" in first.output
+
+    (shelf / "siding.txt").write_text(
+        "Paint the fence next spring, and the gate too.", encoding="utf-8"
+    )
+    os.utime(shelf / "siding.txt", (time.time() + 30, time.time() + 30))
     rebuilt = invoke(db_path, "index")
     assert rebuilt.exit_code == 0, rebuilt.output
-    assert "1 box file indexed" in rebuilt.output
+    assert "1 file read into the index" in rebuilt.output
 
-    found = invoke(db_path, "search", "fence")
+    found = invoke(db_path, "search", "gate")
     assert found.exit_code == 0, found.output
     assert "Siding" in found.output
-    assert "fence" in found.output  # and it shows the words that answered
+    assert "gate" in found.output  # and it shows the words that answered
 
 
 def test_the_command_line_reports_a_file_it_could_not_read(
@@ -404,5 +536,9 @@ def test_the_command_line_reports_a_file_it_could_not_read(
 
     rebuilt = invoke(db_path, "index")
     assert rebuilt.exit_code == 0, rebuilt.output
-    assert "Missing" in rebuilt.output  # named, with the reason
-    assert "1 box file indexed" in rebuilt.output
+    # named by the last part of its path, with the reason, and counted as unread
+    assert "absent.txt" in rebuilt.output
+    assert "not there any more" in rebuilt.output
+    # (rich wraps the summary line at the terminal width, so only the parts of it that
+    # fit on one line are looked for)
+    assert "1 nothing" in rebuilt.output
