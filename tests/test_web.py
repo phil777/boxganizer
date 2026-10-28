@@ -2344,8 +2344,12 @@ def test_the_rendered_page_does_not_build_html_from_a_file(client: TestClient) -
     script = client.get("/static/app.js").text
     start = script.index("async function markdownView")
     view = script[start : script.index('registerView("markdown"', start)]
-    inner_html = [line.strip() for line in view.splitlines() if "innerHTML" in line]
-    assert inner_html == ["body.innerHTML = answer.html;"]
+    assignments = [
+        line.strip()
+        for line in view.splitlines()
+        if "innerHTML" in line and not line.strip().startswith("//")
+    ]
+    assert assignments == ["body.innerHTML = answer.html;"]
 
 
 def test_the_checklist_view_is_a_list_you_can_act_on(client: TestClient) -> None:
@@ -2401,3 +2405,37 @@ def test_a_box_dropped_on_a_line_files_it_there(client: TestClient) -> None:
         json={"items": [{"text": "Buy", "refs": [part.uuid]}]},
     )
     assert answer.json()["attached"] == [part.uuid]
+
+
+def test_the_note_view_writes_markers_and_holds_no_document_model(client: TestClient) -> None:
+    """The toolbox marks the text up; it does not replace it with a richer format."""
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    assert 'registerView("note", {' in script
+    assert "async function noteView" in script
+    # the toolbox is markers, applied to the selection: `**`, `*`, `~~`, line prefixes
+    toolbox = script[script.index("const NOTE_TOOLBOX") : script.index("async function noteView")]
+    assert '"**"' in toolbox and '"~~"' in toolbox and '"- "' in toolbox and '"> "' in toolbox
+    assert "wrap" in toolbox and "line" in toolbox
+    # nothing but the server's rendering reaches innerHTML, and only in the read pane
+    start = script.index("async function noteView")
+    view = script[start : script.index('registerView("note"', start)]
+    assignments = [
+        line.strip()
+        for line in view.splitlines()
+        if "innerHTML" in line and not line.strip().startswith("//")
+    ]
+    assert assignments == ["body.innerHTML = answer.html;"]
+    # the sheet, the editor, the toolbox and the chip are all styled
+    for needle in (".note-surface", ".note-editor", ".note-tool", ".note-chip"):
+        assert needle in css, needle
+
+
+def test_a_box_named_in_a_note_is_inert_until_the_page_wires_it(client: TestClient) -> None:
+    """`boxganizer:` means nothing to a browser. The click handler is what gives it a box."""
+    script = client.get("/static/app.js").text
+    start = script.index("function wireBoxLinks")
+    wiring = script[start : script.index("\n  // -- writing", start)]
+    assert 'a[href^="' in wiring
+    assert "anchorEl.removeAttribute(" in wiring
+    assert "openBox(uuid)" in wiring

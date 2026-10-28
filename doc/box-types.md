@@ -24,6 +24,7 @@ other boxes. Rules in brackets are enforced by the store.
 - `box` 📦 Box
   - `content` 📄 Content — group; leaf
     - `label` 🏷️ Label — leaf
+    - `note` 📝 Note — children allowed; resource optional
   - `resource` 🔗 Resource — group; leaf; resource required
     - `file` 📃 File — leaf; resource required; schemes: file
       - `text` 🔤 Text — leaf; resource required; schemes: file
@@ -65,7 +66,7 @@ other boxes. Rules in brackets are enforced by the store.
     - `windowed-viewport` 🪟 Windowed Viewport
 ```
 
-41 types: 5 grouping levels and 36 you can put on a box.
+43 types: 5 grouping levels and 38 you can put on a box.
 
 One type is not in the source document: `root` 🌲, a `FolderBox` subtype, because
 a database needs one place where the graph starts. `box init` creates it, and it

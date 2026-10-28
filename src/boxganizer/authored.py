@@ -129,6 +129,22 @@ def read(target: Path) -> str:
         return ""
 
 
+def write_at(target: Path, text: str) -> Path:
+    """Write a box's words at an address the box already holds.
+
+    Used when a person pointed the box at a file of theirs instead of letting Boxganizer
+    make one. The write goes to that file and nowhere else: a box told us where its words
+    live, and quietly moving them beside the database would orphan the file it was named
+    for — and the index entry written under it.
+    """
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write(target, text)
+        return target
+    _write(target, text)
+    return target
+
+
 def write(db_path: str | Path, box_uuid: str, text: str) -> Path:
     """Replace what the box's file says, and leave the file readable.
 

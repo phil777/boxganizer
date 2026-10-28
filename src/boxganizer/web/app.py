@@ -273,6 +273,26 @@ def _store_of(request: Request) -> BoxStore:
     return store
 
 
+class NoteWrite(BaseModel):
+    """What the page holds for a note: the text, and how it is to be read."""
+
+    source: str = ""
+    #: `markdown` or `text`. The file keeps its address either way — see the note type.
+    format: str = "markdown"
+
+
+
+    """One line of a checklist, as the page holds it."""
+
+    text: str = ""
+    checked: bool = False
+    depth: int = 0
+    #: `box` is a tickable item; `text` is a line of prose kept between them.
+    kind: str = "box"
+    #: Boxes hung on this line, in order. See :mod:`boxganizer.checklist`.
+    refs: list[str] = []
+
+
 class ChecklistItem(BaseModel):
     """One line of a checklist, as the page holds it."""
 
@@ -590,47 +610,158 @@ def create_app(
         result = ssh.run(box, payload.command, timeout=payload.timeout)
         return result.as_dict()
 
-    def _checklist_box(store: BoxStore, ref: str) -> Box:
+    def _authored_box(store: BoxStore, ref: str) -> Box:
         """A box whose type keeps words of its own.
 
-        Asked of the type rather than compared with the string `"checklist"`, so a note
-        type — which keeps a file the same way — answers to the same endpoints.
+        Asked of the type rather than compared with a type key, so a note — which keeps a
+        file exactly the way a checklist does — answers to the same endpoints, and a new
+        type that writes files needs no new gate.
         """
         box = store.resolve(ref)
         if not boxtypes.get(box.box_type).writes_own_file:
             raise HTTPException(
                 status_code=415,
-                detail={"error": "not_a_checklist", "type": box.box_type},
+                detail={"error": "keeps_no_words", "type": box.box_type},
             )
         return box
 
-    def _checklist_file(store: BoxStore, box: Box, *, seed: str) -> Path:
-        """The box's own file, written if this is the first thing on it.
+    def _words_file(store: BoxStore, box: Box, *, seed: str) -> Path:
+        """Where this box's words live.
 
-        Creating it is what gives the box a resource: the row is the handle the index keys on,
-        so a checklist that exists only in the database would be a list nobody can search.
+        The address the box already holds, when it has one: a person may point a note at
+        minutes that exist, or a checklist at a list they keep in a repository, and those
+        words belong to that file. Only a box with nothing pointed at it is given one beside
+        the database — and being given it is what gives the box a resource row, which is the
+        handle the index keys on. A list that exists only in the database is a list nobody
+        can search.
         """
         from boxganizer import authored
 
+        if box.resource_uri:
+            return Path(box.resource_uri)
         target = authored.ensure_file(store.path, box.uuid, seed=seed)
-        if (box.resource_uri or "") != str(target):
-            # The row is made first, with the origin that says Boxganizer wrote this file,
-            # and then the box is pointed at it: `update` finds the row by its normalised
-            # address and leaves the origin it was given alone.
-            record = authored.adopt(store, box, target, seed=seed)
-            box.resource_uri = str(target)
-            store.update(box)
-            box.resource = record
+        # The row is made first, with the origin that says Boxganizer wrote this file, and
+        # then the box is pointed at it: `update` finds the row by its normalised address
+        # and leaves the origin it was given alone.
+        record = authored.adopt(store, box, target, seed=seed)
+        box.resource_uri = str(target)
+        store.update(box)
+        box.resource = record
         return target
+
+    @app.get("/api/boxes/{ref}/note")
+    def note_get(ref: str, request: Request, store: StoreDep) -> dict[str, object]:
+        """The note's words, the format they are written to be read as, and — when that
+        format is markdown — the rendering of them.
+
+        The rendered HTML comes from the same function the markdown file box uses, so a
+        note and a `.md` file cannot disagree about what a heading or a link is, and the
+        safety rules that keep a file's own HTML as text apply here once rather than twice.
+        """
+        box = _authored_box(store, ref)
+        from boxganizer import authored, boxrefs
+
+        target = _words_file(store, box, seed=authored.EMPTY_NOTE)
+        source = authored.read(target)
+        section = box.config.get("note") if isinstance(box.config, dict) else None
+        fmt = (section or {}).get("format", "markdown")
+        html = markdown.render(source) if fmt == "markdown" else ""
+        children = store.children(box.uuid)
+        by_uuid = {child.uuid: child for child in children}
+        named = boxrefs.mentions(source)
+        return {
+            "uuid": box.uuid,
+            "name": box.name,
+            "source": source,
+            "format": fmt,
+            "html": html,
+            "file": str(target),
+            # the boxes this note names inside its own text, resolved where possible
+            "mentioned": [
+                {
+                    "uuid": uuid,
+                    "name": by_uuid[uuid].name if uuid in by_uuid else None,
+                    "icon": by_uuid[uuid].icon if uuid in by_uuid else None,
+                    "box_type": by_uuid[uuid].box_type if uuid in by_uuid else None,
+                    "gone": uuid not in by_uuid,
+                }
+                for uuid in named
+            ],
+            # and everything filed here, whether the text speaks of it or not
+            "children": [
+                {
+                    "uuid": child.uuid,
+                    "name": child.name,
+                    "icon": child.icon,
+                    "box_type": child.box_type,
+                }
+                for child in children
+            ],
+        }
+
+    @app.put("/api/boxes/{ref}/note")
+    def note_put(
+        ref: str, body: NoteWrite, request: Request, store: StoreDep
+    ) -> dict[str, object]:
+        """Write the note, keep the graph in step with what it names, reindex the words.
+
+        A box named inside the text is filed here as well. That is not the text ordering
+        the graph: it is the difference between a note that references a box and a note
+        that can lose it. The other direction stays one-way on purpose — deleting the
+        sentence does not unlink the box, because the box may hold things the note never
+        mentioned, and quietly emptying it would be the page making a filing decision
+        nobody asked it to make.
+        """
+        box = _authored_box(store, ref)
+        from boxganizer import authored, boxrefs
+        from boxganizer import search as text_search
+
+        fmt = body.format if body.format in ("markdown", "text") else "markdown"
+        target = _words_file(store, box, seed=authored.EMPTY_NOTE)
+        try:
+            if box.resource_uri and str(target) != str(authored.path_for(store.path, box.uuid)):
+                authored.write_at(target, body.source)
+            else:
+                authored.write(store.path, box.uuid, body.source)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "words_not_writable", "path": str(target), "reason": str(exc)},
+            ) from exc
+        if box.resource_id is not None:
+            text_search.sync_resource(store, int(box.resource_id))
+        # the format is a property of the box, kept beside its other view settings
+        section = box.config.get("note") if isinstance(box.config, dict) else None
+        box.config = {**(box.config or {}), "note": {**(section or {}), "format": fmt}}
+        store.update(box)
+        attached: list[str] = []
+        missing: list[str] = []
+        for uuid in boxrefs.mentions(body.source):
+            try:
+                store.resolve(uuid)
+            except BoxNotFound:
+                missing.append(uuid)
+                continue
+            store.link(box.uuid, uuid)  # parent first, as the store takes it
+            attached.append(uuid)
+        return {
+            "ok": True,
+            "format": fmt,
+            "characters": len(body.source),
+            "file": str(target),
+            "attached": attached,
+            "unknown": missing,
+        }
+
 
     @app.get("/api/boxes/{ref}/checklist")
     def checklist_get(ref: str, request: Request, store: StoreDep) -> dict[str, object]:
         """The list as it stands, with each attached child resolved to the box it names."""
-        box = _checklist_box(store, ref)
+        box = _authored_box(store, ref)
         from boxganizer import authored
         from boxganizer import checklist as list_of_things
 
-        target = _checklist_file(store, box, seed=list_of_things.EMPTY)
+        target = _words_file(store, box, seed=list_of_things.EMPTY)
         list_ = list_of_things.parse(authored.read(target))
         children = store.children(box.uuid)
         by_uuid = {child.uuid: child for child in children}
@@ -683,12 +814,12 @@ def create_app(
         mentioned stay children: taking an icon off a line is not the same as throwing the
         box away, and the page shows them as unattached.
         """
-        box = _checklist_box(store, ref)
+        box = _authored_box(store, ref)
         from boxganizer import authored
         from boxganizer import checklist as list_of_things
         from boxganizer import search as text_search
 
-        target = _checklist_file(store, box, seed=list_of_things.EMPTY)
+        target = _words_file(store, box, seed=list_of_things.EMPTY)
         names = {child.uuid: child.name for child in store.children(box.uuid)}
         list_ = list_of_things.Checklist(
             title=body.title,

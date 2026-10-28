@@ -20,6 +20,7 @@ DOCUMENTED: dict[str, str | None] = {
     "box": None,
     "content": "box",
     "label": "content",
+    "note": "content",
     "resource": "box",
     "file": "resource",
     "text": "file",

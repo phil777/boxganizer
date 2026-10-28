@@ -142,7 +142,7 @@ A left pane to search and pick — **Root** above it, the search field below, wh
 finds boxes by their own fields and by the words inside their text and PDF files,
 showing the passage that answered and what your words were widened to — and a main
 pane to show one box, **its content first**. **New box** opens a modal where you
-choose the type (the list is searchable, because there are 41 of them) and configure
+choose the type (the list is searchable, because there are 43 of them) and configure
 it. What a box shows depends on what it is:
 
 | Box                | Content view                                              |
@@ -157,6 +157,7 @@ it. What a box shows depends on what it is:
 | browser, web       | the page, framed; the address bar saves back to the box |
 | mqtt               | the last message on its topic, and every one after it, as the broker sends them. The address is shown with its password hidden, which the box keeps for itself. In a grid cell it is the last value alone: the cell does not listen, the opened box does |
 | ssh                | a console on another machine: the address it goes to, the line to type for a session of your own, a field for one command at a time, and the transcript of what was asked and what answered, exit code and all. Up and down arrows walk what was run here, kept in the box. **There is no password field, and none can be stored** — the type refuses an address carrying one; keys, an agent and `~/.ssh/config` decide who you are. It is a console and not a terminal emulator, and says so on the panel: one command, one answer, no full-screen programs |
+| note               | a post-it with a place in the graph: **Markdown** or **Plain text**, and — when markdown — **Read** or **Write**, both kept in the box. The toolbox writes markdown markers into the text and nothing else: `**` around a selection, a `#` or a `-` at the start of every line the selection touches. A box can be named inside a sentence, by picking it from the toolbox or dragging it in, and is written as `[📋 name](boxganizer:uuid)` — an ordinary markdown link on a scheme that reaches nothing until the page decides that clicking it opens the box. Naming a box here files it here too, so a note cannot quietly lose what it points at; deleting the sentence does not throw the box out |
 | checklist          | a list to tick. Type under the list and press **Enter** to add a line; click a square to tick it and the count at the top moves. A child box dragged onto a line hangs there as an icon — at the right end of the line, centred on it — and clicking the icon opens that box; lifting it off takes the link and leaves the box filed here. Anything filed in the box but on no line is listed underneath rather than hidden. What you type is written to a file of Boxganizer's own beside the database, in plain `- [ ]` markdown, and reindexed each time it changes, so the items are found by full-text search like the words in any other file |
 | anything else      | its icon, and a detail panel with description, resource, metadata and config |
 

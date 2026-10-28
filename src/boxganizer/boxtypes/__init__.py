@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from boxganizer.boxtypes import registry
 from boxganizer.boxtypes.base import DEFAULT_TYPE_KEY, BoxType
-from boxganizer.boxtypes.content import ContentBox, Label
+from boxganizer.boxtypes.content import ContentBox, Label, Note
 from boxganizer.boxtypes.dynamic import (
     BrowserResource,
     DynamicResource,
@@ -94,6 +94,7 @@ __all__ = [
     "MarkdownResource",
     "Mindmap",
     "Model3D",
+    "Note",
     "OrganizerBox",
     "PDFResource",
     "ParentalGraph",

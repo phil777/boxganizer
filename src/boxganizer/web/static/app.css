@@ -1315,3 +1315,117 @@ pre.text {
   overflow: hidden;
   padding: 4px;
 }
+
+/* -- notes -----------------------------------------------------------------
+   A post-it, on screen: the words on a warm sheet with as little chrome around
+   them as the page allows. The bar above is where the two decisions live —
+   whether the text is markdown or plain, and which of the two you are looking
+   at — and the toolbox appears only while there is markdown to mark up. */
+.note-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  min-height: 100%;
+  overflow: auto;
+}
+.note-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.note-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.note-group button {
+  font: inherit;
+  font-size: 0.85em;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.note-group button[aria-pressed="true"] {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  border-color: color-mix(in srgb, currentColor 40%, transparent);
+}
+.note-tool {
+  min-width: 2em;
+}
+.note-tool-bold { font-weight: 700; }
+.note-tool-italic { font-style: italic; }
+.note-tool-strike { text-decoration: line-through; }
+.note-box-picker {
+  font: inherit;
+  font-size: 0.85em;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  max-width: 15em;
+}
+.note-file {
+  margin-left: auto;
+  font-size: 0.8em;
+}
+.note-surface {
+  flex: 1 1 auto;
+  display: flex;
+  /* the sheet: warm enough to read as a note, muted enough to sit in a dark page */
+  background: color-mix(in srgb, #f2c14e 10%, transparent);
+  border: 1px solid color-mix(in srgb, #f2c14e 30%, transparent);
+  border-radius: 3px;
+  padding: 10px 12px;
+  box-shadow: 0 1px 3px color-mix(in srgb, currentColor 12%, transparent);
+}
+.note-editor {
+  flex: 1 1 auto;
+  min-height: 14em;
+  font: inherit;
+  line-height: 1.5;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  resize: vertical;
+  outline: none;
+}
+.note-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.note-empty { font-style: italic; margin: 0; }
+.note-foot { font-size: 0.8em; }
+/* A box named inside the text. It reads as the word it is beside, with a hairline
+   around it — an icon in the sentence, not a button on the page. */
+.note-chip {
+  display: inline;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  white-space: nowrap;
+}
+.note-chip:hover {
+  border-color: var(--accent);
+}
+.note-chip.is-gone {
+  opacity: 0.5;
+  border-style: dashed;
+  cursor: not-allowed;
+}
+.cell-content .note-view {
+  overflow: hidden;
+  padding: 4px;
+}
+.cell-content .note-editor {
+  min-height: 4em;
+}

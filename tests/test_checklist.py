@@ -327,7 +327,7 @@ def test_a_box_that_keeps_no_list_of_its_own_is_refused(
     folder = store.add(Box(name="Cellar", box_type="folder"))
     answer = client.get(f"/api/boxes/{folder.uuid}/checklist")
     assert answer.status_code == 415
-    assert answer.json()["detail"]["error"] == "not_a_checklist"
+    assert answer.json()["detail"]["error"] == "keeps_no_words"
 
 
 def test_the_file_survives_the_box_being_deleted(tmp_path: Path, store: BoxStore) -> None:

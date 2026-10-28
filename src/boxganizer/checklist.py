@@ -42,11 +42,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from boxganizer import boxrefs
+
 #: `- [ ] something`, `- [x] something`, with any amount of leading indentation.
 _ITEM = re.compile(r"^(?P<indent>[ \t]*)[-*+]\s+\[(?P<mark>[ xX])\]\s?(?P<text>.*)$")
 
-#: A child box, written as a markdown link on this project's scheme.
-_REF = re.compile(r"\[(?P<label>[^\]]*)\]\(boxganizer:(?P<uuid>[0-9a-fA-F-]{8,})\)")
+#: A child box is written as a markdown link on this project's scheme. One parser for the
+#: scheme, shared with notes — see :mod:`boxganizer.boxrefs`.
+_REF = boxrefs.LINK
 
 #: Spaces (or a tab) that count as one level of nesting when reading a file written by
 #: someone else. Rendering always uses two.

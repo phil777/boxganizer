@@ -156,6 +156,12 @@ const api = {
       body: JSON.stringify({ node, with: withBox }),
     }),
   markdown: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/markdown`),
+  note: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/note`),
+  saveNote: (ref, source, format) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/note`, {
+      method: "PUT",
+      body: JSON.stringify({ source, format }),
+    }),
   checklist: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/checklist`),
   saveChecklist: (ref, title, items) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/checklist`, {
@@ -4109,6 +4115,384 @@ function mindmapToolbar(box, ctx) {
  */
 
 const SSH_MAX_HISTORY = 20;
+
+// -- notes ------------------------------------------------------------------
+//
+// A note is free text kept in a file of its own beside the database (ADR 14), read as
+// plain words or as markdown. Everything here is a decision about which of those two the
+// person is looking at, and about what the toolbox is allowed to do to the text.
+//
+// The toolbox writes markdown markers and nothing else. It puts `**` around a selection
+// and moves on; it does not hold a document model, a delta format, or a second copy of
+// the text in some rich structure of its own. That is what keeps the file the file: an
+// editor that stores its state in the document is a document that only that editor can
+// read, and the whole point of ADR 14 is that these files outlive the page.
+//
+// Rendering is the server's, through the same function a `.md` box is rendered by, so a
+// note and a markdown file cannot disagree about what a heading is. The one thing the
+// page adds afterwards is the meaning of a `boxganizer:` link: the server renders it as
+// an ordinary anchor — inert, reaching nothing — and only here does it gain the power to
+// open a box.
+
+const NOTE_SAVE_DELAY = 700; // ms of quiet before the file is written
+
+/** One button in the toolbox: either it wraps the selection or it prefixes the line. */
+const NOTE_TOOLBOX = [
+  { key: "bold", label: "B", title: "bold — wraps the words in **", wrap: ["**", "**"] },
+  { key: "italic", label: "I", title: "italic — wraps the words in *", wrap: ["*", "*"] },
+  { key: "strike", label: "S", title: "struck through — wraps the words in ~~", wrap: ["~~", "~~"] },
+  { key: "h1", label: "H1", title: "a heading — starts the line with #", line: "# " },
+  { key: "h2", label: "H2", title: "a smaller heading — starts the line with ##", line: "## " },
+  { key: "list", label: "•", title: "a bullet — starts the line with -", line: "- " },
+  { key: "numbered", label: "1.", title: "a numbered item — starts the line with 1.", line: "1. " },
+  { key: "quote", label: "❝", title: "a quote — starts the line with >", line: "> " },
+  { key: "code", label: "</>", title: "code — wraps the words in `", wrap: ["`", "`"] },
+  { key: "link", label: "\u{1f517}", title: "a link — [words](address), then type the address", link: true },
+];
+
+async function noteView(canvas, box, ctx, opts = {}) {
+  const token = paneGeneration;
+  let note;
+  try {
+    note = await api.note(box.uuid);
+  } catch (error) {
+    canvas.append(emptyMessage(`Cannot read the note: ${error.message}`));
+    return;
+  }
+  if (!stillOnScreen(token)) return; // the pane moved on while the file was read
+
+  const section = (box.config || {}).note || {};
+  let format = note.format || "markdown";
+  // A markdown note opens as rendered words; a plain one has nothing to render, so it
+  // opens in the editor and says so rather than showing an empty pane.
+  let writing = format !== "markdown" || section.mode === "write";
+  let source = note.source;
+  let mentioned = note.mentioned || [];
+
+  const wrap = document.createElement("div");
+  wrap.className = "note-view";
+  wrap.dataset.format = format;
+
+  const bar = document.createElement("div");
+  bar.className = "note-bar";
+  wrap.append(bar);
+
+  const surface = document.createElement("div");
+  surface.className = "note-surface";
+  wrap.append(surface);
+
+  const footer = document.createElement("div");
+  footer.className = "note-foot muted";
+  wrap.append(footer);
+
+  // -- saving ----------------------------------------------------------------
+
+  let pending = null;
+  function say(words) {
+    footer.textContent = words;
+  }
+
+  function scheduleSave() {
+    say("writing soon…");
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(save, NOTE_SAVE_DELAY);
+  }
+
+  async function save() {
+    pending = null;
+    if (!stillOnScreen(token)) return;
+    try {
+      const answer = await api.saveNote(box.uuid, source, format);
+      if (!stillOnScreen(token)) return;
+      const open = answer.unknown && answer.unknown.length;
+      say(
+        `saved · ${answer.characters} characters` +
+          (open ? ` · ${answer.unknown.length} named box not in the library` : "")
+      );
+      if (answer.attached && answer.attached.length) refreshSide();
+    } catch (error) {
+      say(`not saved: ${error.message}`);
+    }
+  }
+
+  // -- the two shapes of the pane --------------------------------------------
+
+  function paint() {
+    surface.textContent = "";
+    bar.textContent = "";
+    paintBar();
+    if (writing) paintEditor();
+    else paintRendered();
+  }
+
+  function toggle(button, key, label, on, onClick) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.textContent = label;
+    item.dataset.toggle = key;
+    item.setAttribute("aria-pressed", String(on));
+    item.addEventListener("click", onClick);
+    button.append(item);
+    return item;
+  }
+
+  function paintBar() {
+    const group = document.createElement("div");
+    group.className = "note-group";
+    toggle(group, "format", "Markdown", format === "markdown", () => setFormat("markdown"));
+    toggle(group, "format", "Plain text", format !== "markdown", () => setFormat("text"));
+    bar.append(group);
+
+    if (format === "markdown") {
+      const shape = document.createElement("div");
+      shape.className = "note-group";
+      toggle(shape, "mode", "Read", !writing, () => setWriting(false));
+      toggle(shape, "mode", "Write", writing, () => setWriting(true));
+      bar.append(shape);
+    }
+
+    if (writing && format === "markdown") {
+      const tools = document.createElement("div");
+      tools.className = "note-group note-toolbox";
+      NOTE_TOOLBOX.forEach((tool) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `note-tool note-tool-${tool.key}`;
+        button.textContent = tool.label;
+        button.title = tool.title;
+        button.addEventListener("mousedown", (event) => event.preventDefault()); // keep the selection
+        button.addEventListener("click", () => applyTool(tool));
+        tools.append(button);
+      });
+
+      // Naming a box inside the note is done by picking it, not by typing a uuid: the
+      // uuid is the reference and no person should have to read one to write a sentence.
+      const picker = document.createElement("select");
+      picker.className = "note-box-picker";
+      picker.title = "name a box inside the note — it is filed here as well";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "\u{1f4e6} name a box…";
+      picker.append(placeholder);
+      (state.boxes || []).forEach((other) => {
+        if (other.uuid === box.uuid) return;
+        const option = document.createElement("option");
+        option.value = other.uuid;
+        option.textContent = `${other.icon || "\u{1f4e6}"} ${other.name}`;
+        picker.append(option);
+      });
+      picker.addEventListener("change", () => {
+        const uuid = picker.value;
+        if (!uuid) return;
+        const other = (state.boxes || []).find((candidate) => candidate.uuid === uuid);
+        insertBoxLink(other || { uuid, name: uuid, icon: "" });
+        picker.value = "";
+      });
+      tools.append(picker);
+      bar.append(tools);
+    }
+
+    const file = document.createElement("span");
+    file.className = "muted note-file";
+    file.textContent = format === "markdown" ? "markdown" : "plain text";
+    bar.append(file);
+  }
+
+  async function setFormat(next) {
+    if (next === format) return;
+    format = next;
+    wrap.dataset.format = format;
+    if (format !== "markdown") writing = true; // plain text has no rendering to look at
+    paint();
+    await save();
+  }
+
+  async function setWriting(next) {
+    if (next === writing) return;
+    if (!next && pending) await save(); // do not lose keystrokes behind a re-render
+    writing = next;
+    paint();
+    // the choice is the box's, kept where every other view choice is kept
+    try {
+      await api.setConfig(box.uuid, {
+        ...(box.config || {}),
+        note: { ...(section || {}), mode: next ? "write" : "read" },
+      });
+    } catch (error) {
+      say(`could not remember the view: ${error.message}`);
+    }
+  }
+
+  // -- reading ---------------------------------------------------------------
+
+  async function paintRendered() {
+    let answer;
+    try {
+      answer = await api.note(box.uuid);
+    } catch (error) {
+      surface.textContent = "";
+      say(`cannot be read: ${error.message}`);
+      return;
+    }
+    if (!stillOnScreen(token)) return;
+    source = answer.source;
+    surface.textContent = "";
+    if (!source.trim()) {
+      // A blank sheet next to a blank note reads like a failure to load. Say what it is.
+      const empty = document.createElement("p");
+      empty.className = "note-empty muted";
+      empty.textContent = "Nothing written yet. Press Write and start.";
+      surface.append(empty);
+      say("empty");
+      return;
+    }
+    const body = document.createElement("div");
+    body.className = "markdown-body note-body";
+    // the only innerHTML in this view, and the only source is the server's rendering of
+    // the file — the same rules that keep a .md box honest apply to a note
+    body.innerHTML = answer.html;
+    surface.append(body);
+    wireBoxLinks(body);
+    say(`${answer.source.length} characters · rendered`);
+  }
+
+  function wireBoxLinks(root) {
+    // An anchor on this project's scheme is inert until here: this is where it is given
+    // the power to open a box, and a file that only mentions a uuid cannot navigate.
+    root.querySelectorAll(`a[href^="${"boxganizer"}:`).forEach((anchorEl) => {
+      const uuid = anchorEl.getAttribute("href").slice("boxganizer:".length);
+      const known = mentioned.find((child) => child.uuid === uuid);
+      anchorEl.classList.add("note-chip");
+      if (known && known.gone) anchorEl.classList.add("is-gone");
+      anchorEl.removeAttribute("href");
+      anchorEl.title =
+        known && known.gone
+          ? `${uuid} is not in the library any more`
+          : `open ${known ? known.name : uuid}`;
+      anchorEl.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (!(known && known.gone)) openBox(uuid);
+      });
+    });
+  }
+
+  // -- writing ---------------------------------------------------------------
+
+  function paintEditor() {
+    const editor = document.createElement("textarea");
+    editor.className = "note-editor";
+    editor.spellcheck = true;
+    editor.placeholder =
+      format === "markdown" ? "write it — **bold**, *italic*, a list, a box…" : "write it…";
+    editor.value = source;
+    surface.append(editor);
+    editor.addEventListener("input", () => {
+      source = editor.value;
+      scheduleSave();
+    });
+    editor.addEventListener("blur", () => {
+      if (pending) save();
+    });
+    // A box dragged out of the panel lands where the cursor is, or at the end when the
+    // cursor is not in the note. Placing it at the drop point inside a textarea is not
+    // something the browser will tell us; guessing at it would put words in a sentence
+    // the person did not write them into.
+    editor.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    });
+    editor.addEventListener("drop", (event) => {
+      const uuid = event.dataTransfer.getData("text/plain");
+      if (!uuid || uuid === box.uuid) return;
+      event.preventDefault();
+      const other = (state.boxes || []).find((candidate) => candidate.uuid === uuid);
+      const caret = editor.selectionStart || source.length;
+      source = `${source.slice(0, caret)} ${boxLink(other || { uuid, name: uuid, icon: "" })} ${source.slice(caret)}`;
+      editor.value = source;
+      paint();
+      save();
+    });
+    editor.focus();
+    editor.setSelectionRange(source.length, source.length);
+    say(`${source.length} characters`);
+  }
+
+  function boxLink(other) {
+    // The same shape `boxganizer.boxrefs` writes server-side: an ordinary markdown link
+    // on a scheme that belongs to this program.
+    const label = `${other.icon || "\u{1f4e6}"} ${other.name || other.uuid}`.trim();
+    return `[${label}](boxganizer:${other.uuid})`;
+  }
+
+  function insertBoxLink(other) {
+    const editor = surface.querySelector(".note-editor");
+    if (!editor) return;
+    const caret = editor.selectionStart || source.length;
+    const before = source.slice(0, caret);
+    const after = source.slice(caret);
+    const join = before && !/\s$/.test(before) ? " " : "";
+    source = `${before}${join}${boxLink(other)} ${after.replace(/^\s+/, "")}`;
+    editor.value = source;
+    editor.focus();
+    scheduleSave();
+  }
+
+  function applyTool(tool) {
+    const editor = surface.querySelector(".note-editor");
+    if (!editor) return;
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    const selected = source.slice(start, end);
+    if (tool.link) {
+      // The address is left empty on purpose and the caret dropped inside it: a dialog
+      // that asks for a URL first, before the words are even chosen, is the wrong order.
+      const text = selected || "words";
+      source = `${source.slice(0, start)}[${text}]()${source.slice(end)}`;
+      editor.value = source;
+      const at = start + text.length + 3;
+      editor.focus();
+      editor.setSelectionRange(at, at);
+      scheduleSave();
+      return;
+    }
+    if (tool.wrap) {
+      const [open, close] = tool.wrap;
+      source = `${source.slice(0, start)}${open}${selected || "words"}${close}${source.slice(end)}`;
+      editor.value = source;
+      const from = start + open.length;
+      editor.focus();
+      editor.setSelectionRange(from, from + (selected || "words").length);
+      scheduleSave();
+      return;
+    }
+    // A line prefix is applied to every line the selection touches, because a bullet that
+    // lands on the first line of a two-line selection is a broken list.
+    const from = source.lastIndexOf("\n", start - 1) + 1;
+    let to = source.indexOf("\n", end);
+    if (to === -1) to = source.length;
+    const block = source
+      .slice(from, to)
+      .split("\n")
+      .map((line) =>
+        line.startsWith(tool.line) ? line.slice(tool.line.length) : `${tool.line}${line}`
+      )
+      .join("\n");
+    source = `${source.slice(0, from)}${block}${source.slice(to)}`;
+    editor.value = source;
+    editor.focus();
+    editor.setSelectionRange(from, from + block.length);
+    scheduleSave();
+  }
+
+  paint();
+  canvas.append(wrap);
+}
+
+registerView("note", {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    await noteView(canvas, box, ctx, opts);
+  },
+});
 
 // -- checklists ---------------------------------------------------------------
 //
