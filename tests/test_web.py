@@ -2500,3 +2500,22 @@ def test_a_route_the_server_does_not_know_says_so_rather_than_not_found(
     script = client.get("/static/app.js").text
     assert 'response.status === 404 && reason === "Not Found"' in script
     assert "restart" in script
+
+
+def test_the_index_choice_is_one_line_and_says_little(client: TestClient) -> None:
+    """A tick box and its sentence on one line: it is one question, not two."""
+    page = client.get("/").text
+    assert page.count("<span>Index content</span>") == 2  # the create dialog and the edit one
+    assert "Keep this file in the full-text search index" not in page
+    css = client.get("/static/app.css").text
+    start = css.index("label.index-choice {")
+    rule = css[start : css.index("}", start)]
+    assert "flex-direction: row;" in rule
+    assert "align-items: center;" in rule
+    # both dialogs, not just the one the report was about
+    selectors = css[:start].rsplit("*/", 1)[1]
+    assert "#new-box-modal" in selectors and "#edit-box-modal" in selectors
+    # the checkbox keeps its own size: the dialog gives every input field padding
+    box = css.index('#new-box-modal label.index-choice input[type="checkbox"],')
+    block = css[box : css.index("}", box)]
+    assert "padding: 0;" in block and "width: auto;" in block

@@ -179,6 +179,27 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 #new-box-modal footer { display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.3rem; }
 
 /*
+ * A tick box is not a field with a caption sitting over it. Every other label in a
+ * dialog is a column because it pairs a word with something you type; this one pairs a
+ * mark with a sentence about the mark, and the two read as one line or they read as two
+ * questions. The same rule is written for both dialogs, because both ask it.
+ */
+#new-box-modal label.index-choice,
+#edit-box-modal label.index-choice {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+}
+#new-box-modal label.index-choice input[type="checkbox"],
+#edit-box-modal label.index-choice input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  accent-color: var(--accent);
+}
+#edit-box-modal label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.86rem; }
+
+/*
  * The type row: its label and match count, the letters typed, then the menu the
  * letters narrowed. Both dialogs use it, so it is styled outside the create-modal
  * block rather than twice inside it.
