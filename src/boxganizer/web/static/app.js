@@ -2102,13 +2102,16 @@ registerView("desktop", {
       // The rect is the scaled box; the position the server keeps is in canvas
       // pixels, so the pointer's distance from the corner is divided back out.
       const scale = surfaceScale(surface);
-      await placeOnDesktop(
+      const placed = await placeOnDesktop(
         box,
         ctx,
         dragged,
         (event.clientX - frame.left) / scale,
         (event.clientY - frame.top) / scale
       );
+      // This is the one desktop gesture that redraws: the box that landed had no tile on
+      // this surface a moment ago, so there is nothing here to update in place.
+      if (placed) ctx.reload();
     });
 
     // Right-clicking the desktop itself — not one of its icons, which answer for
@@ -2176,9 +2179,10 @@ async function placeOnDesktop(box, ctx, childUuid, x, y) {
   const edge = (value) => Math.round(Math.max(0, value));
   try {
     await api.desktopMove(box.uuid, childUuid, edge(x), edge(y));
-    ctx.reload();
+    return true;
   } catch (error) {
     ctx.status(`cannot place that icon here: ${error.message}`, true);
+    return false;
   }
 }
 
@@ -2333,7 +2337,16 @@ function desktopIcon(box, child, rect, options, ctx) {
           // put back where it was: the tile is already there, the drag only drew it
           return;
         }
-        placeOnDesktop(box, ctx, child.uuid, where.x, where.y);
+        // The tile is already painted where the hand left it, so the move is written into
+        // the picture this view holds rather than fetched again. Re-rendering the desktop
+        // to show one icon in a place you just dragged it to throws away every tile — and
+        // with them every thumbnail, which the browser then re-decodes in front of you:
+        // a whole surface flickering to confirm something you can already see.
+        placeOnDesktop(box, ctx, child.uuid, where.x, where.y).then((moved) => {
+          if (!moved) return;
+          rect.x = where.x;
+          rect.y = where.y;
+        });
       },
       (where) => {
         tile.style.left = `${where.x}px`;
@@ -2362,7 +2375,10 @@ function desktopIcon(box, child, rect, options, ctx) {
         if (size.width === rect.width && size.height === rect.height) return;
         api
           .desktopResize(box.uuid, child.uuid, size.width, size.height)
-          .then(() => ctx.reload())
+          .then(() => {
+            rect.width = size.width;
+            rect.height = size.height; // same reason as the move: the corner is already there
+          })
           .catch((error) => ctx.status(`cannot size that icon: ${error.message}`, true));
       },
       (size) => {
@@ -2391,7 +2407,15 @@ function desktopIcon(box, child, rect, options, ctx) {
     }[event.key];
     if (step) {
       event.preventDefault();
-      placeOnDesktop(box, ctx, child.uuid, tile.offsetLeft + step[0], tile.offsetTop + step[1]);
+      const x = Math.max(0, tile.offsetLeft + step[0]);
+      const y = Math.max(0, tile.offsetTop + step[1]);
+      placeOnDesktop(box, ctx, child.uuid, x, y).then((moved) => {
+        if (!moved) return;
+        tile.style.left = `${x}px`;
+        tile.style.top = `${y}px`;
+        rect.x = x;
+        rect.y = y;
+      });
       return;
     }
     if (event.key === "Enter" || event.key === " ") {

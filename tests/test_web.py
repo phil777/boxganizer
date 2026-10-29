@@ -2208,7 +2208,7 @@ def test_a_dragged_icon_is_painted_while_the_pointer_moves(
     # handed to `follow` as the argument that runs on every pointer move
     drag = script[script.index('tile.addEventListener("pointerdown"') :]
     drag = drag[: drag.index("grip.addEventListener")]
-    assert "placeOnDesktop(box, ctx, child.uuid, where.x, where.y);" in drag
+    assert "placeOnDesktop(box, ctx, child.uuid, where.x, where.y).then(" in drag
     assert "      (where) => {\n        tile.style.left = `${where.x}px`;" in drag
     # sizing the tile is live too, for the same reason
     assert "tile.style.width = `${size.width}px`;" in script
@@ -2596,3 +2596,22 @@ def test_checking_the_status_looks_at_the_files_when_asked(
             assert fresh.get("/api/index/status", params={"check": True}).json()["stale"] == 1
     finally:
         store.close()
+
+
+def test_moving_an_icon_does_not_rebuild_the_desktop_around_it(client: TestClient) -> None:
+    """The tile is already where the hand left it: nothing else needs to be drawn."""
+    script = client.get("/static/app.js").text
+    # the move and the size commit into the picture the view holds, not into a re-render
+    assert "rect.x = where.x;" in script
+    assert "rect.y = where.y;" in script
+    assert "rect.width = size.width;" in script
+    drag = script[script.index('tile.addEventListener("pointerdown"') :]
+    drag = drag[: drag.index('grip.addEventListener("pointerdown"')]
+    assert "ctx.reload()" not in drag
+    grip = script[script.index('grip.addEventListener("pointerdown"') :]
+    grip = grip[: grip.index('tile.addEventListener("click"')]
+    assert "ctx.reload()" not in grip
+    # a box dropped from the panel had no tile here, so that one does redraw
+    drop = script[script.index('surface.addEventListener("drop"') :]
+    drop = drop[: drop.index("surface.addEventListener(\"contextmenu\"")]
+    assert "if (placed) ctx.reload();" in drop
