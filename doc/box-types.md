@@ -41,12 +41,14 @@ other boxes. Rules in brackets are enforced by the store.
         - `browser` 🧭 Browser — resource required; schemes: http https
         - `snapshot` 📸 Snapshot — resource required; schemes: http https
       - `terminal` ⌨️ Terminal
-        - `ssh` 🔐 SSH Terminal — schemes: ssh; needs metadata: host
+        - `ssh` 🔐 SSH Terminal — schemes: ssh; the host comes from the address
       - `vnc` 💻 VNC Screen — schemes: vnc; this machine speaks RFB, the page is shown frames
       - `sensor` 📡 Sensor
-        - `mqtt` 📶 MQTT Sensor — schemes: mqtt mqtts; needs metadata: topic
+        - `mqtt` 📶 MQTT Sensor — schemes: mqtt mqtts; the topic is the path
+        of the address (`metadata["topic"]` remains as an override)
         - `http` 📥 HTTP Sensor — resource required; schemes: http https
-        - `home-assistant` 🏠 Home Assistant — schemes: http https; needs metadata: entity_id
+        - `home-assistant` 🏠 Home Assistant — schemes: http https;
+        needs metadata: entity_id (nowhere in a URL to be read from)
   - `folder` 📂 Folder
     - `dynamic-folder` 🌀 Dynamic Folder — members come from `config.filter`
       - `cabinet` 🗄️ Cabinet — the dynamic folder that filters nothing; holds every box, and itself

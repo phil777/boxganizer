@@ -237,6 +237,44 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .type-field .muted { font-size: 0.76rem; }
 .type-filter { font: inherit; }
 .type-field select { font: inherit; }
+.modal-error {
+  margin: 0.2rem 0 0;
+  padding: 0.35rem 0.5rem;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: 0.85rem;
+  /* the server's sentence is the answer; it is allowed to be a long one */
+  overflow-wrap: anywhere;
+}
+
+.resource-hint {
+  margin: -0.25rem 0 0;
+  font-size: 0.78rem;
+  font-family: ui-monospace, monospace;
+}
+.metadata-fields { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.metadata-fields label {
+  flex: 1 1 12rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.86rem;
+}
+.metadata-fields input {
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+/* A control that means nothing for this type is not shown for it. Saying "the index
+   checkbox has no meaning for a topic" by leaving it there, ticked or not, is a
+   dialog that lies about what it is asking. */
+#new-box-modal [hidden],
+#edit-box-modal [hidden] { display: none !important; }
+
 .config-fields { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .config-fields label { flex: 1 1 8rem; }
 .config-fields textarea {

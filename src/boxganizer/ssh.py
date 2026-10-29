@@ -192,7 +192,7 @@ def destination(box: Any) -> Destination:
             port_value = parts.port
 
     if not host:
-        raise SshError("an SSH box needs a host, in its address or in metadata['host']")
+        raise SshError("an SSH box needs a host in its address, like ssh://user@build.local")
 
     options = metadata.get("options") or []
     if isinstance(options, str):

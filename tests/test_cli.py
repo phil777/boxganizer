@@ -232,7 +232,13 @@ def test_types_json_carries_the_rules(db_path: Path) -> None:
     described = json.loads(result.output)
     by_key = {entry["key"]: entry for entry in described}
     assert by_key["pdf"]["extensions"] == [".pdf"]
-    assert by_key["mqtt"]["required_metadata"] == ["topic"]
+    # a topic comes from the address, so nothing is demanded in metadata; the hint is what
+    # the dialog shows so a bare host is not typed into a field whose path means something
+    assert by_key["mqtt"]["required_metadata"] == []
+    assert by_key["mqtt"]["resource_hint"].startswith("mqtt://")
+    assert by_key["mqtt"]["resource_is_local"] is False
+    assert by_key["text"]["resource_is_local"] is True
+    assert by_key["home-assistant"]["required_metadata"] == ["entity_id"]
     assert by_key["image"]["allows_children"] is False
     # Which live source a box reads is asked of its type, never guessed from a string.
     assert by_key["mqtt"]["live_source"] == "mqtt"

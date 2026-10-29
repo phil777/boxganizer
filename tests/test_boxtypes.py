@@ -210,18 +210,33 @@ def test_plain_paths_count_as_file_resources() -> None:
 
 
 def test_sensor_types_demand_their_wiring() -> None:
-    with pytest.raises(InvalidBoxContent, match="metadata topic is required"):
+    """What each sensor needs, and where it is allowed to say it.
+
+    A topic lives in the address (`mqtt://host/boiler/pressure`) and metadata may override
+    it; an entity id is nowhere in a URL, so Home Assistant still asks for it as metadata —
+    and the dialog renders a field for whatever a type asks for, because a required value
+    with no way to give it is a 422 the person cannot answer.
+    """
+    with pytest.raises(InvalidBoxContent, match="needs a resource"):
         boxtypes.get("mqtt").validate(make())
-    with pytest.raises(InvalidBoxContent, match="metadata host is required"):
+    with pytest.raises(InvalidBoxContent, match="but not which topic"):
+        boxtypes.get("mqtt").validate(make(resource_uri="mqtt://broker.local:1883"))
+    boxtypes.get("mqtt").validate(make(resource_uri="mqtt://broker.local:1883/boiler/pressure"))
+    boxtypes.get("mqtt").validate(
+        make(resource_uri="mqtt://broker.local", metadata={"topic": "cellar/temp"})
+    )
+    with pytest.raises(InvalidBoxContent, match="needs a host in its address"):
         boxtypes.get("ssh").validate(make())
+    boxtypes.get("ssh").validate(make(resource_uri="ssh://builder@build.local:2222"))
     with pytest.raises(InvalidBoxContent, match="metadata entity_id is required"):
-        boxtypes.get("home-assistant").validate(make())
-    boxtypes.get("mqtt").validate(make(metadata={"topic": "cellar/temp"}))
+        boxtypes.get("home-assistant").validate(make(resource_uri="http://ha.local:8124"))
 
 
 def test_blank_metadata_counts_as_missing() -> None:
-    with pytest.raises(InvalidBoxContent, match="metadata topic is required"):
-        boxtypes.get("mqtt").validate(make(metadata={"topic": "   "}))
+    with pytest.raises(InvalidBoxContent, match="metadata entity_id is required"):
+        boxtypes.get("home-assistant").validate(
+            make(resource_uri="http://ha.local:8124", metadata={"entity_id": "   "})
+        )
 
 
 def test_leaf_types_are_named_by_the_hierarchy_itself() -> None:

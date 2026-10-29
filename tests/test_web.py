@@ -175,14 +175,30 @@ def test_types_endpoint_can_be_reduced_to_choices(client: TestClient) -> None:
     assert "file" in keys
 
 
-def test_create_a_box_of_a_type(client: TestClient) -> None:
+def test_an_mqtt_box_can_be_created_with_the_one_thing_the_page_asks_for(
+    client: TestClient,
+) -> None:
+    """The address says it all; the dialog should not have to ask twice.
+
+    This type used to demand `metadata["topic"]` as well, and the page renders no field
+    for it, so creating an MQTT box answered 422 with a sentence about metadata nobody had
+    been given the chance to fill in.
+    """
     response = client.post(
         "/api/boxes",
-        json={"name": "Cellar temp", "box_type": "mqtt", "metadata": {"topic": "cellar/temp"}},
+        json={
+            "name": "Cellar temp",
+            "box_type": "mqtt",
+            "resource_uri": "mqtt://broker.local:1883/cellar/temp",
+        },
     )
-    assert response.status_code == 201
-    assert response.json()["box_type"] == "mqtt"
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["box_type"] == "mqtt"
     assert client.get("/api/boxes/Cellar temp").json()["box_type"] == "mqtt"
+    # the endpoint reads the topic back out of the address
+    read = client.get(f"/api/boxes/{created['uuid']}/mqtt").json()
+    assert read["target"]["topic"] == "cellar/temp"
 
 
 def test_create_with_an_unknown_type_is_unprocessable(client: TestClient) -> None:
@@ -1541,8 +1557,14 @@ def test_a_box_that_listens_to_nothing_is_refused(client: TestClient) -> None:
 
 
 def test_an_address_that_names_no_host_is_said_in_words(populated: BoxStore) -> None:
-    populated.add(
-        Box(name="Broken", box_type="mqtt", resource_uri="mqtt://", metadata={"topic": "t"})
+    # The address went bad after it was stored: a host that has since been left out of
+    # it cannot be rejected by the type now, so the endpoint is what has to say so.
+    broken = populated.add(
+        Box(name="Broken", box_type="mqtt", resource_uri="mqtt://broker/cellar/temp")
+    )
+    populated._execute(
+        "UPDATE resources SET reference = 'mqtt://', ref_key = 'mqtt://' WHERE id = ?",
+        (broken.resource_id,),
     )
     with TestClient(create_app(populated)) as test_client:
         response = test_client.get("/api/boxes/Broken/mqtt")
@@ -2648,3 +2670,41 @@ def test_a_box_that_holds_no_boxes_offers_no_drop_zone(client: TestClient) -> No
     guard = script[from_here : script.index("function wirePaneDrops()", from_here)]
     assert "if (!box) return null;" in guard
     assert "kind && kind.allows_children ? box : null" in guard
+
+
+def test_a_dialog_reports_its_own_refusal(client: TestClient) -> None:
+    """A status bar behind an open modal is a message nobody receives.
+
+    The report that came in was "when I create a MQTT box I get 422 in the access log" —
+    the page had been told exactly what was wrong and had written it somewhere the person
+    could not see, so the dialog now carries its own error line.
+    """
+    page = client.get("/").text
+    assert 'id="nb-error"' in page
+    assert 'id="eb-error"' in page
+    assert 'role="alert"' in page
+    script = client.get("/static/app.js").text
+    assert "function modalError(modal = CREATE_MODAL, message = \"\")" in script
+    create = script[script.index("async function submitNewBox") :]
+    create = create[: create.index("/**", create.index("async function submitNewBox") + 10)]
+    assert "modalError(CREATE_MODAL, error.message);" in create
+    assert 'status(error.message, true);' not in create
+    edit = script[script.index("async function submitEditBox") :]
+    edit = edit[: edit.index("/* ------", script.index("async function submitEditBox") + 10)]
+    assert "modalError(EDIT_MODAL, error.message);" in edit
+
+
+def test_a_dialog_shows_the_address_a_type_wants_and_hides_what_it_cannot_use(
+    client: TestClient,
+) -> None:
+    """Browse and the index tick mean nothing until the resource is a file."""
+    script = client.get("/static/app.js").text
+    assert "field.placeholder = kind.resource_hint" in script
+    assert "browse.hidden = !local;" in script
+    assert "choice.hidden = !local;" in script
+    assert "renderMetadataFields(modal, kind);" in script
+    # the metadata a type asks for is rendered, so a required value is never unaskable
+    assert "name = `metadata:${key}`" in script
+    assert "metadata: collectMetadata(CREATE_MODAL)" in script
+    css = client.get("/static/app.css").text
+    assert ".modal-error {" in css and ".resource-hint {" in css and ".metadata-fields {" in css

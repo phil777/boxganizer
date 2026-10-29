@@ -19,6 +19,8 @@ const state = {
   pendingCell: null, // cell the modal should place the new box in
   pendingPlace: null, // spot on a desktop the modal should place the new box at
   searchExpanded: "", // what the last search widened the typed words into
+  editing: null, // uuid of the box the edit modal is open on
+  editingBox: null, // that box as the view held it, for filling its metadata fields
 };
 
 /* ------------------------------------------------------------------ api ---- */
@@ -794,6 +796,9 @@ const CREATE_MODAL = {
   index: "nb-index",
   indexReason: "nb-index-reason",
   suggest: "nb-suggest",
+  resourceHint: "nb-resource-hint",
+  metadata: "nb-metadata",
+  error: "nb-error",
   config: "nb-config",
   icon: null,
 };
@@ -809,6 +814,9 @@ const EDIT_MODAL = {
   index: "eb-index",
   indexReason: "eb-index-reason",
   suggest: "eb-suggest",
+  resourceHint: "eb-resource-hint",
+  metadata: "eb-metadata",
+  error: "eb-error",
   config: "eb-config",
   icon: "eb-icon",
 };
@@ -886,6 +894,8 @@ async function openNewBoxModal(options = {}) {
  */
 function openEditBoxModal(box) {
   state.editing = box.uuid;
+  modalError(EDIT_MODAL);
+  state.editingBox = box; // the metadata fields are filled from this box, not the last one
   resetTypeFilter(EDIT_MODAL.type);
   el(EDIT_MODAL.name).value = box.name;
   el(EDIT_MODAL.description).value = box.description || "";
@@ -924,14 +934,19 @@ async function submitEditBox(event) {
     resource_uri: el(EDIT_MODAL.resource).value.trim() || null,
   };
   if (el(EDIT_MODAL.index)) payload.index_resource = el(EDIT_MODAL.index).checked;
+  // Merged over what the box already carries: the dialog shows the keys this type asks
+  // for, and it must not quietly empty the ones it does not.
+  const was = (state.editingBox && state.editingBox.metadata) || {};
+  payload.metadata = { ...was, ...collectMetadata(EDIT_MODAL) };
   if (EDIT_MODAL.icon) payload.icon = el(EDIT_MODAL.icon).value.trim() || null;
   try {
     payload.config = collectConfig(EDIT_MODAL);
   } catch (error) {
-    ctx_free_status(error.message, true);
+    modalError(EDIT_MODAL, error.message);
     return;
   }
   try {
+    modalError(EDIT_MODAL);
     const saved = await api.updateBox(state.editing, payload);
     el(EDIT_MODAL.id).close();
     state.editing = null;
@@ -943,7 +958,7 @@ async function submitEditBox(event) {
     }
     status(`saved ${saved.name}`);
   } catch (error) {
-    status(error.message, true);
+    modalError(EDIT_MODAL, error.message);
   }
 }
 
@@ -1128,10 +1143,111 @@ function registerConfigForm(typeKey, form) {
   configForms.set(typeKey, form);
 }
 
+/**
+ * Say what the server refused, where the person who caused it is looking.
+ *
+ * A dialog covers the status bar, so a failure written there is a failure nobody sees:
+ * the page appeared to do nothing, and only the access log knew it had answered 422.
+ */
+function modalError(modal = CREATE_MODAL, message = "") {
+  const spot = el(modal.error);
+  if (!spot) return;
+  spot.textContent = message;
+  spot.hidden = !message;
+}
+
+/* -- what this type asks the resource field for ------------------------------
+ *
+ * A dialog that shows every control for every type is a dialog asking the same question
+ * of a note, a topic and a host. It cannot be the same question. `mqtt://…` and
+ * `ssh://…` are addresses whose *path* is the thing being pointed at, so the field needs
+ * an example rather than a placeholder word; and Browse and the index tick mean nothing
+ * until the resource is a file on this machine — showing them for a sensor invites a
+ * person to tick something that will be ignored.
+ *
+ * A type that genuinely needs a piece of metadata gets a field for it, named. Requiring
+ * something in a form the page never renders is not a rule, it is a bug with an error
+ * message: this is how creating an MQTT box answered 422 for as long as the page existed.
+ */
+
+function applyResourceShape(modal = CREATE_MODAL) {
+  const kind = state.types.get(el(modal.type).value) || {};
+  const field = el(modal.resource);
+  const hint = el(modal.resourceHint);
+  modalError(modal);
+  field.placeholder = kind.resource_hint || "/path or https://…";
+  if (hint) {
+    hint.hidden = !kind.resource_hint;
+    hint.textContent = kind.resource_hint ? `address: ${kind.resource_hint}` : "";
+  }
+
+  // Only a file on this machine can be picked, and only its words can be indexed.
+  const local = kind.resource_is_local !== false;
+  const browse = field.closest(".resource-field")?.querySelector(".browse");
+  if (browse) browse.hidden = !local;
+  const choice = el(modal.index)?.closest(".index-choice");
+  if (choice) choice.hidden = !local;
+  if (!local) {
+    const reason = el(modal.indexReason);
+    if (reason) reason.hidden = true;
+  }
+
+  renderMetadataFields(modal, kind);
+}
+
+function renderMetadataFields(modal = CREATE_MODAL, kind = {}) {
+  const holder = el(modal.metadata);
+  if (!holder) return;
+  const wanted = kind.required_metadata || [];
+  const source = modal === EDIT_MODAL ? state.editingBox || state.current : null;
+  const existing = source ? source.metadata || {} : {};
+  const kept = {};
+  // Fields already filled survive a type change back to the same type: the person's
+  // typing is worth more than the convenience of rebuilding the row.
+  holder.querySelectorAll("[name^='metadata:']").forEach((input) => {
+    kept[input.name] = input.value;
+  });
+  holder.replaceChildren();
+  wanted.forEach((key) => {
+    const label = document.createElement("label");
+    const title = document.createElement("span");
+    title.textContent = key.replace(/_/g, " ");
+    const input = document.createElement("input");
+    input.name = `metadata:${key}`;
+    input.type = "text";
+    input.value =
+      kept[`metadata:${key}`] !== undefined
+        ? kept[`metadata:${key}`]
+        : String(existing[key] ?? "");
+    input.placeholder = EXAMPLE_METADATA[key] || "";
+    label.append(title, input);
+    holder.append(label);
+  });
+}
+
+const EXAMPLE_METADATA = {
+  entity_id: "sensor.boiler_room",
+  topic: "boiler/pressure",
+  host: "build.local",
+};
+
+function collectMetadata(modal = CREATE_MODAL) {
+  const holder = el(modal.metadata);
+  const metadata = {};
+  if (!holder) return metadata;
+  holder.querySelectorAll("[name^='metadata:']").forEach((input) => {
+    const key = input.name.slice("metadata:".length);
+    const value = input.value.trim();
+    if (value) metadata[key] = value;
+  });
+  return metadata;
+}
+
 function renderConfigFields(modal = CREATE_MODAL, values = {}) {
   const holder = el(modal.config);
   holder.replaceChildren();
   const typeKey = el(modal.type).value;
+  applyResourceShape(modal);
   if (modal.summary) el(modal.summary).textContent = (state.types.get(typeKey) || {}).summary || "";
   const form = formFor(typeKey);
   if (form) {
@@ -1192,15 +1308,17 @@ async function submitNewBox(event) {
     cell: state.pendingCell || null,
     place: state.pendingPlace || null,
     index_resource: el("nb-index") ? el("nb-index").checked : null,
+    metadata: collectMetadata(CREATE_MODAL),
     config: {},
   };
   try {
     payload.config = collectConfig();
   } catch (error) {
-    status(error.message, true);
+    modalError(CREATE_MODAL, error.message);
     return;
   }
   try {
+    modalError(CREATE_MODAL); // a previous refusal is stale the moment the box is tried again
     const created = await api.create(payload);
     const filedIn = payload.parent;
     state.pendingCell = null;
@@ -1219,7 +1337,8 @@ async function submitNewBox(event) {
       status(`created ${created.name}`);
     }
   } catch (error) {
-    status(error.message, true);
+    // in the dialog, not behind it: the status bar is covered by this very modal
+    modalError(CREATE_MODAL, error.message);
   }
 }
 

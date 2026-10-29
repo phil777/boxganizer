@@ -80,6 +80,8 @@
             Browse…
           </button>
         </div>
+        <p id="nb-resource-hint" class="muted resource-hint" hidden></p>
+        <div id="nb-metadata" class="metadata-fields"></div>
         <label class="index-choice">
           <input id="nb-index" type="checkbox" />
           <span>Index content</span>
@@ -90,6 +92,9 @@
           <select id="nb-parent" name="parent"></select>
         </label>
         <div id="nb-config" class="config-fields"></div>
+        <!-- A refusal belongs inside the dialog that caused it: the status bar behind this
+             modal is not something a person reading the modal will ever see. -->
+        <p id="nb-error" class="modal-error" role="alert" hidden></p>
         <footer>
           <button type="button" id="nb-cancel">Cancel</button>
           <button type="submit" id="nb-create" class="primary">Create</button>
@@ -123,12 +128,17 @@
             Browse…
           </button>
         </div>
+        <p id="eb-resource-hint" class="muted resource-hint" hidden></p>
+        <div id="eb-metadata" class="metadata-fields"></div>
         <label class="index-choice">
           <input id="eb-index" type="checkbox" />
           <span>Index content</span>
         </label>
         <p id="eb-index-reason" class="muted index-reason"></p>
         <div id="eb-config" class="config-fields"></div>
+        <!-- A refusal belongs inside the dialog that caused it: the status bar behind this
+             modal is not something a person reading the modal will ever see. -->
+        <p id="eb-error" class="modal-error" role="alert" hidden></p>
         <footer>
           <button type="button" id="eb-cancel">Cancel</button>
           <button type="submit" id="eb-save" class="primary">Save</button>

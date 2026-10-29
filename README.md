@@ -114,6 +114,14 @@ nothing is changed unless asked: a check that "helped" by guessing where a moved
 is a tool that files your documents in the wrong places. The same findings, and the same
 repairs as buttons, are the page's **Check the library** action.
 
+The dialog changes with the type, because it is not asking the same question of a note, a
+topic and a host. An address whose *path* means something shows an example while you type
+(`mqtt://host:1883/boiler/pressure`), a type that genuinely needs a piece of metadata gets
+a field for it, and Browse and the index tick disappear when the resource is not a file on
+this machine — a control that will be ignored is a control that lies about what it is
+asking. A refusal is written **inside the dialog**, in its own line, because the status bar
+behind an open modal is a message nobody receives.
+
 What is indexed is decided per **resource**, not per box, and the dialog says so as you
 fill it in — a tick box, with the reason beside it:
 

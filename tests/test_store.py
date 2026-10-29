@@ -215,7 +215,14 @@ def test_add_enforces_the_rules_of_the_type(store: BoxStore) -> None:
 
 def test_typed_boxes_survive_reopening(db_path: Path) -> None:
     with BoxStore(db_path) as store:
-        store.add(Box(name="Sensor", box_type="mqtt", metadata={"topic": "cellar/temp"}))
+        store.add(
+            Box(
+                name="Sensor",
+                box_type="mqtt",
+                resource_uri="mqtt://broker:1883/cellar/temp",
+                metadata={"topic": "cellar/temp"},  # an override, still honoured
+            )
+        )
     with BoxStore(db_path) as again:
         box = again.get("sensor")
         assert box.box_type == "mqtt"

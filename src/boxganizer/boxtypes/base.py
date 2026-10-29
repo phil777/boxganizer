@@ -88,6 +88,11 @@ class BoxType:
     #: time there is something to keep, and that resource is what puts the words in the
     #: search index. See `boxganizer.authored`.
     writes_own_file: ClassVar[bool] = False
+    #: An example of what goes in the resource field, shown as the dialog's
+    #: placeholder and as a sentence under it. Not decoration: `mqtt://…` and
+    #: `ssh://…` are addresses whose *path* means something, and a person who types a
+    #: bare host into one of them gets a box that looks fine and reads nothing.
+    resource_hint: ClassVar[str] = ""
     #: What this type is meant to do once it is built. Empty means: already does all it claims.
     planned: ClassVar[str] = ""
 
@@ -178,6 +183,14 @@ class BoxType:
             else None,
             "extensions": sorted(cls.extensions) if cls.extensions else None,
             "required_metadata": sorted(cls.required_metadata),
+            "resource_hint": cls.resource_hint,
+            # Whether the resource is a file on this machine — which is the question the
+            # dialog asks twice: only a file can be picked with the browser, and only a
+            # file's words can go into the search index. Everything else ("the topic I
+            # listen to", "the host I run commands on") makes both controls a lie.
+            "resource_is_local": bool(
+                cls.resource_uri_schemes is None or "file" in cls.resource_uri_schemes
+            ),
             "planned": cls.planned,
         }
 

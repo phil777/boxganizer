@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from boxganizer.boxtypes.resource import ResourceBox
+from boxganizer.errors import MqttError
 from boxganizer.models import Box
 
 
@@ -35,6 +36,7 @@ class WebResource(DynamicResource):
     summary: ClassVar[str] = "An http(s) address."
     resource_uri_required: ClassVar[bool] = True
     resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"http", "https"})
+    resource_hint: ClassVar[str] = "https://example.com/reading.json"
     planned: ClassVar[str] = "Fetch title, favicon and a text extract."
 
 
@@ -85,8 +87,8 @@ class SSHResource(TerminalResource):
     label: ClassVar[str] = "SSH Terminal"
     icon: ClassVar[str] = "\U0001f510"  # 🔐
     summary: ClassVar[str] = "A shell on another machine."
-    required_metadata: ClassVar[frozenset[str]] = frozenset({"host"})
     resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"ssh"})
+    resource_hint: ClassVar[str] = "ssh://user@host:2222"
     # What is left is a real terminal in the page — a full-screen session with a
     # cursor. Commands run and answer already; an editor on the far side does not yet.
     planned: ClassVar[str] = "Full-screen interactive sessions in the page (a terminal emulator)."
@@ -134,6 +136,7 @@ class VNCResource(DynamicResource):
     icon: ClassVar[str] = "\U0001f4bb"  # 💻
     summary: ClassVar[str] = "A screen on another machine, live in the page."
     resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"vnc"})
+    resource_hint: ClassVar[str] = "vnc://workstation:5900, or vnc://workstation:1 for display 1"
     draws_remote_screen: ClassVar[bool] = True
 
     @classmethod
@@ -169,8 +172,34 @@ class MQTTResource(SensorResource):
     icon: ClassVar[str] = "\U0001f4f6"  # 📶
     summary: ClassVar[str] = "Subscribes to one topic."
     live_source: ClassVar[str] = "mqtt"
-    required_metadata: ClassVar[frozenset[str]] = frozenset({"topic"})
+    #: A sensor with nothing to read is not a sensor waiting to be filled in.
+    resource_uri_required: ClassVar[bool] = True
     resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"mqtt", "mqtts"})
+    resource_hint: ClassVar[str] = "mqtt://host:1883/boiler/pressure"
+
+    @classmethod
+    def check(cls, box: Box) -> None:
+        """An address that names a broker *and* a topic.
+
+        This type used to ask for the topic again as `metadata["topic"]`, which the page
+        never sends: creating an MQTT box answered 422 and nobody could tell you why. The
+        address says it — the path is the topic — and metadata stays what it always was,
+        an override for a topic that will not fit in a path.
+        """
+        from boxganizer import mqtt
+
+        try:
+            target = mqtt.parse_target(box.resource_uri, box.metadata.get("topic"))
+        except MqttError as exc:
+            cls._reject(box, str(exc))
+            return
+        if not target.topic:
+            cls._reject(
+                box,
+                "the address names a broker but no topic; use mqtt://host:1883/boiler/pressure",
+            )
+        if not target.host:
+            cls._reject(box, "the address names a topic but no broker; use mqtt://host:1883/boiler/pressure")
     # The page subscribes while it shows the box and the server remembers the last
     # message. What is left is to listen when nobody is looking, and to keep the
     # value across a restart.
