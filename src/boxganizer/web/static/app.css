@@ -1386,6 +1386,80 @@ pre.text {
   white-space: nowrap;
 }
 
+#check-modal {
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  padding: 1rem 1.2rem;
+  width: min(46rem, 94vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  background: Canvas;
+  color: CanvasText;
+}
+#check-modal h2 { margin: 0; font-size: 1.05rem; }
+#check-modal .small { font-size: 0.78rem; margin: 0; }
+#check-modal footer { display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.4rem; }
+.check-findings {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.check-findings h3 {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0.5rem 0 0.1rem;
+  opacity: 0.75;
+}
+.check-finding {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.7rem;
+  padding: 0.3rem 0.4rem;
+  border-left: 3px solid var(--line);
+}
+.check-finding.is-broken {
+  border-left-color: var(--accent);
+}
+.check-finding .who { font-weight: 600; }
+.check-finding .what { flex: 1 1 16rem; font-size: 0.88rem; }
+.check-finding .where {
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  opacity: 0.7;
+  flex-basis: 100%;
+  word-break: break-all;
+}
+.check-finding button {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.check-finding button:hover {
+  border-color: var(--accent);
+}
+.check-finding button.asking {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.check-finding .no-fix {
+  font-size: 0.78rem;
+  font-style: italic;
+  opacity: 0.7;
+}
+
 #about-modal {
   border: 1px solid var(--line);
   border-radius: 0.4rem;

@@ -87,6 +87,9 @@ const api = {
   indexRun: (scope) =>
     request("/api/index/run", { method: "POST", body: JSON.stringify({ scope }) }),
   health: () => request("/api/health"),
+  check: () => request("/api/check"),
+  checkFix: (payload) =>
+    request("/api/check/fix", { method: "POST", body: JSON.stringify(payload) }),
   mqtt: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/mqtt`),
   mqttStreamUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/mqtt/stream`,
   contentUrl: (ref, sub) =>
@@ -1252,6 +1255,136 @@ async function goToRoot() {
 
 /* ---------------------------------------------------------------- init ----- */
 
+/* -- checking the library ---------------------------------------------------
+ *
+ * The same check `box check` runs, with the same set of repairs. A finding is only ever
+ * worth showing if there is something to do about it, which is why the verbs come from the
+ * core (`boxganizer.check`) and this is only their presentation: a page that invented its
+ * own fixes would be a page whose buttons the server sometimes refuses.
+ *
+ * Two of the repairs delete something, so they take two clicks — the first one changes the
+ * button into the question, and no browser dialog is involved. The rest are one click,
+ * because they are all reversible by asking again: reading a file, or taking one out of the
+ * index and putting it back.
+ */
+
+const CHECK_FIXES = {
+  relocate: { label: "Point at something else", needsValue: true },
+  reindex: { label: "Read it again" },
+  unindex: { label: "Leave it out of the index" },
+  "delete-box": { label: "Delete the box", dangerous: true },
+  "delete-file": { label: "Delete the file", dangerous: true },
+};
+
+async function openCheckModal() {
+  el("check-modal").showModal();
+  await drawCheck();
+}
+
+async function drawCheck() {
+  const list = el("check-list");
+  const summary = el("check-summary");
+  summary.textContent = "looking at every box…";
+  list.textContent = "";
+  let report;
+  try {
+    report = await api.check();
+  } catch (error) {
+    summary.textContent = `the check could not run: ${error.message}`;
+    return;
+  }
+  summary.textContent = report.summary;
+  el("check-confine").textContent = `files expected inside ${report.confine}`;
+  if (!report.findings.length) {
+    const fine = document.createElement("li");
+    fine.className = "no-fix";
+    fine.textContent = "Nothing to report: every box's resource is where it said it would be.";
+    list.append(fine);
+    return;
+  }
+  let shown = "";
+  report.findings.forEach((finding) => {
+    if (finding.kind !== shown) {
+      shown = finding.kind;
+      const head = document.createElement("h3");
+      head.textContent = shown.replace(/_/g, " ");
+      list.append(head);
+    }
+    list.append(checkRow(finding));
+  });
+}
+
+function checkRow(finding) {
+  const row = document.createElement("li");
+  row.className = `check-finding${finding.severity === "broken" ? " is-broken" : ""}`;
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = (finding.box && finding.box.name) || finding.path.split("/").pop() || "a file";
+  const what = document.createElement("span");
+  what.className = "what";
+  what.textContent = finding.detail;
+  row.append(who, what);
+  if (finding.reference && finding.reference !== finding.path) {
+    const where = document.createElement("span");
+    where.className = "where";
+    where.textContent = finding.reference;
+    row.append(where);
+  }
+  if (!finding.fixes.length) {
+    const none = document.createElement("span");
+    none.className = "no-fix";
+    none.textContent = "no automatic fix — the words around it are yours to change";
+    row.append(none);
+    return row;
+  }
+  finding.fixes.forEach((action) => {
+    const spec = CHECK_FIXES[action] || { label: action };
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = spec.label;
+    button.addEventListener("click", () => fixFinding(finding, action, button));
+    row.append(button);
+  });
+  return row;
+}
+
+async function fixFinding(finding, action, button) {
+  const spec = CHECK_FIXES[action] || {};
+  if (spec.dangerous && !button.classList.contains("asking")) {
+    const words = button.textContent;
+    button.classList.add("asking");
+    button.textContent = "Really?";
+    setTimeout(() => {
+      button.classList.remove("asking");
+      button.textContent = words;
+    }, 4000);
+    return;
+  }
+  if (spec.needsValue) {
+    openFilePicker((chosen) => sendFix(finding, action, chosen), finding.reference || "");
+    return;
+  }
+  await sendFix(finding, action, null);
+}
+
+async function sendFix(finding, action, value) {
+  try {
+    const answer = await api.checkFix({
+      kind: finding.kind,
+      action,
+      box: (finding.box && finding.box.uuid) || "",
+      path: finding.path || "",
+      value,
+    });
+    status(answer.did);
+    await refreshSide(); // a repair may have deleted a box, or filed new words
+    await drawCheck();
+  } catch (error) {
+    status(error.message, true);
+    await drawCheck(); // whatever the page was showing is now known to be out of date
+  }
+}
+
 /* -- the special-actions menu, and the standing index line -------------------
  *
  * The menu holds whatever is about the library rather than about the box on screen; there
@@ -1363,6 +1496,7 @@ function openSideMenu(event) {
   const where = button.getBoundingClientRect();
   showMenu(where.left, where.bottom + 4, [
     { label: "About", run: showAbout },
+    { label: "Check the library", run: openCheckModal },
     { separator: true },
     { label: "Index what changed", run: () => runIndexation("outstanding") },
     { label: "Re-read the whole library", run: () => runIndexation("everything") },
@@ -1505,6 +1639,8 @@ async function init() {
   wirePaneDrops();
   el("side-menu").addEventListener("click", openSideMenu);
   el("about-close").addEventListener("click", () => el("about-modal").close());
+  el("check-close").addEventListener("click", () => el("check-modal").close());
+  el("check-again").addEventListener("click", () => drawCheck());
   el("about-modal").addEventListener("click", (event) => {
     if (event.target === el("about-modal")) el("about-modal").close(); // a click past the card
   });

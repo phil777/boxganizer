@@ -853,6 +853,12 @@ class BoxStore:
         self._execute("DELETE FROM resources WHERE id = ?", (resource_id,))
         return True
 
+    def resource_holds_words(self, resource_id: int) -> bool:
+        """Whether the index is holding any text for this resource right now."""
+        return bool(
+            self._rows("SELECT 1 FROM resource_text WHERE resource_id = ? LIMIT 1", (resource_id,))
+        )
+
     def unreadable_references(self, *, limit: int = 3) -> list[str]:
         """Addresses marked for indexing that hold no words, and are not folders.
 

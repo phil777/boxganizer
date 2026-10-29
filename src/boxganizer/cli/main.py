@@ -41,6 +41,7 @@ from boxganizer import (
 )
 
 # The module, not the `box search` command: the two would be easy to confuse.
+from boxganizer import check as checker
 from boxganizer import search as text_search
 from boxganizer.errors import BoxganizerError, EditError, MissingDependency, MqttError
 from boxganizer.models import Box
@@ -167,6 +168,11 @@ def say(prefix: str, body: str, *, style: str = "green") -> None:
 def lit(body: str) -> None:
     """Print *body* exactly as stored — never as markup."""
     console.print(Text(body))
+
+
+def unwrapped(body: str) -> None:
+    """Print a line that has to stay in one piece: a command meant to be copied."""
+    console.print(Text(body), soft_wrap=True)
 
 
 @app.callback()
@@ -556,6 +562,81 @@ def box_index(
         if len(report.skipped) > show_skipped:
             lit(f"  … and {len(report.skipped) - show_skipped} more nothing-to-read")
         lit(f"  {store.indexed_count()} files now in the index")
+
+
+@app.command("check")
+def box_check(
+    ctx: typer.Context,
+    root: Annotated[
+        Path | None,
+        typer.Option(
+            "--root",
+            help="Directory file resources are expected inside. Defaults to "
+            "$BOXGANIZER_CONTENT_ROOT, then your home directory.",
+        ),
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable findings.")] = False,
+    fix_stale: Annotated[
+        bool,
+        typer.Option(
+            "--fix-stale", help="Re-read every file that has changed since it was indexed."
+        ),
+    ] = False,
+) -> None:
+    """Look at what every box points at, and say what to do about it.
+
+    A box is a promise about something else, and the thing moves: a file renamed, a folder
+    that became a file, a drive that is not mounted today. This walks every box, asks whether
+    its resource is still where it said, of the kind the type expects, inside the content
+    confine, and up to date in the index — and for each finding prints the command that
+    repairs it. Nothing here changes the library except what `--fix-stale` is asked to read
+    again; a check that "helped" by guessing where a moved file went is a tool that files
+    your documents in the wrong places.
+
+    The same findings, with the same repairs, are the page's Check the library action.
+    """
+    confine = paths.content_root(root)
+    with _open(ctx, _db_of(ctx)) as store:
+        findings = checker.run(store, confine=confine)
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "summary": checker.summary(findings),
+                        "confine": str(confine),
+                        "findings": [item.as_dict() for item in findings],
+                    },
+                    indent=2,
+                )
+            )
+            return
+        if fix_stale:
+            repairs = [item for item in findings if item.kind == "stale"]
+            if not repairs:
+                say("checked", "no file is waiting to be read again")
+                return
+            for item in repairs:
+                lit(f"  {checker.apply(store, item, checker.REINDEX, confine=confine)}")
+            say("re-read", f"{len(repairs)} file(s)")
+            return
+
+        say("checked", checker.summary(findings))
+        if not findings:
+            return
+        current = ""
+        for item in findings:
+            if item.kind != current:
+                current = item.kind
+                lit(f"\n{current.replace('_', ' ')}")
+            who = item.box_name or Path(item.path).name
+            lit(f"  {who}: {item.detail}")
+            if item.command():
+                # not wrapped: a repair handed to a terminal has to be copy-pasteable
+                unwrapped(f"      fix: {item.command()}")
+            elif item.fixes:
+                lit(f"      fixes: {', '.join(item.fixes)}")
+            else:
+                lit("      no automatic fix — the words around it are yours to change")
 
 
 def _opt_in_out(store: BoxStore, name: str, wanted: bool, confine: Path) -> None:

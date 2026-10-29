@@ -291,6 +291,22 @@ def _store_of(request: Request) -> BoxStore:
     return store
 
 
+class CheckFix(BaseModel):
+    """One repair, asked for by name, on one finding.
+
+    The finding is not trusted from the wire: the server runs the same check and looks the
+    finding up again, so the set of legal repairs is decided where the problem was found.
+    A stale dialog offers a repair that no longer applies, and that is an error to read, not
+    an action to take.
+    """
+
+    kind: str
+    action: str
+    box: str = ""
+    path: str = ""
+    value: str | None = None
+
+
 class IndexRun(BaseModel):
     """Which pass the page is asking for.
 
@@ -1256,6 +1272,58 @@ def create_app(
         job["task"] = asyncio.create_task(pass_())
         job["task"].add_done_callback(lambda done: job.pop("task", None))
         return {"started": True, "scope": scope}
+
+    @app.get("/api/check")
+    def check_library(request: Request, store: StoreDep) -> dict[str, Any]:
+        """Every box's promise about its resource, and the repairs that apply.
+
+        Asked for by name from the menu, never on a timer: it stats every resource in the
+        library, which is cheap for a person and wrong to do unbidden.
+        """
+        from boxganizer import check as checker
+
+        confine = getattr(request.app.state, "content_root", None)
+        found = checker.run(store, confine=confine)
+        return {
+            "summary": checker.summary(found),
+            "confine": str(paths.content_root(Path(confine) if confine else None)),
+            "findings": [item.as_dict() for item in found],
+        }
+
+    @app.post("/api/check/fix")
+    def check_repair(ref_body: CheckFix, request: Request, store: StoreDep) -> dict[str, Any]:
+        """Do one repair the check offered, and say what happened."""
+        from boxganizer import check as checker
+
+        confine = getattr(request.app.state, "content_root", None)
+        wanted = (ref_body.kind, ref_body.box, ref_body.path)
+        match = next(
+            (
+                item
+                for item in checker.run(store, confine=confine)
+                if (item.kind, item.box_uuid or item.box_name, item.path) == wanted
+                or (item.kind, item.box_uuid, item.path) == wanted
+            ),
+            None,
+        )
+        if match is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "already_fixed",
+                    "reason": "that is no longer a finding — check the library again",
+                },
+            )
+        try:
+            did = checker.apply(
+                store, match, ref_body.action, value=ref_body.value, confine=confine
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "cannot_apply", "reason": str(exc)},
+            ) from exc
+        return {"ok": True, "did": did}
 
     @app.get("/api/index-suggestion")
     def index_suggestion(

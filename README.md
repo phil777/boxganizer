@@ -101,12 +101,23 @@ box index --check                            # only look: which files changed si
 box index --stale                            # read those alone
 box index --add Ledger-csv                   # this file, whatever its type says
 box index --drop Huge-log                    # and not this one
+box check                                    # every box's resource: still there, still right
+box check --fix-stale                        # and read again whatever has changed
 ```
+
+`box check` is the one command that asks whether the library's promises still hold: is
+each box's file where it said, of the kind the type expects, inside the content confine,
+and up to date in the index? It also names the files Boxganizer wrote for boxes that no
+longer exist (ADR 14 keeps them on purpose) and the notes that link to a box that is not
+here. Every finding prints the command that repairs it, unwrapped so it can be copied, and
+nothing is changed unless asked: a check that "helped" by guessing where a moved file went
+is a tool that files your documents in the wrong places. The same findings, and the same
+repairs as buttons, are the page's **Check the library** action.
 
 What is indexed is decided per **resource**, not per box, and the dialog says so as you
 fill it in — a tick box, with the reason beside it:
 
-> ☑ Keep this file in the full-text search index
+> ☑ Index content
 > *a file whose ending says words*
 
 The default comes from the core (a text or PDF box, or a local file whose ending says
@@ -143,7 +154,12 @@ finds boxes by their own fields and by the words inside their text and PDF files
 showing the passage that answered and what your words were widened to — and a main
 pane to show one box, **its content first**. **New box** opens a modal where you
 choose the type (the list is searchable, because there are 44 of them) and configure
-it. What a box shows depends on what it is:
+it. ☰ beside the name at the top of that panel is what belongs to the library rather than
+to one box: **About**, **Check the library**, and the two index passes. Along the bottom,
+in front of the box count, the index reports itself all the time — `75 indexed`, or `2 out
+of date`, or `indexing…` — with the detail on hover, including which files hold nothing to
+read. A drop that no view claimed files the box into the box you are looking at, so the
+whole pane takes it. What a box shows depends on what it is:
 
 | Box                | Content view                                              |
 | ------------------ | --------------------------------------------------------- |

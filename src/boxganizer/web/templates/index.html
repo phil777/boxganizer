@@ -137,6 +137,17 @@
     </dialog>
 
     <!-- A file selector over the server's filesystem, for the resource field. -->
+    <dialog id="check-modal" aria-label="Check the library">
+      <h2>Check the library</h2>
+      <p id="check-summary" class="muted"></p>
+      <p id="check-confine" class="muted small"></p>
+      <ul id="check-list" class="check-findings"></ul>
+      <footer>
+        <button type="button" id="check-again">Check again</button>
+        <button type="button" id="check-close">Close</button>
+      </footer>
+    </dialog>
+
     <dialog id="about-modal" aria-label="About boxganizer">
       <div class="about">
         <span class="brand-glyph" aria-hidden="true">📦</span>
