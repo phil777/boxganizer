@@ -1,7 +1,7 @@
 # 15. The server speaks VNC, and the page is shown pictures
 
 Date: 2026-11-05
-Status: accepted
+Status: accepted, amended by ADR 17 (authentication)
 
 ## Context
 
@@ -51,11 +51,12 @@ left this whole module unexecuted).
 - **Raw is the only encoding requested**, because the standard requires every server to
   support it. Tight, Hextile and CoRRE would each be a decoder here; the cost is bytes on a
   busy screen, on a connection this program walks a few frames at a time.
-- **`None` is the only security type offered.** A server that insists on VNC password
-  authentication is refused with the list of what it asked for. This is ADR 12's line drawn
-  again for another port: this database is a plain file that gets copied, backed up and read
-  by a page, and VNC passwords are weak ones. `vnc://secret@host` is refused where it is
-  read, and the type refuses the box, so a secret never reaches storage.
+- **`None` was the only security type offered** *(amended by ADR 17: a server that insists on
+  VNC password authentication is now authenticated against, with a password it is given for
+  that connection alone — and the part of this bullet that survives is the part that mattered:
+  this database is a plain file that gets copied, backed up and read by a page, so
+  `vnc://secret@host` is still refused where it is read, and the type still refuses the box,
+  so a secret never reaches storage).*
 - Frames are capped at eight a second. RFB pushes an update whenever the screen changes and a
   machine playing video changes constantly; without a cap, this server encodes and the page
   decodes as fast as the pipe allows. Skipping is safe because the framebuffer held here *is*

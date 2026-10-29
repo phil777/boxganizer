@@ -181,7 +181,15 @@ const api = {
       body: JSON.stringify({ source, format }),
     }),
   vnc: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/vnc`),
-  vncStreamUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/vnc/stream`,
+  vncOpen: (ref, password) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/vnc/open`, {
+      method: "POST",
+      body: JSON.stringify(password ? { password } : {}),
+    }),
+  // The session id is in the query and the password never is: a URL outlives the request in
+  // the access log, the browser history and every proxy in between.
+  vncStreamUrl: (ref, session) =>
+    `/api/boxes/${encodeURIComponent(ref)}/vnc/stream?session=${encodeURIComponent(session)}`,
   vncInput: (ref, payload) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/vnc/input`, {
       method: "POST",
@@ -1198,7 +1206,9 @@ function applyResourceShape(modal = CREATE_MODAL) {
 function renderMetadataFields(modal = CREATE_MODAL, kind = {}) {
   const holder = el(modal.metadata);
   if (!holder) return;
-  const wanted = kind.required_metadata || [];
+  const wanted = [
+    ...new Set([...(kind.required_metadata || []), ...(kind.optional_metadata || [])]),
+  ];
   const source = modal === EDIT_MODAL ? state.editingBox || state.current : null;
   const existing = source ? source.metadata || {} : {};
   const kept = {};
@@ -1220,12 +1230,16 @@ function renderMetadataFields(modal = CREATE_MODAL, kind = {}) {
         ? kept[`metadata:${key}`]
         : String(existing[key] ?? "");
     input.placeholder = EXAMPLE_METADATA[key] || "";
+    const required = (kind.required_metadata || []).includes(key);
+    if (!required) title.textContent += " (optional)";
+    input.required = required;
     label.append(title, input);
     holder.append(label);
   });
 }
 
 const EXAMPLE_METADATA = {
+  password_file: "~/.vnc/workstation.pass",
   entity_id: "sensor.boiler_room",
   topic: "boiler/pressure",
   host: "build.local",
@@ -4657,7 +4671,10 @@ async function vncView(canvas, box, ctx, opts = {}) {
 
   if (status.screen) {
     const found = status.screen;
-    line.textContent = `${found.server_name || "a VNC server"} · RFB ${found.version} · ${found.width}×${found.height}`;
+    // A probe that stopped to ask for a password never reached ServerInit, so there is no
+    // size to print yet. "0×0" would be a number nobody believes, printed as a fact.
+    const size = found.width && found.height ? ` · ${found.width}×${found.height}` : "";
+    line.textContent = `${found.server_name || "a VNC server"} · RFB ${found.version}${size}`;
   } else {
     line.textContent = status.error || "nothing answered";
     wrap.classList.add("is-out");
@@ -4676,6 +4693,17 @@ async function vncView(canvas, box, ctx, opts = {}) {
     stop.textContent = "Stop";
     stop.hidden = true;
     controls.append(play, stop);
+
+    // Shown when the screen asks for one, and only then: a password field that is always
+    // there is a field people type anything into, and this one has exactly one use.
+    const secret = document.createElement("input");
+    secret.type = "password";
+    secret.className = "vnc-password";
+    secret.placeholder = "server password";
+    secret.autocomplete = "off";
+    secret.setAttribute("aria-label", "the password this screen asks for");
+    secret.hidden = true;
+    controls.append(secret);
     const copy = document.createElement("code");
     copy.className = "vnc-address";
     copy.textContent = status.destination.url;
@@ -4795,19 +4823,44 @@ async function vncView(canvas, box, ctx, opts = {}) {
       hint.textContent = words;
     }
 
-    play.addEventListener("click", () => {
+    async function connect(password) {
+      play.disabled = true;
+      let opened;
+      try {
+        opened = await api.vncOpen(box.uuid, password);
+      } catch (error) {
+        line.textContent = error.message;
+        play.disabled = false;
+        return;
+      }
+      if (opened.password_needed) {
+        // Not a failure to read and stop on: the answer is a field to type into.
+        secret.hidden = false;
+        secret.focus();
+        line.textContent = opened.reason;
+        play.disabled = false;
+        play.textContent = "Try again";
+        return;
+      }
+      session = opened.session;
+      size = { width: opened.width, height: opened.height };
+      screen.width = opened.width;
+      screen.height = opened.height;
+      secret.value = ""; // the bytes are in the server's session now, not in this input
       play.hidden = true;
       stop.hidden = false;
       hint.hidden = true;
       screen.hidden = false;
-      stream = new EventSource(api.vncStreamUrl(box.uuid));
+      stream = new EventSource(api.vncStreamUrl(box.uuid, opened.session));
       stream.addEventListener("info", (event) => {
         const info = JSON.parse(event.data);
         session = info.session;
         size = { width: info.width, height: info.height };
         screen.width = info.width;
         screen.height = info.height;
-        line.textContent = `${info.name || "VNC"} · RFB ${info.version} · ${info.width}×${info.height} · live`;
+        line.textContent =
+          `${info.name || "VNC"} · RFB ${info.version} · ${info.width}×${info.height} · live` +
+          (info.used_password ? " · authenticated" : "");
         stage.focus();
       });
       stream.addEventListener("frame", (event) => {
@@ -4825,13 +4878,23 @@ async function vncView(canvas, box, ctx, opts = {}) {
         if (detail) line.textContent = detail;
       });
       stream.addEventListener("end", () => stopEverything("the screen closed."));
-    });
+    }
 
     stop.addEventListener("click", () => stopEverything("stopped."));
+    play.addEventListener("click", () => connect(secret.value || undefined));
+    secret.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      connect(secret.value || undefined);
+    });
 
     if (!status.reachable) {
       play.disabled = true;
       play.title = status.error || "the machine did not answer";
+    } else if (status.screen && status.screen.needs_password) {
+      // The probe already learned this, so ask before the person has clicked anything.
+      secret.hidden = false;
+      line.textContent = `${line.textContent} · wants a password`;
     }
   }
 
@@ -4839,9 +4902,12 @@ async function vncView(canvas, box, ctx, opts = {}) {
   note.className = "muted vnc-note";
   note.textContent =
     "The screen is drawn here, on this machine's connection: the page is shown frames and " +
-    "sends back where the pointer is and what was typed. There is no password, and none can " +
-    "be stored — a server that insists on authentication is refused, and its address above is " +
-    "the line to give your own VNC viewer.";
+    "sends back where the pointer is and what was typed. A server that wants a password is " +
+    "asked for one when you connect, and the answer is used for that connection alone — it " +
+    "is never written to the library, because the library is a file that gets copied. To " +
+    "open a screen without being asked, point the box at a file that holds it: set the " +
+    "metadata field " +
+    `"${"password_file"}" to a path outside the library, readable only by you.`;
   wrap.append(note);
 
   canvas.append(wrap);

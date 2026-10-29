@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import mimetypes
 import os
@@ -63,6 +64,12 @@ from boxganizer.store import BoxStore
 #: sees better for it. Eight is above what a person reads as motion and far below what
 #: would make the machine hum.
 VNC_MAX_FPS = 8
+
+#: How long an opened screen may go unwatched, in seconds. The page opens a session and then
+#: asks for its stream; a browser killed in between leaves a socket held to somebody's
+#: machine with nobody at this end, and that is reclaimed rather than kept for the lifetime
+#: of the server.
+VNC_SESSION_TTL = 180.0
 
 #: How long a VNC box waits for a machine to say what it is. Shorter than the session
 #: timeout on purpose: this answers a page that merely opened a box, and a machine that is
@@ -318,6 +325,17 @@ class IndexRun(BaseModel):
     scope: str = "outstanding"
 
 
+class VncOpen(BaseModel):
+    """The password a screen wants, if it wants one.
+
+    In the body, never in the address: this request travels through access logs, browser
+    histories and proxies, and a secret in any of those is a secret published. The field is
+    read for the length of the handshake and then dropped by the client that received it.
+    """
+
+    password: str | None = None
+
+
 class VncInput(BaseModel):
     """One thing the page did to a live screen.
 
@@ -341,8 +359,6 @@ class NoteWrite(BaseModel):
     source: str = ""
     #: `markdown` or `text`. The file keeps its address either way — see the note type.
     format: str = "markdown"
-
-
 
     """One line of a checklist, as the page holds it."""
 
@@ -382,11 +398,42 @@ class ChecklistWrite(BaseModel):
 StoreDep = Annotated[BoxStore, Depends(_store_of)]
 
 
+def _warm_request_models() -> None:
+    """Assemble every request model's schema once, here, in the importing thread.
+
+    This module is written under ``from __future__ import annotations``, so each model's
+    fields are strings until the model is used for the first time, and building a schema
+    means looking those names up in this module's namespace. Do that first use inside a
+    worker thread — which is how uvicorn runs an app — and two threads can be assembling the
+    same half-built schema at the same moment, with one of them losing the namespace and
+    raising ``AttributeError: __pydantic_core_schema__``. It surfaces as a failure on
+    whichever request happens to arrive first, which is not a thing a library gets to ship.
+    """
+    for value in list(globals().values()):
+        if (
+            isinstance(value, type)
+            and issubclass(value, BaseModel)
+            and value.__module__ == __name__
+        ):
+            value.model_rebuild()
+
+
+_warm_request_models()
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # A live VNC session is somebody else's machine holding a connection open for us, so
+        # stopping this server gives every one of them back. Left in `app.state`, a session
+        # outlives the event loop that owns its socket, and what the garbage collector makes
+        # of that minutes later is a warning attached to unrelated code.
+        sessions: dict[str, Any] = getattr(app.state, "vnc_sessions", None) or {}
+        for key in list(sessions):
+            with contextlib.suppress(Exception):
+                await sessions.pop(key).close()
         store: BoxStore | None = getattr(app.state, "store", None)
         if store is not None and getattr(app.state, "owns_store", False):
             store.close()
@@ -711,7 +758,6 @@ def create_app(
         box.resource = record
         return target
 
-
     def _screen_box(store: BoxStore, ref: str) -> Box:
         """A box whose type is a live screen.
 
@@ -740,6 +786,26 @@ def create_app(
             request.app.state.vnc_sessions = sessions
         return sessions
 
+    async def _reclaim_vnc_sessions(sessions: dict[str, vnc.Screen]) -> None:
+        """Close sessions nobody is watching.
+
+        Opening a session holds a socket to someone's machine. A browser that is closed
+        between the open and the stream never sends the close it promised, so an unwatched
+        session is expired here rather than kept until the server restarts.
+        """
+        now = asyncio.get_running_loop().time()
+        for key in list(sessions):
+            screen = sessions[key]
+            abandoned = screen.closed or (
+                not screen.streamed and now - screen.opened_at > VNC_SESSION_TTL
+            )
+            if abandoned:
+                sessions.pop(key)
+                # awaited rather than fired and forgotten: a close that is dropped on the
+                # floor is a socket that may never be closed at all
+                with contextlib.suppress(Exception):
+                    await screen.close()
+
     @app.get("/api/boxes/{ref}/vnc")
     async def vnc_status(ref: str, request: Request, store: StoreDep) -> dict[str, Any]:
         """What is on the other end of the address, without holding a session open.
@@ -756,7 +822,10 @@ def create_app(
         except vnc.VncError as exc:
             return {"destination": None, "reachable": False, "error": str(exc)}
         try:
-            found = await vnc.probe(dest, timeout=VNC_PROBE_TIMEOUT)
+            # The file-backed password is used for the question too, so a box that is
+            # configured to connect unattended reports the screen it will actually get,
+            # instead of "wants a password" forever.
+            found = await vnc.probe(dest, timeout=VNC_PROBE_TIMEOUT, password=vnc.password_for(box))
         except (TimeoutError, vnc.VncError, OSError) as exc:
             return {
                 "destination": dest.as_dict(),
@@ -765,8 +834,67 @@ def create_app(
             }
         return {"destination": dest.as_dict(), "reachable": True, "screen": found.as_dict()}
 
+    @app.post("/api/boxes/{ref}/vnc/open")
+    async def vnc_open(
+        ref: str, body: VncOpen, request: Request, store: StoreDep
+    ) -> dict[str, Any]:
+        """Start a session and hand back its id, before any picture is asked for.
+
+        Opening is its own call because authentication is its own event. A password cannot
+        travel in the address of an event stream — a URL is written into the access log, the
+        browser history and every proxy between — and it cannot be asked for inside a stream
+        that has already begun. So the page asks first, gets `password_needed` back if the
+        screen wants one, and comes again with the answer typed into a field.
+
+        The password is put into the session's `Screen` for the length of the handshake and
+        then dropped by the client itself. Nothing here writes it to the library.
+        """
+        box = _screen_box(store, ref)
+        try:
+            dest = vnc.destination(box)
+            password = vnc.password_for(box, override=body.password)
+        except vnc.VncError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_vnc_address", "reason": str(exc)}
+            ) from exc
+        sessions = _vnc_sessions(request)
+        await _reclaim_vnc_sessions(sessions)
+        screen = vnc.Screen(dest, password=password)
+        session = uuid4().hex
+        try:
+            info = await screen.start()
+        except vnc.AuthenticationNeeded as exc:
+            return {
+                "session": None,
+                "password_needed": True,
+                "reason": str(exc),
+                "address": dest.url,
+            }
+        except (TimeoutError, vnc.VncError, OSError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "vnc_unreachable",
+                    "reason": str(exc) or type(exc).__name__,
+                    "address": dest.url,
+                },
+            ) from exc
+        sessions[session] = screen
+        return {
+            "session": session,
+            "password_needed": False,
+            "name": info.server_name,
+            "version": info.version,
+            "width": screen.width,
+            "height": screen.height,
+            "address": dest.url,
+            "used_password": screen.used_password,
+        }
+
     @app.get("/api/boxes/{ref}/vnc/stream")
-    async def vnc_stream(ref: str, request: Request, store: StoreDep) -> StreamingResponse:
+    async def vnc_stream(
+        ref: str, request: Request, store: StoreDep, session: str = ""
+    ) -> StreamingResponse:
         """A live screen, as the frames the machine sends when something changes.
 
         RFB pushes a FramebufferUpdate when the screen moves and nothing when it does not,
@@ -789,12 +917,17 @@ def create_app(
                 detail={"error": "bad_vnc_address", "reason": str(exc)},
             ) from exc
         sessions = _vnc_sessions(request)
+        screen = sessions.get(session)
+        if screen is None:
+            # No session means the open call was never made or this screen was already
+            # closed. Answering with an empty stream would leave the panel spinning.
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "no_such_session", "reason": "open the screen first"},
+            )
+        screen.streamed = True
 
         async def events() -> AsyncIterator[str]:
-            screen = vnc.Screen(dest)
-            session = uuid4().hex
-            sessions[session] = screen
-
             async def watch() -> None:
                 # Two readings, a second apart. An ASGI transport that has finished handing
                 # over the request body answers `http.disconnect` as its ordinary idle state,
@@ -809,17 +942,17 @@ def create_app(
 
             watcher = asyncio.create_task(watch())
             try:
-                info = await screen.start()
                 yield (
                     "event: info\ndata: "
                     + json.dumps(
                         {
                             "session": session,
-                            "name": info.server_name,
-                            "version": info.version,
+                            "name": screen.name,
+                            "version": screen.server_version,
                             "width": screen.width,
                             "height": screen.height,
                             "address": dest.url,
+                            "used_password": screen.used_password,
                         }
                     )
                     + "\n\n"
@@ -907,7 +1040,6 @@ def create_app(
             await screen.close()
         return {"ok": True, "closed": screen is not None}
 
-
     @app.get("/api/boxes/{ref}/note")
     def note_get(ref: str, request: Request, store: StoreDep) -> dict[str, object]:
         """The note's words, the format they are written to be read as, and — when that
@@ -959,9 +1091,7 @@ def create_app(
         }
 
     @app.put("/api/boxes/{ref}/note")
-    def note_put(
-        ref: str, body: NoteWrite, request: Request, store: StoreDep
-    ) -> dict[str, object]:
+    def note_put(ref: str, body: NoteWrite, request: Request, store: StoreDep) -> dict[str, object]:
         """Write the note, keep the graph in step with what it names, reindex the words.
 
         A box named inside the text is filed here as well. That is not the text ordering
@@ -1011,7 +1141,6 @@ def create_app(
             "attached": attached,
             "unknown": missing,
         }
-
 
     @app.get("/api/boxes/{ref}/checklist")
     def checklist_get(ref: str, request: Request, store: StoreDep) -> dict[str, object]:

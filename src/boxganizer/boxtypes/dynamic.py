@@ -120,13 +120,15 @@ class VNCResource(DynamicResource):
     implementation in JavaScript would be a second protocol to keep correct. See
     :mod:`boxganizer.vnc`.
 
-    **It cannot hold a password.** The client offers exactly one security type — None — and
-    a server that asks for anything else is refused with what it asked for. That is ADR 12's
-    line drawn again for a different port, and the reason is the same: this database is a
-    plain file that gets copied, backed up and read by a page. The consequence is honest and
-    stated on the panel: this box watches a screen its owner has left open to the local
-    network, a tunnel, or a loopback port — and a machine that demands a password is reached
-    with a real viewer, whose address the panel offers to copy.
+    **It cannot hold a password, and it can still use one.** A server that wants `None`
+    gets a session with nothing to type. A server that wants VNC authentication is given the
+    password the person types into the panel at that moment, or the one in the file named by
+    ``metadata["password_file"]`` — and neither is ever written to the library, because this
+    database is a plain file that gets copied, backed up and read by a page (ADR 12's line,
+    drawn again for a different port, in ADR 17). What the box may store is the *path*, which
+    is a fact about the filesystem and not a secret. An address like
+    ``vnc://secret@host:5900`` is still refused: a password there is published the moment the
+    library is copied.
     """
 
     key: ClassVar[str] = "vnc"
@@ -134,6 +136,9 @@ class VNCResource(DynamicResource):
     # 💻 rather than 🖥️, which the desktop type wears: this is somebody else's machine, and
     # a list where two boxes look identical is a list people mis-click.
     icon: ClassVar[str] = "\U0001f4bb"  # 💻
+    #: Offered by the dialog, because a screen that wants a file for its password is
+    #: otherwise a feature that exists only in the documentation.
+    optional_metadata: ClassVar[frozenset[str]] = frozenset({"password_file"})
     summary: ClassVar[str] = "A screen on another machine, live in the page."
     resource_uri_schemes: ClassVar[frozenset[str] | None] = frozenset({"vnc"})
     resource_hint: ClassVar[str] = "vnc://workstation:5900, or vnc://workstation:1 for display 1"

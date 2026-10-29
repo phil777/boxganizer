@@ -42,7 +42,8 @@ other boxes. Rules in brackets are enforced by the store.
         - `snapshot` 📸 Snapshot — resource required; schemes: http https
       - `terminal` ⌨️ Terminal
         - `ssh` 🔐 SSH Terminal — schemes: ssh; the host comes from the address
-      - `vnc` 💻 VNC Screen — schemes: vnc; this machine speaks RFB, the page is shown frames
+      - `vnc` 💻 VNC Screen — schemes: vnc; this machine speaks RFB, the page is shown frames;
+        optional metadata: `password_file`
       - `sensor` 📡 Sensor
         - `mqtt` 📶 MQTT Sensor — schemes: mqtt mqtts; the topic is the path
         of the address (`metadata["topic"]` remains as an override)
@@ -254,5 +255,10 @@ it is also what exempts the file from `$BOXGANIZER_CONTENT_ROOT`: the confine is
 which paths other people's boxes may open, and applying it to the library's own files would
 make every note unsearchable. ADR 14.
 
-`vnc` holds no secret either, in the same way `ssh` holds none: it offers the None security
-type and refuses anything else, naming what the server asked for. ADR 15.
+`vnc` holds no secret either, in the same way `ssh` holds none — and unlike `ssh`, it can
+still use one. `None` is chosen when the server will take it; VNC authentication when it will
+not, with the password taken from the field the panel shows or from the file named by
+`metadata["password_file"]`. Either way the bytes are used for that handshake and dropped:
+they are never written to the box, the metadata, or the address, and a test reads the database
+file's bytes to prove it. A `vnc://secret@host` address is still refused by the type.
+ADRs 15 and 17.

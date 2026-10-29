@@ -1617,7 +1617,7 @@ def test_the_sensor_view_shows_the_value_and_listens_for_more(client: TestClient
     script = client.get("/static/app.js").text
     for needle in (
         'registerView("mqtt", mqttView)',
-        'request(`/api/boxes/${encodeURIComponent(ref)}/mqtt`)',
+        "request(`/api/boxes/${encodeURIComponent(ref)}/mqtt`)",
         "/mqtt/stream",
         "new EventSource(",
         'value.className = "mqtt-value"',
@@ -1641,7 +1641,7 @@ def test_the_sensor_view_holds_the_password_back_and_the_connection_short(
     # A cell shows one reading and says it is only what the server last heard; the
     # opened box is what holds a stream. The flag has to survive the trip through
     # renderContent, or a wall of sensors becomes a wall of subscriptions.
-    assert 'if (opts.cell) {' in script
+    assert "if (opts.cell) {" in script
     assert 'chip.textContent = info.reading ? "last value" : "no value yet";' in script
     assert "renderContent(content, child, { depth: childDepth, cell: true })" in script
     assert "{ embedded, depth, cell }" in script
@@ -1722,9 +1722,7 @@ def test_a_desktops_background_is_its_resource_field(
     client: TestClient, populated: BoxStore
 ) -> None:
     desk = populated.add(Box(name="Desk two", box_type="desktop"))
-    saved = client.put(
-        f"/api/boxes/{desk.uuid}", json={"resource_uri": "/home/me/wall.png"}
-    ).json()
+    saved = client.put(f"/api/boxes/{desk.uuid}", json={"resource_uri": "/home/me/wall.png"}).json()
     assert saved["resource_uri"] == "/home/me/wall.png"
     cleared = client.put(f"/api/boxes/{desk.uuid}", json={"resource_uri": ""}).json()
     assert not cleared["resource_uri"]
@@ -1820,9 +1818,7 @@ def test_writing_a_filter_updates_the_link_table_through_the_api(client: TestCli
 
 
 def test_a_filter_with_an_unknown_clause_is_refused(client: TestClient) -> None:
-    client.post(
-        "/api/boxes", json={"name": "Ouch", "box_type": "dynamic-folder", "config": {}}
-    )
+    client.post("/api/boxes", json={"name": "Ouch", "box_type": "dynamic-folder", "config": {}})
     response = client.put("/api/boxes/Ouch/filter", json={"filter": {"colour": "red"}})
     assert response.status_code == 422
     assert response.json()["detail"]["error"] == "bad_filter"
@@ -1834,9 +1830,7 @@ def test_a_filter_with_an_unknown_clause_is_refused(client: TestClient) -> None:
 def test_an_empty_filter_asks_for_every_box(client: TestClient) -> None:
     client.post("/api/boxes", json={"name": "one"})
     client.post("/api/boxes", json={"name": "two"})
-    client.post(
-        "/api/boxes", json={"name": "Whole", "box_type": "dynamic-folder", "config": {}}
-    )
+    client.post("/api/boxes", json={"name": "Whole", "box_type": "dynamic-folder", "config": {}})
     body = client.put("/api/boxes/Whole/filter", json={"filter": {}}).json()
     assert body["describes"] == "every box"
     # every box means every box: the library as it stands, including the folder itself
@@ -1863,9 +1857,7 @@ def test_resolving_on_demand_says_what_it_holds(client: TestClient) -> None:
         json={"name": "PDFs", "box_type": "dynamic-folder", "config": {"filter": {"type": "pdf"}}},
     )
     client.post("/api/boxes/PDFs/children", json={"child": "square"})  # filed by hand
-    assert "square" in [
-        child["name"] for child in client.get("/api/boxes/PDFs").json()["children"]
-    ]
+    assert "square" in [child["name"] for child in client.get("/api/boxes/PDFs").json()["children"]]
     resolved = client.post("/api/boxes/PDFs/resolve")
     assert resolved.status_code == 200
     assert resolved.json()["members"] == 0
@@ -1888,7 +1880,7 @@ def test_a_box_made_from_another_starts_with_that_parent(client: TestClient) -> 
     # a container may hand over its uuid or an object; both mean "file it here"
     assert '"string" ? { parent: options } : options' in script
     assert "await fillParentChoices(choices.parent);" in script
-    assert "if (choices.parent) el(\"nb-parent\").value = choices.parent;" in script
+    assert 'if (choices.parent) el("nb-parent").value = choices.parent;' in script
     # the panel is one page, so the parent asked for is fetched when it is not on it
     assert "if (preferred && !state.boxes.some((box) => box.uuid === preferred))" in script
     assert "parentOption(select, await api.box(preferred));" in script
@@ -1898,7 +1890,7 @@ def test_creating_from_a_box_leaves_the_view_on_that_box(client: TestClient) -> 
     script = client.get("/static/app.js").text
     assert "const filedIn = payload.parent;" in script
     assert "await openBox(filedIn);" in script
-    assert 'status(`created ${created.name} in it`);' in script
+    assert "status(`created ${created.name} in it`);" in script
     # ...and only jumps to the child when there was no container to stay on
     assert "await openBox(created.uuid);" in script
 
@@ -1925,7 +1917,7 @@ def test_a_folder_filters_its_children_by_name_and_type(client: TestClient) -> N
         'search.className = "child-search"',
         "function childMatches(child, term)",
         'String(childKind.label || "").toLowerCase().includes(term)',
-        "search.addEventListener(\"input\", draw);",
+        'search.addEventListener("input", draw);',
     ):
         assert needle in script, needle
     assert ".child-search" in client.get("/static/app.css").text
@@ -1975,7 +1967,7 @@ def test_the_desktop_is_one_scaled_canvas_so_icons_stay_on_the_picture(
     script = client.get("/static/app.js").text
     for needle in (
         "function fitSurface()",
-        'surface.dataset.scale = String(scale);',
+        "surface.dataset.scale = String(scale);",
         "const scale = Math.max(0.2, Math.min(1, ratio));",
         "fitted = fitSurface();",
         "holdLive(() => watcher.disconnect());",
@@ -2032,9 +2024,7 @@ def test_creating_from_the_desktop_places_the_icon_at_the_spot(
     assert uuid in [child["uuid"] for child in client.get("/api/boxes/Surface").json()["children"]]
 
 
-def test_a_spotted_box_on_a_snapped_desktop_lands_on_a_line(
-    client: TestClient, desk: Box
-) -> None:
+def test_a_spotted_box_on_a_snapped_desktop_lands_on_a_line(client: TestClient, desk: Box) -> None:
     client.post("/api/boxes/Surface/desktop/settings", json={"grid": 32, "snap": True})
     created = client.post(
         "/api/boxes",
@@ -2074,7 +2064,7 @@ def test_the_page_sends_the_right_click_spot_of_the_canvas(client: TestClient) -
     script = client.get("/static/app.js").text
     # the spot is in canvas pixels: the screen distance divided by the drawn scale
     assert "const scale = surfaceScale(surface);" in script
-    assert '(event.clientX - frame.left) / scale - DESKTOP_DEFAULTS.tile / 2' in script
+    assert "(event.clientX - frame.left) / scale - DESKTOP_DEFAULTS.tile / 2" in script
     assert "ctx.newBox({ parent: box.uuid, place: spot })" in script
     assert "place: state.pendingPlace || null," in script
     # and leaving the modal forgets it, so it cannot land in the next box's path
@@ -2162,18 +2152,41 @@ def test_the_ssh_console_asks_only_the_endpoints_that_exist(client: TestClient) 
     assert "/ssh/stream" not in script
 
 
-def test_nothing_in_the_page_offers_to_type_a_password(client: TestClient) -> None:
-    """The rule is that a box keeps no secret, so the page must not invite one.
+def test_a_page_may_ask_for_a_password_and_may_never_keep_one(client: TestClient) -> None:
+    """Asking and storing are different things, and the page is allowed exactly one of them.
 
-    The word may appear — it has to, to explain the rule — but no field may, and no
-    value may be sent under that name.
+    The old version of this test forbade a password field anywhere in the page, which was a
+    way of saying "this software cannot authenticate" — and the user asked for
+    authentication. The rule worth keeping is the narrower one: a secret may cross to the
+    server for the length of a handshake, and may not be written into a box, because a box
+    lives in a file that gets copied, mailed and backed up.
     """
     script = client.get("/static/app.js").text
-    page = client.get("/").text
-    assert 'type="password"' not in page
-    assert 'type = "password"' not in script
+    vnc_source = script[script.index("async function vncView") : script.index('registerView("vnc"')]
+    # one field, shown on demand, and wiped from the DOM once it has been used
+    assert vnc_source.count('type = "password"') == 1
+    assert "secret.hidden = false;" in vnc_source
+    assert 'secret.value = ""; // the bytes are in the server\'s session now' in vnc_source
+    # it goes to the open call and nowhere else — never to a box, and never in an address
+    assert "api.vncOpen(box.uuid, password)" in vnc_source
+    assert "vncStreamUrl: (ref, session) =>" in script
+    assert "?session=" in script
+    assert "api.updateBox" not in vnc_source
+    # SSH still borrows the system client and never sees a secret
     ssh_source = script[script.index("async function sshView") : script.index('registerView("ssh"')]
     assert "password" not in ssh_source.lower().replace("no password is stored", "")
+
+
+def test_a_screen_that_wants_a_file_for_its_password_offers_the_field(client: TestClient) -> None:
+    """Metadata a type will honour, but never asks for, is a feature only in the docs."""
+    kinds = {kind["key"]: kind for kind in client.get("/api/types").json()}
+    assert kinds["vnc"]["optional_metadata"] == ["password_file"]
+    assert "password_file" not in kinds["vnc"]["required_metadata"]
+    assert kinds["home-assistant"]["required_metadata"] == ["entity_id"]
+    script = client.get("/static/app.js").text
+    assert "...(kind.optional_metadata || [])" in script
+    assert 'title.textContent += " (optional)";' in script
+    assert 'password_file: "~/.vnc/workstation.pass"' in script
 
 
 def test_the_console_keeps_what_it_ran_without_touching_the_rest_of_the_box(
@@ -2270,7 +2283,7 @@ def test_the_dialog_asks_the_core_about_indexing_rather_than_guessing(
     assert 'id="nb-index"' in page and 'id="eb-index"' in page
     assert 'id="nb-index-reason"' in page and 'id="eb-index-reason"' in page
     # both dialogs carry the answer out to the server
-    assert 'payload.index_resource = el(EDIT_MODAL.index).checked;' in script
+    assert "payload.index_resource = el(EDIT_MODAL.index).checked;" in script
     assert 'index_resource: el("nb-index") ? el("nb-index").checked : null,' in script
 
 
@@ -2357,8 +2370,8 @@ def test_the_markdown_view_renders_and_can_show_the_source(client: TestClient) -
 def test_the_markdown_mode_is_remembered_in_the_box(client: TestClient) -> None:
     """A note read as plain text at midnight is plain text in the morning."""
     script = client.get("/static/app.js").text
-    assert 'markdown: {...(section || {}), mode: key}' in script
-    assert 'stage.dataset.mode = mode;' in script
+    assert "markdown: {...(section || {}), mode: key}" in script
+    assert "stage.dataset.mode = mode;" in script
 
 
 def test_the_rendered_page_does_not_build_html_from_a_file(client: TestClient) -> None:
@@ -2472,8 +2485,12 @@ def test_the_vnc_view_asks_before_it_draws_and_never_holds_a_socket(client: Test
     # nothing connects until the person asks, and the stream is the only thing that does
     view_start = script.index("async function vncView")
     view = script[view_start : script.index('registerView("vnc"', view_start)]
-    assert 'new EventSource(api.vncStreamUrl(box.uuid))' in view
+    # a probe first to ask what is there, then an open that may answer "password needed",
+    # and only a session that came back from the open is streamed
     assert "api.vnc(box.uuid)" in view
+    assert "await api.vncOpen(box.uuid, password)" in view
+    assert "if (opened.password_needed) {" in view
+    assert "new EventSource(api.vncStreamUrl(box.uuid, opened.session))" in view
     assert "WebSocket" not in view  # no socket in the page: frames in, input out
     # the far screen keeps its own shape
     assert ".vnc-screen" in css and "aspect-ratio" in css
@@ -2593,7 +2610,7 @@ def test_the_index_is_reported_on_every_panel_and_can_be_run_from_the_page(
     # The pass is backgrounded, so the answer is only that it started; the numbers are
     # polled. A request that read the whole library would look like a frozen page.
     script = client.get("/static/app.js").text
-    assert 'indexTimer = setInterval(() => refreshIndexStatus(), 1200)' in script
+    assert "indexTimer = setInterval(() => refreshIndexStatus(), 1200)" in script
     assert "refreshIndexStatus({ check: true })" in script
 
 
@@ -2635,7 +2652,7 @@ def test_moving_an_icon_does_not_rebuild_the_desktop_around_it(client: TestClien
     assert "ctx.reload()" not in grip
     # a box dropped from the panel had no tile here, so that one does redraw
     drop = script[script.index('surface.addEventListener("drop"') :]
-    drop = drop[: drop.index("surface.addEventListener(\"contextmenu\"")]
+    drop = drop[: drop.index('surface.addEventListener("contextmenu"')]
     assert "if (placed) ctx.reload();" in drop
 
 
@@ -2684,11 +2701,11 @@ def test_a_dialog_reports_its_own_refusal(client: TestClient) -> None:
     assert 'id="eb-error"' in page
     assert 'role="alert"' in page
     script = client.get("/static/app.js").text
-    assert "function modalError(modal = CREATE_MODAL, message = \"\")" in script
+    assert 'function modalError(modal = CREATE_MODAL, message = "")' in script
     create = script[script.index("async function submitNewBox") :]
     create = create[: create.index("/**", create.index("async function submitNewBox") + 10)]
     assert "modalError(CREATE_MODAL, error.message);" in create
-    assert 'status(error.message, true);' not in create
+    assert "status(error.message, true);" not in create
     edit = script[script.index("async function submitEditBox") :]
     edit = edit[: edit.index("/* ------", script.index("async function submitEditBox") + 10)]
     assert "modalError(EDIT_MODAL, error.message);" in edit

@@ -17,7 +17,12 @@ there is news rather than on a timer. One `FramebufferUpdateRequest(incremental=
 each update, which is the whole refresh policy. There is no polling loop and no frame rate
 to tune: the machine's own activity sets the pace, and an idle desktop costs nothing.
 
-**Authentication is refused, not stored.** The client offers exactly one security type —
+**A password is asked for, used, and dropped.** A screen that wants one is connected to with
+VNC authentication (security type 2), and the password comes from the person typing it into
+the panel or from a file the box points at — never from the library itself. The address of
+record still refuses to carry one, because `vnc://host:5900` is written into a database that
+gets copied, mailed and backed up; a secret there is published, not saved. See
+``doc/adr/0017``.
 `None` — and if the server will not accept it, the box says which types the server asked
 for and stops. This is the same line ADR 12 drew for SSH: Boxganizer holds no secrets, and
 a VNC password in a URL (`vnc://secret@host`) is rejected where it is read rather than
@@ -42,7 +47,10 @@ import contextlib
 import re
 import struct
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+from . import des
 
 #: How long to wait for the other machine, in seconds. A VNC server that does not answer
 #: in this time is not answering; the person gets to know now rather than after a minute.
@@ -71,6 +79,14 @@ _BELL = 2
 _SERVER_CUT_TEXT = 3
 
 _SECURITY_NONE = 1
+
+#: Security types this client can speak. 1 asks for nothing; 2 asks for a password.
+_SECURITY_VNC = 2
+
+#: Metadata key holding the path of a file that contains the password. The path is stored,
+#: the secret is not: it stays in a file the operating system protects, which is the same
+#: bargain the SSH box strikes with its identity file.
+PASSWORD_FILE = "password_file"
 
 #: Names for the security types, so a refusal can say what was asked for.
 SECURITY_NAMES = {
@@ -110,6 +126,15 @@ class VncError(ValueError):
     """A VNC box cannot be used as asked — a bad address, or a server that says no."""
 
 
+class AuthenticationNeeded(VncError):
+    """The screen asked for a password and this attempt did not bring one.
+
+    Separate from `VncError` because it is not a sentence to read and give up on: it is the
+    signal for the page to put a field on screen. Everything else in this module ends in an
+    explanation; this one ends in a question.
+    """
+
+
 @dataclass(frozen=True)
 class Destination:
     """Where a VNC box connects: a host and a port, and nothing else."""
@@ -145,15 +170,18 @@ def destination(box: Any) -> Destination:
     privileged and unused) so it is a display; anything above is a port.
 
     A password in the address is refused, here, where the address is read — not quietly
-    dropped on the way to the socket. See the module docstring.
+    dropped on the way to the socket. Authentication arrived, and this rule stayed: the
+    password belongs to a *connection*, and the address belongs to a database that gets
+    copied. See the module docstring and ADR 17.
     """
     raw = (getattr(box, "resource_uri", None) or "").strip()
     if not raw:
         raise VncError("the box points at nothing; a VNC box needs vnc://host[:port]")
     if "@" in authority_of(raw):
         raise VncError(
-            "a VNC box keeps no password in its address — this client offers no "
-            "authentication, so ask the machine for none, or use your own viewer"
+            "a VNC box keeps no password in its address. Type it into the panel when the "
+            "screen asks for one, or set metadata password_file to a file outside the "
+            "library; an address is written into the database, and the database is copied"
         )
     match = _ADDRESS.match(raw)
     if match is None:
@@ -183,6 +211,7 @@ class Probe:
 
     version: str
     security_types: list[int] = field(default_factory=list)
+    needs_password: bool = False
     server_name: str = ""
     width: int = 0
     height: int = 0
@@ -204,6 +233,7 @@ class Probe:
                 SECURITY_NAMES.get(kind, f"type {kind}") for kind in self.security_types
             ],
             "accepts_none": self.accepts_none,
+            "needs_password": self.needs_password,
             "server_name": self.server_name,
             "width": self.width,
             "height": self.height,
@@ -219,8 +249,56 @@ async def _read(stream: asyncio.StreamReader, count: int, what: str) -> bytes:
     return data
 
 
+async def _negotiate(
+    stream: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    probe: Probe,
+    kinds: list[int],
+    *,
+    password: str | None,
+    probe_only: bool,
+) -> None:
+    """Pick a security type and satisfy it.
+
+    `None` is preferred whenever the server will take it. Otherwise VNC authentication, if a
+    password came with this attempt — and if none did, either raise (a session wants to
+    start) or report (a probe only wanted to know).
+    """
+    if _SECURITY_NONE in kinds:
+        chosen = _SECURITY_NONE
+    elif _SECURITY_VNC in kinds:
+        if password:
+            chosen = _SECURITY_VNC
+        elif probe_only:
+            probe.needs_password = True
+            return
+        else:
+            raise AuthenticationNeeded(
+                f"{probe.asked_for()} is what the server wants, and this connection had no "
+                "password to offer it"
+            )
+    else:
+        raise VncError(
+            "this box cannot authenticate against that server; it offered only " + probe.asked_for()
+        )
+    writer.write(bytes([chosen]))
+    await writer.drain()
+    if chosen == _SECURITY_VNC:
+        # Sixteen bytes of challenge in, sixteen bytes of DES-ECB out, and that is the whole
+        # of the authentication: there is no session token afterwards, so a wrong response is
+        # indistinguishable, to the server, from a wrong password typed by a person.
+        challenge = await _read(stream, 16, "the authentication challenge")
+        writer.write(des.respond_to_challenge(challenge, password or ""))
+        await writer.drain()
+    await _security_result(stream, probe, with_password=chosen == _SECURITY_VNC)
+
+
 async def _greeting(
-    stream: asyncio.StreamReader, writer: asyncio.StreamWriter
+    stream: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    password: str | None = None,
+    probe_only: bool = False,
 ) -> Probe:
     """Read the version, and on 3.8 and later the list of security types.
 
@@ -244,15 +322,12 @@ async def _greeting(
         if count == 0:
             reason = (await _read(stream, 4, "a failure reason")).decode("latin-1", "replace")
             raise VncError(f"the server refuses every connection: {reason.strip()}")
-        chosen = _SECURITY_NONE if _SECURITY_NONE in kinds else (kinds[0] if kinds else 0)
-        writer.write(bytes([chosen]))
-        await writer.drain()
-        if chosen != _SECURITY_NONE:
-            raise VncError(
-                "the server will not do a session without authentication; it asked for "
-                + probe.asked_for()
-            )
-        await _security_result(stream, probe)
+        await _negotiate(stream, writer, probe, kinds, password=password, probe_only=probe_only)
+        if probe.needs_password:
+            # Asked what is there, and the answer is "a password". Stop before choosing: a
+            # probe that committed to a security type would leave the server waiting on a
+            # challenge answer from a client that is about to hang up.
+            return probe
     else:
         # 3.3 has no list and no result: the handshake is over and ServerInit is next.
         probe.security_types = [_SECURITY_NONE]
@@ -260,8 +335,15 @@ async def _greeting(
     return probe
 
 
-async def _security_result(stream: asyncio.StreamReader, probe: Probe) -> None:
-    """The 4-byte SecurityResult 3.8 sends after the security type is chosen."""
+async def _security_result(
+    stream: asyncio.StreamReader, probe: Probe, *, with_password: bool = False
+) -> None:
+    """The 4-byte SecurityResult 3.8 sends after the security type is chosen.
+
+    `with_password` changes only the sentence, and it matters: after a password was offered,
+    "the server refused the session" reads like a server problem, and the person goes to look
+    at the machine instead of at what they typed.
+    """
     result = struct.unpack(">I", await _read(stream, 4, "the security result"))[0]
     if result != 0:
         reason = ""
@@ -269,7 +351,8 @@ async def _security_result(stream: asyncio.StreamReader, probe: Probe) -> None:
             length = struct.unpack(">I", await _read(stream, 4, "a failure length"))[0]
             raw_reason = await _read(stream, length, "the failure reason")
             reason = raw_reason.decode("latin-1", "replace")
-        raise VncError(f"the server refused the session (reason: {reason.strip() or result})")
+        subject = "that password" if with_password else "the session"
+        raise VncError(f"the server refused {subject} (reason: {reason.strip() or result})")
 
 
 async def _server_init(stream: asyncio.StreamReader, probe: Probe) -> None:
@@ -287,13 +370,41 @@ async def _server_init(stream: asyncio.StreamReader, probe: Probe) -> None:
     )
 
 
-async def probe(dest: Destination, *, timeout: float = DEFAULT_TIMEOUT) -> Probe:
-    """Ask a machine what it is, without holding a session open."""
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(dest.host, dest.port), timeout
-    )
+def password_for(box: Any, *, override: str | None = None) -> str | None:
+    """The password to try, or None. Typed first, then a file the box points at.
+
+    The file's *contents* never enter the database, the index, or an error message: only the
+    path is stored, and the bytes are read here, at the moment of use, and dropped after.
+    """
+    if override:
+        return override
+    configured = str(box.metadata.get(PASSWORD_FILE) or "").strip()
+    if not configured:
+        return None
+    path = Path(configured).expanduser()
     try:
-        return await asyncio.wait_for(_greeting(reader, writer), timeout)
+        # A trailing newline is how every editor and every `echo` writes a file, and the
+        # protocol would send it as part of the secret.
+        return path.read_text(encoding="utf-8").rstrip("\r\n") or None
+    except OSError as exc:
+        raise VncError(
+            f"the password file {path} could not be read: {exc.strerror or exc}"
+        ) from exc
+
+
+async def probe(
+    dest: Destination, *, timeout: float = DEFAULT_TIMEOUT, password: str | None = None
+) -> Probe:
+    """Ask a machine what it is, without holding a session open.
+
+    Reports `needs_password` rather than failing when that is the answer, because "it wants a
+    password" is a fact about the server worth showing before anyone has typed one.
+    """
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(dest.host, dest.port), timeout)
+    try:
+        return await asyncio.wait_for(
+            _greeting(reader, writer, password=password, probe_only=True), timeout
+        )
     finally:
         writer.close()
         with contextlib.suppress(Exception):
@@ -308,9 +419,20 @@ class Screen:
     what the protocol is built for and what avoids a fight over whose mouse is whose.
     """
 
-    def __init__(self, dest: Destination, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        dest: Destination,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        password: str | None = None,
+    ) -> None:
         self.dest = dest
         self.timeout = timeout
+        # Held only until the handshake finishes, then set to None. A session lives as long
+        # as a browser tab; the exchange that needs the secret is sixteen bytes and happens
+        # once, so keeping it would buy nothing and cost a heap dump.
+        self._password = password
+        self.used_password = False
         self.width = 0
         self.height = 0
         self.name = ""
@@ -319,10 +441,19 @@ class Screen:
         self._writer: asyncio.StreamWriter | None = None
         self._pixels = bytearray()
         self._closed = False
+        # Set when something has actually watched the screen. A session opened and never
+        # streamed is a socket left held by a browser that was closed mid-click, and the
+        # sweep in the open endpoint reclaims those; a session someone is watching is not.
+        self.streamed = False
+        self.opened_at = 0.0
 
     @property
     def started(self) -> bool:
         return bool(self.width and self.height)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     async def start(self) -> Probe:
         """Connect, agree on nothing fancy, and ask for the screen."""
@@ -331,18 +462,31 @@ class Screen:
         )
         self._reader, self._writer = reader, writer
         try:
-            probe_result = await asyncio.wait_for(_greeting(reader, writer), self.timeout)
+            try:
+                probe_result = await asyncio.wait_for(
+                    _greeting(reader, writer, password=self._password), self.timeout
+                )
+            except TimeoutError as exc:
+                # `TimeoutError` alone is what the panel would otherwise print, and it says
+                # nothing about which of the five machines in the chain stopped talking.
+                await self.close()
+                raise VncError(
+                    f"that machine stopped answering during the handshake, after saying it was "
+                    f"{self.dest.display}"
+                ) from exc
+            self.used_password = bool(self._password)
         except BaseException:
             await self.close()  # the same: nothing handed back, nothing left open
             raise
+        finally:
+            self._password = None
         self.name = probe_result.server_name
         self.server_version = probe_result.version
         self.width, self.height = probe_result.width, probe_result.height
+        self.opened_at = asyncio.get_running_loop().time()
         if not 0 < self.width <= MAX_DIMENSION or not 0 < self.height <= MAX_DIMENSION:
             await self.close()
-            raise VncError(
-                f"a {self.width}x{self.height} screen is more than this box will hold"
-            )
+            raise VncError(f"a {self.width}x{self.height} screen is more than this box will hold")
         # 32 bits a pixel, 24 used, little-endian, red at bit 16. Chosen rather than
         # accepted, because it is the layout Pillow takes as `RGBX` with no shuffling: a
         # frame is then a copy, not a conversion.
@@ -431,9 +575,7 @@ class Screen:
         held while the position changes.
         """
         # type u8, button-mask u8, x u16, y u16
-        await self._send(
-            struct.pack(">BBHH", _POINTER_EVENT, button_mask & 0xFF, int(x), int(y))
-        )
+        await self._send(struct.pack(">BBHH", _POINTER_EVENT, button_mask & 0xFF, int(x), int(y)))
 
     async def key(self, keysym: int, *, down: bool) -> None:
         await self._send(struct.pack(">BBxxI", _KEY_EVENT, 1 if down else 0, int(keysym)))
@@ -445,13 +587,20 @@ class Screen:
         await self._writer.drain()
 
     async def close(self) -> None:
+        """Hang up. Safe to call twice, and safe to call on a screen that never started."""
         self._closed = True
-        if self._writer is not None:
-            self._writer.close()
-            with contextlib.suppress(Exception):
-                await self._writer.wait_closed()
-        self._writer = None
+        writer, self._writer = self._writer, None
         self._reader = None
+        if writer is None:
+            return
+        writer.close()
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            # The waiter behind `wait_closed()` belongs to the transport, and a peer that is
+            # hanging up at the same moment as us can hand back a CancelledError that is about
+            # the socket and not about this task. The socket is closed either way; letting it
+            # escape would turn "give the screen back" into a failed HTTP request, which is how
+            # one dead VNC server takes down an unrelated click.
+            await writer.wait_closed()
 
 
 def _png(width: int, height: int, pixels: bytearray) -> bytes:

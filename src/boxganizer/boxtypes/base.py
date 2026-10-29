@@ -50,6 +50,11 @@ class BoxType:
     #: Lowercase suffixes the resource must have, or ``None`` for any.
     extensions: ClassVar[frozenset[str] | None] = None
     required_metadata: ClassVar[frozenset[str]] = frozenset()
+    #: Metadata keys a type will use if it is given them, and which the interfaces should
+    #: therefore offer. A thing that can be set but never asked for is not really an option:
+    #: it is a line in documentation nobody reads. Where a required key says "this box is
+    #: incomplete without it", an optional one says "here is what else this box can do".
+    optional_metadata: ClassVar[frozenset[str]] = frozenset()
     #: True when at most one box of this type may exist in a database.
     singleton: ClassVar[bool] = False
     #: True when the resource is a directory the interfaces may list.
@@ -183,6 +188,7 @@ class BoxType:
             else None,
             "extensions": sorted(cls.extensions) if cls.extensions else None,
             "required_metadata": sorted(cls.required_metadata),
+            "optional_metadata": sorted(cls.optional_metadata),
             "resource_hint": cls.resource_hint,
             # Whether the resource is a file on this machine — which is the question the
             # dialog asks twice: only a file can be picked with the browser, and only a

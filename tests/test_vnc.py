@@ -19,16 +19,18 @@ import socket
 import struct
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from boxganizer import vnc
+from boxganizer import des, vnc
+from boxganizer.errors import InvalidBoxContent
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
-from boxganizer.web.app import create_app
+from boxganizer.web.app import VNC_SESSION_TTL, create_app
 
 
 class FakeRfbServer:
@@ -47,9 +49,16 @@ class FakeRfbServer:
         name: str = "FakeVNC",
         frames: list[list[tuple[int, int, int, int, bytes]]] | None = None,
         close_after_frames: bool = True,
+        password: str | None = None,
     ) -> None:
         self.version = version
-        self.security_types = security_types if security_types is not None else [1]
+        # A password asked for is a security type offered: type 2 on its own, or alongside
+        # None when the server would take either, which is how the real ones are configured.
+        self.password = password
+        if security_types is not None:
+            self.security_types = security_types
+        else:
+            self.security_types = [2] if password else [1]
         self.width = width
         self.height = height
         self.name = name
@@ -60,6 +69,9 @@ class FakeRfbServer:
         self.received: list[tuple[Any, ...]] = []
         self.client_version = ""
         self.chosen_security: int | None = None
+        self.challenge = b""
+        self.responses: list[bytes] = []
+        self.authentication_ok: bool | None = None
         self.encodings: list[int] = []
         self.pixel_format: bytes = b""
         self.update_requests = 0
@@ -99,7 +111,6 @@ class FakeRfbServer:
             task.cancel()
         await asyncio.sleep(0.05)
 
-
     async def _read(self, reader: asyncio.StreamReader, count: int) -> bytes:
         return await reader.readexactly(count)
 
@@ -126,9 +137,15 @@ class FakeRfbServer:
             await writer.drain()
             self.chosen_security = (await self._read(reader, 1))[0]
             accepted = self.chosen_security in self.security_types
+            if accepted and self.chosen_security == 2:
+                accepted = await self._vnc_authenticate(reader, writer)
             writer.write(struct.pack(">I", 0 if accepted else 1))
             await writer.drain()
             if not accepted:
+                reason = getattr(self, "explain_refusal", b"")
+                if reason:
+                    writer.write(struct.pack(">I", len(reason)) + reason)
+                    await writer.drain()
                 return
         encoded = self.name.encode()
         writer.write(
@@ -169,6 +186,30 @@ class FakeRfbServer:
                 self.received.append(("pointer", mask, x, y))
             else:
                 return
+
+    async def _vnc_authenticate(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> bool:
+        """The server's half of security type 2: challenge, then check the answer.
+
+        The expected response is computed here from the password the test supplied — with the
+        same `des` module the client uses. That makes this a test of the exchange, not of the
+        cipher; the cipher has its own test against a published vector and a reference
+        implementation, where a wrong table cannot agree with itself.
+        """
+        self.challenge = bytes(range(1, 17))
+        writer.write(self.challenge)
+        await writer.drain()
+        response = await self._read(reader, 16)
+        self.responses.append(response)
+        self.authentication_ok = self.password is not None and response == des.respond_to_challenge(
+            self.challenge, self.password
+        )
+        if not self.authentication_ok:
+            # 3.8 lets a server explain itself after a refusal, and the client is expected to
+            # pass that sentence on rather than replacing it with "connection failed"
+            self.explain_refusal = b"bad password"
+        return bool(self.authentication_ok)
 
     async def _send_update(
         self, writer: asyncio.StreamWriter, rects: list[tuple[int, int, int, int, bytes]]
@@ -327,21 +368,94 @@ def test_probe_asks_what_the_machine_is_and_hangs_up() -> None:
     assert found.accepts_none
 
 
-def test_a_server_that_demands_a_password_is_refused_and_says_so() -> None:
-    async def scene() -> str:
+def test_a_probe_reports_that_the_screen_wants_a_password() -> None:
+    """A password is a fact about the server, so probing answers with it instead of failing."""
+
+    async def scene() -> vnc.Probe:
         server = FakeRfbServer(security_types=[2])  # VNC authentication, nothing else
         await server.start()
         try:
-            await vnc.probe(vnc.Destination(host="127.0.0.1", port=server.port))
-        except vnc.VncError as exc:
+            return await vnc.probe(vnc.Destination(host="127.0.0.1", port=server.port))
+        finally:
+            await server.stop()
+
+    found = asyncio.run(scene())
+    assert found.needs_password is True
+    assert found.accepts_none is False
+    assert found.as_dict()["needs_password"] is True
+
+
+def test_a_session_without_the_password_the_server_wants_asks_for_one() -> None:
+    """Not a sentence to give up on: the page has to be able to tell a field from a failure."""
+
+    async def scene() -> str:
+        server = FakeRfbServer(password="hunter2")
+        await server.start()
+        try:
+            await vnc.Screen(vnc.Destination(host="127.0.0.1", port=server.port)).start()
+        except vnc.AuthenticationNeeded as exc:
             return str(exc)
         finally:
             await server.stop()
-        return ""
+        raise AssertionError("the server took a session with no password")
 
     message = asyncio.run(scene())
-    assert "VNC password" in message
-    assert "authentication" in message
+    assert "password" in message
+    assert "no password to offer" in message
+
+
+def test_the_right_password_opens_the_screen_and_the_wrong_one_does_not() -> None:
+    async def scene(password: str | None) -> tuple[str, bytes, bool]:
+        server = FakeRfbServer(password="hunter2")
+        await server.start()
+        screen = vnc.Screen(vnc.Destination(host="127.0.0.1", port=server.port), password=password)
+        try:
+            await screen.start()
+            # what comes back on success is the answer the server was meant to receive; the
+            # fact that `start` returned at all is the proof the SecurityResult was accepted
+            return server.responses[0], server.challenge, bool(screen.used_password)
+        except vnc.VncError as exc:
+            return str(exc), server.challenge, False
+        finally:
+            await screen.close()
+            await server.stop()
+
+    response, challenge, used = asyncio.run(scene("hunter2"))
+    assert response == des.respond_to_challenge(challenge, "hunter2")
+    assert used is True
+
+    message, _challenge, used = asyncio.run(scene("wrong"))
+    assert "refused that password" in message, message
+    assert "bad password" in message  # the server's own reason travels with it
+    assert used is False
+
+
+def test_a_password_from_a_file_is_read_at_the_moment_of_use(tmp_path: Path) -> None:
+    """The path is the box's business; the bytes belong to the file, which stays outside."""
+    missing = Box(name="gone", box_type="vnc", resource_uri="vnc://h:5900", metadata={})
+    assert vnc.password_for(missing) is None
+
+    gone = Box(
+        name="gone",
+        box_type="vnc",
+        resource_uri="vnc://h:5900",
+        metadata={vnc.PASSWORD_FILE: str(tmp_path / "nope")},
+    )
+    with pytest.raises(vnc.VncError, match="could not be read"):
+        vnc.password_for(gone)
+
+    secret = tmp_path / "vnc.pass"
+    secret.write_text("hunter2\n", encoding="utf-8")  # the newline every editor and echo adds
+    box = Box(
+        name="f",
+        box_type="vnc",
+        resource_uri="vnc://h:5900",
+        metadata={vnc.PASSWORD_FILE: str(secret)},
+    )
+    assert vnc.password_for(box) == "hunter2"
+    # a password typed now outranks the one on disk, and neither is ever written back
+    assert vnc.password_for(box, override="now") == "now"
+    assert box.metadata == {vnc.PASSWORD_FILE: str(secret)}
 
 
 def test_a_port_that_is_not_vnc_says_it_was_not_vnc() -> None:
@@ -605,13 +719,19 @@ def test_the_stream_carries_a_frame_and_the_session_that_owns_it(tmp_path: Any) 
             )
         )
         with TestClient(create_app(store, content_root=tmp_path)) as client:
+            # A picture is asked for only after a session exists, because that is the order
+            # that lets a password be typed between the two calls.
+            assert client.get(f"/api/boxes/{box.uuid}/vnc/stream").status_code == 404
+            opened = client.post(f"/api/boxes/{box.uuid}/vnc/open", json={}).json()
+            assert opened["password_needed"] is False
+            assert (opened["width"], opened["height"]) == (4, 3)
             # the fake server hangs up after its frame, so the stream ends by itself
-            text = client.get(f"/api/boxes/{box.uuid}/vnc/stream").text
+            text = client.get(f"/api/boxes/{box.uuid}/vnc/stream?session={opened['session']}").text
             events = sse_events(text)
             assert [kind for kind, _ in events] == ["info", "frame", "end"]
             info = json.loads(events[0][1])
             assert (info["width"], info["height"]) == (4, 3)
-            assert info["session"]
+            assert info["session"] == opened["session"]
             picture = image_of(base64.b64decode(events[1][1]))
             assert picture.getpixel((0, 0))[:3] == (210, 20, 20)
     finally:
@@ -656,8 +776,14 @@ def test_input_reaches_a_live_session_and_a_gone_one_is_refused(tmp_path: Any) -
                 == 410
             )
 
+            opened = client.post(f"/api/boxes/{box.uuid}/vnc/open", json={}).json()
+            assert opened["session"]
+            session_id = opened["session"]
+
             def watch() -> None:
-                with client.stream("GET", f"/api/boxes/{box.uuid}/vnc/stream") as response:
+                with client.stream(
+                    "GET", f"/api/boxes/{box.uuid}/vnc/stream?session={session_id}"
+                ) as response:
                     for line in response.iter_lines():
                         lines.append(line)
                         if line.startswith("data:") and "session" in line:
@@ -736,8 +862,45 @@ def test_a_stream_that_ends_leaves_no_session_behind(tmp_path: Any) -> None:
         )
         app = create_app(store, content_root=tmp_path)
         with TestClient(app) as client:
-            assert client.get(f"/api/boxes/{box.uuid}/vnc/stream").text.count("event: end") == 1
+            session = client.post(f"/api/boxes/{box.uuid}/vnc/open", json={}).json()["session"]
+            assert (
+                client.get(f"/api/boxes/{box.uuid}/vnc/stream?session={session}").text.count(
+                    "event: end"
+                )
+                == 1
+            )
             assert getattr(app.state, "vnc_sessions", {}) == {}
+    finally:
+        store.close()
+        server.stop()
+
+
+def test_an_opened_but_never_watched_screen_is_reclaimed(tmp_path: Any) -> None:
+    """A browser closed between opening and streaming must not hold a socket forever."""
+    # a frame per session: a screen is not "started" until the server answers the first
+    # update request, and the second open needs its own answer. `close_after_frames=False`
+    # keeps both sessions alive so the reclaim is the only thing that can end the first.
+    grey = [(0, 0, 4, 3, solid(4, 3, (5, 5, 5, 255)))]
+    server = background(frames=[grey, grey], close_after_frames=False)
+    store = BoxStore(tmp_path / "v8.db", content_root=tmp_path)
+    try:
+        box = store.add(
+            Box(name="Workstation", box_type="vnc", resource_uri=f"vnc://127.0.0.1:{server.port}")
+        )
+        app = create_app(store, content_root=tmp_path)
+        with TestClient(app) as client:
+            session = client.post(f"/api/boxes/{box.uuid}/vnc/open", json={}).json()["session"]
+            held = app.state.vnc_sessions
+            assert session in held
+            # pretend the page went away the instant it had the id
+            held[session].opened_at -= VNC_SESSION_TTL + 1
+            again = client.post(f"/api/boxes/{box.uuid}/vnc/open", json={}).json()
+            assert again["session"] != session
+            assert session not in app.state.vnc_sessions
+            assert again["session"] in app.state.vnc_sessions
+            # hand the second one back too: a session left open here leaves the fake
+            # server's handler parked on a read, and teardown waits for nothing
+            client.post(f"/api/boxes/{box.uuid}/vnc/close", json={"session": again["session"]})
     finally:
         store.close()
         server.stop()
@@ -765,3 +928,101 @@ def test_the_type_refuses_a_password_before_the_box_is_stored(tmp_path: Any) -> 
         store.close()
 
 
+def test_the_open_endpoint_is_where_a_password_is_asked_for(tmp_path: Any) -> None:
+    """The shape the page needs: a field, not a stack trace, when the screen wants one."""
+    server = background(password="hunter2", frames=[[(0, 0, 4, 3, solid(4, 3, (1, 2, 3, 255)))]])
+    store = BoxStore(tmp_path / "v9.db", content_root=tmp_path)
+    try:
+        box = store.add(
+            Box(name="Workstation", box_type="vnc", resource_uri=f"vnc://127.0.0.1:{server.port}")
+        )
+        with TestClient(create_app(store, content_root=tmp_path)) as client:
+            asked = client.post(f"/api/boxes/{box.uuid}/vnc/open", json={}).json()
+            assert asked["password_needed"] is True
+            assert asked["session"] is None
+            assert "password" in asked["reason"]
+
+            probe = client.get(f"/api/boxes/{box.uuid}/vnc").json()
+            assert probe["reachable"] is True
+            assert probe["screen"]["needs_password"] is True
+
+            opened = client.post(
+                f"/api/boxes/{box.uuid}/vnc/open", json={"password": "hunter2"}
+            ).json()
+            assert opened["password_needed"] is False
+            assert opened["used_password"] is True
+            assert opened["session"]
+            assert server.server.authentication_ok is True
+            client.post(f"/api/boxes/{box.uuid}/vnc/close", json={"session": opened["session"]})
+    finally:
+        store.close()
+        server.stop()
+
+
+def test_a_password_used_to_look_at_a_screen_never_enters_the_library(tmp_path: Any) -> None:
+    """The one rule authentication must not break: this database gets copied.
+
+    So the check is not "we did not write a field called password". It is that the bytes of
+    the secret are nowhere in the file on disk, and that the box used looks exactly as it did
+    before anyone authenticated with it.
+    """
+    server = background(password="hunter2", frames=[[(0, 0, 4, 3, solid(4, 3, (9, 9, 9, 255)))]])
+    database = tmp_path / "secret-check.db"
+    store = BoxStore(database, content_root=tmp_path)
+    try:
+        box = store.add(
+            Box(name="Workstation", box_type="vnc", resource_uri=f"vnc://127.0.0.1:{server.port}")
+        )
+        with TestClient(create_app(store, content_root=tmp_path)) as client:
+            client.post(f"/api/boxes/{box.uuid}/vnc/open", json={}).json()
+            opened = client.post(
+                f"/api/boxes/{box.uuid}/vnc/open", json={"password": "hunter2"}
+            ).json()
+            assert store.get("Workstation").metadata == {}
+            # handed back on the way out: a screen left open here is a socket whose loop is
+            # about to be closed underneath it
+            client.post(f"/api/boxes/{box.uuid}/vnc/close", json={"session": opened["session"]})
+        store.close()
+        assert b"hunter2" not in database.read_bytes()
+    finally:
+        with contextlib.suppress(Exception):
+            store.close()
+        server.stop()
+
+
+def test_a_password_in_the_address_is_still_refused_by_the_type(tmp_path: Any) -> None:
+    """Authentication arrived; the old trap did not go away with it.
+
+    `vnc://secret@host` is the one shape where a secret would be written into the library by
+    ordinary use of the box, so the type itself says no — at creation, not at connect time.
+    """
+    from boxganizer.boxtypes.dynamic import VNCResource
+
+    box = Box(name="sneaky", box_type="vnc", resource_uri="vnc://hunter2@host:5900")
+    with pytest.raises(InvalidBoxContent, match="password"):
+        VNCResource.check(box)
+
+
+def test_closing_a_screen_that_the_other_side_is_already_hanging_up_on(tmp_path: Any) -> None:
+    """A refusal in the middle of a hangup must not become somebody else's failed request.
+
+    `wait_closed()` waits on the transport's own close waiter, and a peer that is closing at
+    the same instant can hand back a CancelledError about the socket. Closing a screen is
+    cleanup code; cleanup code that raises takes down the request that only meant to be tidy.
+    """
+
+    async def scene() -> tuple[bool, bool]:
+        server = FakeRfbServer(password="hunter2")
+        await server.start()
+        screen = vnc.Screen(vnc.Destination(host="127.0.0.1", port=server.port), password="hunter2")
+        await screen.start()
+        # the far end goes away first, so the local close races the peer's FIN
+        for writer in list(server._writers):
+            writer.transport.abort()
+        first = await screen.close() is None
+        second = await screen.close() is None  # twice, because two paths both clean up
+        await server.stop()
+        return bool(first), bool(second)
+
+    closed_once, closed_twice = asyncio.run(scene())
+    assert closed_once and closed_twice

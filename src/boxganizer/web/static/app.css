@@ -1663,6 +1663,14 @@ pre.text {
   align-items: center;
   gap: 8px;
 }
+.vnc-password {
+  /* the field appears only when the screen asked for it, so it takes the row it is given */
+  flex: 1 1 8rem;
+  min-width: 7rem;
+  font: inherit;
+  padding: 0.2rem 0.4rem;
+}
+
 .vnc-controls button {
   font: inherit;
   font-size: 0.9em;
