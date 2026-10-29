@@ -2615,3 +2615,36 @@ def test_moving_an_icon_does_not_rebuild_the_desktop_around_it(client: TestClien
     drop = script[script.index('surface.addEventListener("drop"') :]
     drop = drop[: drop.index("surface.addEventListener(\"contextmenu\"")]
     assert "if (placed) ctx.reload();" in drop
+
+
+def test_the_pane_itself_files_a_box_that_no_view_claimed(client: TestClient) -> None:
+    """Aiming at a few pixels of list should not be the price of filing a box.
+
+    Views keep the drops they mean something by — the pane handler only takes what no
+    view prevented the default on — but the rest of the pane is the box, so the pane
+    takes it.
+    """
+    script = client.get("/static/app.js").text
+    assert "function wirePaneDrops()" in script
+    assert "wirePaneDrops();" in script
+    from_here = script.index("function paneAcceptsDrops()")
+    wiring = script[from_here : script.index("async function init()", from_here)]
+    # a view that claimed the drop wins; the pane only picks up what is left
+    assert "if (event.defaultPrevented) return;" in wiring
+    # and only a type that holds boxes offers to hold one
+    assert "kind.allows_children" in wiring
+    assert "await api.link(box.uuid, uuid);" in wiring
+    # it does not file a box into itself
+    assert "uuid === box.uuid" in wiring
+    css = client.get("/static/app.css").text
+    start = css.index("#canvas.drop-target {")
+    assert "outline:" in css[start : css.index("}", start)]
+
+
+def test_a_box_that_holds_no_boxes_offers_no_drop_zone(client: TestClient) -> None:
+    """A markdown box cannot hold another box, so it must not light up as if it could."""
+    script = client.get("/static/app.js").text
+    from_here = script.index("function paneAcceptsDrops()")
+    guard = script[from_here : script.index("function wirePaneDrops()", from_here)]
+    assert "if (!box) return null;" in guard
+    assert "kind && kind.allows_children ? box : null" in guard

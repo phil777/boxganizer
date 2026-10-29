@@ -1369,6 +1369,64 @@ function openSideMenu(event) {
   ]);
 }
 
+/* -- the pane files what is dropped on it -----------------------------------
+ *
+ * A view that means something particular by a drop claims it first: a grid cell takes
+ * the box into that cell, the desktop takes the coordinates of the point, a checklist
+ * line hangs an icon on that item, a mindmap node files the box inside the node. Each
+ * of them says so by preventing the default, which is the only signal a listener higher
+ * up has that the gesture was spoken for.
+ *
+ * What is left over means the plain thing: put that box into the box I am looking at.
+ * Before this, a drop had to be *aimed*. The folder view's own target ends where its
+ * list ends, so a pane that is mostly empty background refused a drop a few pixels
+ * below it; the same gap sat under the grid, around the desktop canvas, and across
+ * almost the whole of a checklist. The pane is the box, so the pane takes it.
+ *
+ * Only for types that hold boxes. Dropping something on a markdown box is not a filing
+ * decision, and pretending otherwise would mean either a silent no or a server refusing
+ * what the page just offered.
+ */
+
+function paneAcceptsDrops() {
+  const box = state.current;
+  if (!box) return null;
+  const kind = state.types.get(box.box_type);
+  return kind && kind.allows_children ? box : null;
+}
+
+function wirePaneDrops() {
+  const pane = el("canvas");
+
+  pane.addEventListener("dragover", (event) => {
+    if (!paneAcceptsDrops()) return;
+    if (!event.dataTransfer || !Array.from(event.dataTransfer.types).includes("text/plain")) return;
+    event.preventDefault(); // a candidate, not a claim: a view may still take this drop
+    event.dataTransfer.dropEffect = "move";
+    pane.classList.add("drop-target");
+  });
+
+  pane.addEventListener("dragleave", (event) => {
+    if (!pane.contains(event.relatedTarget)) pane.classList.remove("drop-target");
+  });
+
+  pane.addEventListener("drop", async (event) => {
+    pane.classList.remove("drop-target");
+    if (event.defaultPrevented) return; // a view means something specific by this one
+    const box = paneAcceptsDrops();
+    const uuid = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
+    if (!box || !uuid || uuid === box.uuid) return;
+    event.preventDefault();
+    try {
+      await api.link(box.uuid, uuid);
+      await refreshSide();
+      openBox(box.uuid); // land back where the drop happened, now showing what arrived
+    } catch (error) {
+      status(`cannot file that box in ${box.name}: ${error.message}`, true);
+    }
+  });
+}
+
 async function init() {
   try {
     const types = await api.types();
@@ -1444,6 +1502,7 @@ async function init() {
     if (event.key === "Escape") hideMenu();
   });
 
+  wirePaneDrops();
   el("side-menu").addEventListener("click", openSideMenu);
   el("about-close").addEventListener("click", () => el("about-modal").close());
   el("about-modal").addEventListener("click", (event) => {

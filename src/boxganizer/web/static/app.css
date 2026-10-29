@@ -147,6 +147,14 @@ body {
   position: relative;
 }
 
+/* The whole pane takes a box a view did not claim. The outline is inside the edge so
+   that it reads as "this pane", not as a border that appeared on whatever is in it. */
+#canvas.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
 button {
   font: inherit;
   padding: 0.32rem 0.6rem;
