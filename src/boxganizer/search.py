@@ -748,7 +748,9 @@ def sync_resource(
         # A folder is not read; it is walked, and the files that come out are indexed as
         # the resources they are. See `expand_directory`.
         return expand_directory(
-            store, int(resource_id), root=root if root is not None else _confine_of(store),
+            store,
+            int(resource_id),
+            root=root if root is not None else _confine_of(store),
             walk_always=walk_always,
         )
     if not resource.index_it:

@@ -15,6 +15,7 @@ Each type records what it will do in ``planned``, and ``box types`` shows it.
 
 from __future__ import annotations
 
+import importlib.util
 from typing import ClassVar
 from urllib.parse import urlsplit
 
@@ -55,6 +56,13 @@ class BoxType:
     #: it is a line in documentation nobody reads. Where a required key says "this box is
     #: incomplete without it", an optional one says "here is what else this box can do".
     optional_metadata: ClassVar[frozenset[str]] = frozenset()
+    #: A Python module this type's live view needs, when it needs one beyond the base
+    #: install. Declared so the interfaces can say "this box cannot work here" while the
+    #: person is still choosing the type — which is a different experience from discovering
+    #: it afterwards, in a message about a dropped stream.
+    dependency: ClassVar[str | None] = None
+    #: The extra that brings that module, for the command shown beside it.
+    dependency_extra: ClassVar[str | None] = None
     #: True when at most one box of this type may exist in a database.
     singleton: ClassVar[bool] = False
     #: True when the resource is a directory the interfaces may list.
@@ -198,7 +206,39 @@ class BoxType:
                 cls.resource_uri_schemes is None or "file" in cls.resource_uri_schemes
             ),
             "planned": cls.planned,
+            "available": cls.is_available(),
+            "unavailable_reason": cls.unavailable_reason(),
+            "dependency": cls.dependency,
+            "dependency_extra": cls.dependency_extra,
         }
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """Whether this install can actually run the type's live behaviour.
+
+        A box type that needs an optional module is still a real type: a library written on a
+        machine with `aiomqtt` installed is read on a laptop without it, and the boxes, the
+        index and the graph all still work. What must not happen is silence — the interfaces
+        ask here and say what is missing.
+        """
+        if cls.dependency is None:
+            return True
+        return importlib.util.find_spec(cls.dependency) is not None
+
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        """Why this install cannot run the type, in one sentence, or "" when it can.
+
+        The generic wording names the module. A type that knows a better answer — the MQTT
+        box, which also knows the command that fixes *this* install — overrides it.
+        """
+        if cls.is_available():
+            return ""
+        assert cls.dependency is not None
+        extra = f" (the {cls.dependency_extra!r} extra)" if cls.dependency_extra else ""
+        return (
+            f"this install cannot run {cls.label}: the {cls.dependency!r} module is missing{extra}"
+        )
 
     @classmethod
     def is_grouping(cls) -> bool:

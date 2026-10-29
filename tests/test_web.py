@@ -1602,14 +1602,22 @@ def test_the_last_value_is_kept_for_a_page_that_opens_afterwards(
     assert later["reading"]["value"] == "21.4"
 
 
-def test_a_broker_that_refuses_arrives_as_an_error_event(populated: BoxStore, sensor: Box) -> None:
+def test_a_broker_that_refuses_arrives_as_a_refusal(populated: BoxStore, sensor: Box) -> None:
+    """`refused`, and terminal.
+
+    Bad credentials are a fact about the box, not about the broker's mood: reconnecting with
+    the same password forever is not waiting, it is noise — and the page has to be able to
+    tell the two apart, because one deserves a retry and the other deserves a sentence.
+    """
+
     async def refusing(target: mqtt.Target) -> AsyncIterator[mqtt.Event]:
         yield mqtt.Event("connecting")
         raise MqttError("connection refused: bad username or password")
 
     with TestClient(create_app(populated, mqtt_events=refusing)) as test_client:
         text = test_client.get("/api/boxes/Cellar temp/mqtt/stream").text
-    assert "event: error" in text
+    assert "event: refused" in text
+    assert "event: error" not in text
     assert "bad username or password" in text
 
 
@@ -2725,3 +2733,41 @@ def test_a_dialog_shows_the_address_a_type_wants_and_hides_what_it_cannot_use(
     assert "metadata: collectMetadata(CREATE_MODAL)" in script
     css = client.get("/static/app.css").text
     assert ".modal-error {" in css and ".resource-hint {" in css and ".metadata-fields {" in css
+
+
+def test_the_type_list_says_which_types_this_install_cannot_run(client: TestClient) -> None:
+    """A box type that needs a missing package must be visible as one while choosing."""
+    kinds = {kind["key"]: kind for kind in client.get("/api/types").json()}
+    assert kinds["mqtt"]["dependency"] == "aiomqtt"
+    assert set(kinds["mqtt"]) >= {"available", "unavailable_reason"}
+    assert kinds["folder"]["available"] is True
+    script = client.get("/static/app.js").text
+    assert '— not in this install' in script
+    assert "modalWarning(modal, kind.available === false" in script
+    page = client.get("/").text
+    assert 'id="nb-warning"' in page and 'id="eb-warning"' in page
+    css = client.get("/static/app.css").text
+    assert ".modal-warning {" in css
+
+
+def test_a_refused_mqtt_box_stops_retrying_and_keeps_the_reason(client: TestClient) -> None:
+    """The report: "it always displays 'the stream dropped', and never connects".
+
+    EventSource fires an `error` with no body when a connection ends, and the page answered
+    that with its own generic sentence — on top of whatever the server had just explained,
+    and with an automatic reconnect to a box that could never work. A refusal is now its own
+    event: the page closes the stream and leaves the server's words where they are.
+    """
+    script = client.get("/static/app.js").text
+    view = script[script.index("const mqttView = {") : script.index("registerView(\"mqtt\"")]
+    assert '"connecting", "live", "value", "retrying", "refused"' in view
+    assert "if (refused) return;" in view
+    assert "source.close();" in view
+    assert "let lastWords" in view
+    # the generic line survives only as what it now means: a drop, with nothing newer said
+    assert 'lastWords || "the stream dropped; going back to the broker"' in view
+    # the state is gone from the label map too, so nothing can print a state that no longer
+    # arrives
+    states = script[script.index("const MQTT_STATES = {") :]
+    assert "refused:" in states[: states.index("};")]
+    assert "error:" not in states[: states.index("};")]

@@ -720,3 +720,26 @@ def test_the_terminal_can_opt_a_file_in_and_out(
     dropped = invoke(db_path, "index", "--drop", "Bundle")
     assert "Bundle: out of the index" in dropped.output
     assert "left out of the search" in invoke(db_path, "show", "Bundle").output
+
+
+def test_types_says_which_types_this_install_cannot_run(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same admission the page makes, for the person working in a terminal."""
+    from boxganizer import mqtt as mqtt_module
+
+    monkeypatch.setattr(mqtt_module, "has_dependency", lambda: False)
+    result = invoke(db_path, "types")
+    # rich wraps at the console width, so compare the sentence with its line breaks gone
+    flat = " ".join(result.stdout.split())
+    assert "mqtt" in flat
+    assert "this install cannot run it: aiomqtt is missing" in flat
+
+    import json
+
+    as_json = json.loads(invoke(db_path, "types", "--json").stdout)
+    sensor = next(kind for kind in as_json if kind["key"] == "mqtt")
+    assert sensor["available"] is False
+    assert sensor["unavailable_reason"]
+    folder = next(kind for kind in as_json if kind["key"] == "folder")
+    assert folder["available"] is True and folder["unavailable_reason"] == ""

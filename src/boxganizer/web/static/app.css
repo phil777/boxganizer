@@ -237,6 +237,15 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .type-field .muted { font-size: 0.76rem; }
 .type-filter { font: inherit; }
 .type-field select { font: inherit; }
+.modal-warning {
+  margin: 0.2rem 0 0;
+  padding: 0.35rem 0.5rem;
+  border-left: 3px solid #b26a00;
+  background: color-mix(in srgb, #b26a00 10%, transparent);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
 .modal-error {
   margin: 0.2rem 0 0;
   padding: 0.35rem 0.5rem;
@@ -758,7 +767,7 @@ pre.text {
 .mqtt-state[data-state="live"],
 .mqtt-state[data-state="value"] { border-color: #1a7f37; color: #1a7f37; }
 .mqtt-state[data-state="retrying"] { border-color: #b26a00; color: #b26a00; }
-.mqtt-state[data-state="error"] { border-color: var(--accent); color: var(--accent); }
+.mqtt-state[data-state="refused"] { border-color: var(--accent); color: var(--accent); }
 /* A grid cell does not listen: it repeats what the server last heard, or says it
    has nothing. Neither is a live state, so neither wears the live colour. */
 .mqtt-state[data-state="cached"] { border-style: dashed; }

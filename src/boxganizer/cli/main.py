@@ -776,6 +776,10 @@ def _type_note(key: str) -> str:
 def _type_requirements(kind: type[boxtypes.BoxType]) -> str:
     """Short note about what a type demands, shown by `box types`."""
     parts: list[str] = []
+    if not kind.is_available():
+        # Said at selection time rather than discovered later behind a message about a
+        # dropped stream.
+        parts.append(f"this install cannot run it: {kind.dependency} is missing")
     if kind.required_metadata:
         parts.append("metadata: " + ", ".join(sorted(kind.required_metadata)))
     if not kind.allows_children:

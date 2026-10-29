@@ -62,6 +62,7 @@ class TextResource(FileResource):
     #: Read and indexed by the full-text search.
     indexes_content: ClassVar[bool] = True
 
+
 class MarkdownResource(TextResource):
     """A Markdown file, rendered instead of dumped.
 
@@ -123,6 +124,7 @@ class PDFResource(FileResource):
 
     #: Read and indexed by the full-text search.
     indexes_content: ClassVar[bool] = True
+
 
 class ArchiveResource(FileResource):
     """A compressed archive.

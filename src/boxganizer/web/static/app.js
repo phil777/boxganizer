@@ -682,7 +682,8 @@ function renderTypeOptions(select, term) {
     types.forEach((type) => {
       const option = document.createElement("option");
       option.value = type.key;
-      option.textContent = `${type.icon} ${type.label}`;
+      option.textContent = `${type.icon} ${type.label}${type.available ? "" : " — not in this install"}`;
+      option.title = type.unavailable_reason || "";
       group.append(option);
     });
     select.append(group);
@@ -806,6 +807,7 @@ const CREATE_MODAL = {
   suggest: "nb-suggest",
   resourceHint: "nb-resource-hint",
   metadata: "nb-metadata",
+  warning: "nb-warning",
   error: "nb-error",
   config: "nb-config",
   icon: null,
@@ -824,6 +826,7 @@ const EDIT_MODAL = {
   suggest: "eb-suggest",
   resourceHint: "eb-resource-hint",
   metadata: "eb-metadata",
+  warning: "eb-warning",
   error: "eb-error",
   config: "eb-config",
   icon: "eb-icon",
@@ -1183,6 +1186,7 @@ function applyResourceShape(modal = CREATE_MODAL) {
   const field = el(modal.resource);
   const hint = el(modal.resourceHint);
   modalError(modal);
+  modalWarning(modal, kind.available === false ? kind.unavailable_reason || "" : "");
   field.placeholder = kind.resource_hint || "/path or https://…";
   if (hint) {
     hint.hidden = !kind.resource_hint;
@@ -1201,6 +1205,22 @@ function applyResourceShape(modal = CREATE_MODAL) {
   }
 
   renderMetadataFields(modal, kind);
+}
+
+/**
+ * Warn, in the dialog, about a type this install cannot run.
+ *
+ * A box type whose live behaviour needs a package that is not installed is not broken: the
+ * box, its place in the graph and its entry in the index are all real, and another machine
+ * may read it happily. What would be dishonest is letting someone build one and then watch
+ * it fail with something about a dropped stream. The command to fix it comes from the server,
+ * which is the only place that knows how it was installed.
+ */
+function modalWarning(modal = CREATE_MODAL, message = "") {
+  const spot = el(modal.warning);
+  if (!spot) return;
+  spot.textContent = message;
+  spot.hidden = !message;
 }
 
 function renderMetadataFields(modal = CREATE_MODAL, kind = {}) {
@@ -3695,11 +3715,11 @@ registerView("web", browserView);
 
 /** What the stream reports, in the words a person reading a status wants. */
 const MQTT_STATES = {
+  refused: "cannot listen",
   connecting: "connecting",
   live: "listening",
   value: "listening",
   retrying: "retrying",
-  error: "refused",
 };
 
 /** How many of the last messages the opened box keeps on screen. */
@@ -3826,6 +3846,14 @@ const mqttView = {
     const source = new EventSource(api.mqttStreamUrl(box.uuid));
     holdLive(() => source.close());
 
+    // The last thing the server actually said. EventSource reports a broken connection with
+    // an `error` event that carries nothing — no status, no reason, by design — so if the
+    // page answers that with its own generic line, it overwrites the specific sentence that
+    // arrived a moment ago. This was the whole of a bug report: a box that could not start at
+    // all spent its time saying "the stream dropped" about a missing package.
+    let lastWords = "";
+    let refused = false;
+
     const accept = (event) => {
       if (!stillOnScreen(token)) {
         source.close();
@@ -3834,20 +3862,31 @@ const mqttView = {
       // A dropped connection is an `error` event too, and it carries no body: the
       // browser is already going back to the broker, so that is a retry, not a refusal.
       if (typeof event.data !== "string") {
-        apply("retrying", null, "the stream dropped; going back to the broker");
+        if (refused) return; // nothing to add to a refusal, and nothing to retry
+        apply("retrying", null, lastWords || "the stream dropped; going back to the broker");
         return;
       }
       let payload;
       try {
         payload = JSON.parse(event.data);
       } catch {
-        apply("error", null, "the stream sent something that is not a reading");
+        apply("refused", null, "the stream sent something that is not a reading");
         return;
       }
-      apply(payload.state || event.type, payload.reading || null, payload.detail || "");
+      const state = payload.state || event.type;
+      if (state === "refused") {
+        // A box that cannot be read will not be helped by waiting, and EventSource retries
+        // forever: hang up, and leave the server's own sentence on the screen.
+        refused = true;
+        source.close();
+        apply("refused", null, payload.detail || "the box was refused");
+        return;
+      }
+      lastWords = payload.detail || "";
+      apply(state, payload.reading || null, lastWords);
     };
 
-    ["connecting", "live", "value", "retrying", "error"].forEach((name) => {
+    ["connecting", "live", "value", "retrying", "refused"].forEach((name) => {
       source.addEventListener(name, accept);
     });
   },

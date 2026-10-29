@@ -366,9 +366,7 @@ def line_up(node: dict[str, Any]) -> list[str]:
     return [str(child.get("uuid", "")) for child in node.get("children", [])]
 
 
-def move_towards_centre(
-    store: Any, map_uuid: str, node_uuid: str
-) -> tuple[dict[str, Any], str]:
+def move_towards_centre(store: Any, map_uuid: str, node_uuid: str) -> tuple[dict[str, Any], str]:
     """Promote a node: hang it off its parent's parent, just after its parent.
 
     Returns the fresh map and a note about what happened, because at the centre there

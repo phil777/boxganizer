@@ -150,8 +150,9 @@ def parse(raw: object) -> Filter:
 
     unknown = sorted(str(key) for key in raw if key not in CLAUSES)
     if unknown:
-        return Filter(broken=f"unknown clause{'s' if len(unknown) > 1 else ''}: "
-                             f"{', '.join(unknown)}")
+        return Filter(
+            broken=f"unknown clause{'s' if len(unknown) > 1 else ''}: {', '.join(unknown)}"
+        )
 
     kind = _text(raw.get("type")).casefold()
     if kind and not boxtypes.known(kind):

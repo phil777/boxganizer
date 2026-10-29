@@ -173,6 +173,33 @@ class MQTTResource(SensorResource):
     """A value published on an MQTT topic."""
 
     key: ClassVar[str] = "mqtt"
+    #: The live view needs a client library, which ships as an extra rather than a
+    #: dependency: a library organizer should not drag a MQTT client into every install.
+    dependency: ClassVar[str | None] = "aiomqtt"
+    dependency_extra: ClassVar[str | None] = "live"
+
+    @classmethod
+    def is_available(cls) -> bool:
+        # Asked of the module that would import it, so "is aiomqtt here" has one answer in
+        # this codebase rather than two ways of asking it.
+        from boxganizer import mqtt
+
+        return mqtt.has_dependency()
+
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        """The sentence with the command in it, because there is a command that works.
+
+        "the aiomqtt module is missing" is a diagnosis. What a person holding a terminal
+        needs is the one line for the kind of install they have — pipx, uv, or a plain venv —
+        and only the running process knows which that is.
+        """
+        if cls.is_available():
+            return ""
+        from boxganizer import mqtt
+
+        return str(mqtt.missing_dependency())
+
     label: ClassVar[str] = "MQTT Sensor"
     icon: ClassVar[str] = "\U0001f4f6"  # 📶
     summary: ClassVar[str] = "Subscribes to one topic."
@@ -204,7 +231,10 @@ class MQTTResource(SensorResource):
                 "the address names a broker but no topic; use mqtt://host:1883/boiler/pressure",
             )
         if not target.host:
-            cls._reject(box, "the address names a topic but no broker; use mqtt://host:1883/boiler/pressure")
+            cls._reject(
+                box, "the address names a topic but no broker; use mqtt://host:1883/boiler/pressure"
+            )
+
     # The page subscribes while it shows the box and the server remembers the last
     # message. What is left is to listen when nobody is looking, and to keep the
     # value across a restart.

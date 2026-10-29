@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import sys
 import types
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 from boxganizer import mqtt
 from boxganizer.errors import MqttError
+from boxganizer.models import Box
+from boxganizer.store import BoxStore
+from boxganizer.web.app import create_app
 
 ADDRESS = "mqtt://cellar.example:1883/cellar/temp"
 
@@ -390,4 +397,103 @@ def test_a_stream_handed_in_by_a_test_is_used_as_it_stands() -> None:
 
 
 def test_the_states_a_stream_may_report_are_written_down() -> None:
-    assert mqtt.STATES == ("connecting", "live", "value", "retrying", "error")
+    """`retrying` and `refused` may not be collapsed into one "error".
+
+    They are different advice. One means the broker will be back and the page should wait;
+    the other means the box cannot work no matter how long anything waits, and the page must
+    stop, say why, and say what to run.
+    """
+    assert mqtt.STATES == ("connecting", "live", "value", "retrying", "refused")
+    assert "error" not in mqtt.STATES
+
+
+# -- an install that cannot speak MQTT at all ------------------------------------------
+
+
+def hide_aiomqtt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `import aiomqtt` and `find_spec("aiomqtt")` both say it is not installed.
+
+    The extra is installed in a developer's venv, so the only honest way to exercise the
+    missing-package path is to hide the module from the import machinery rather than to mock
+    the code that asks — the reported bug lived precisely in what the real machinery raises.
+
+    Both halves are replaced rather than the import list being edited in place: a finder
+    inserted into `sys.meta_path` before recording it would be *in* the value pytest restores,
+    and every later test in the process would find no `aiomqtt` either. That is a leak with the
+    worst possible shape — it fails someone else's test, in random order.
+    """
+
+    def is_hidden(name: str) -> bool:
+        return name == mqtt.DEPENDENCY or name.startswith(f"{mqtt.DEPENDENCY}.")
+
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name: str, *args: object, **kwargs: object) -> object:
+        if is_hidden(name):
+            return None
+        return real_find_spec(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    class Hidden:
+        def find_spec(self, name: str, path: object = None, target: object = None) -> None:
+            if is_hidden(name):
+                raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+            return None
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    monkeypatch.setattr(sys, "meta_path", [Hidden(), *sys.meta_path])
+    monkeypatch.delitem(sys.modules, mqtt.DEPENDENCY, raising=False)
+
+
+def test_an_install_without_the_extra_is_refused_and_tells_you_what_to_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The report this fixes: a box that never connected, described as a dropped stream."""
+    hide_aiomqtt(monkeypatch)
+    assert mqtt.has_dependency() is False
+
+    async def story() -> list[Any]:
+        return await collect(mqtt.aiomqtt_events(target_of(ADDRESS)), 1)
+
+    with pytest.raises(mqtt.MqttError) as caught:
+        asyncio.run(story())
+    message = str(caught.value)
+    assert "aiomqtt" in message
+    assert "install" in message.lower()
+    # a refusal, not a state: nothing was yielded before it, and nothing will be after
+    assert "pip" in message or "uv" in message
+
+
+def test_the_install_command_matches_the_install_that_is_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`pip install` inside a pipx environment installs it somewhere nothing will look.
+
+    The server knows which environment it is running in, so the advice is read from there:
+    pipx gets `inject`, uv gets `uv tool install`, a plain venv gets pip.
+    """
+    monkeypatch.setattr(sys, "prefix", "/home/pbi/.local/share/pipx/venvs/boxganizer")
+    assert mqtt.install_hint() == "pipx inject boxganizer aiomqtt"
+    monkeypatch.setattr(sys, "prefix", "/home/pbi/.local/share/uv/tools/boxganizer")
+    assert mqtt.install_hint().startswith("uv tool install")
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / ".venv"))
+    assert mqtt.install_hint() == "python -m pip install 'boxganizer[live]'"
+
+
+def test_a_missing_module_is_a_refusal_in_the_stream_and_not_a_retry(tmp_path: Path) -> None:
+    """The page has to be able to tell "wait" from "install something", and it cannot infer it."""
+
+    async def refusing(_target: mqtt.Target) -> AsyncIterator[mqtt.Event]:
+        raise mqtt.missing_dependency()
+        yield  # an async generator that never produces anything (the import fails first)
+
+    store = BoxStore(tmp_path / "noextra.db", content_root=tmp_path)
+    try:
+        box = store.add(Box(name="Boiler", box_type="mqtt", resource_uri=ADDRESS))
+        app = create_app(store, content_root=tmp_path, mqtt_events=refusing)
+        with TestClient(app) as client:
+            body = client.get(f"/api/boxes/{box.uuid}/mqtt/stream").text
+        assert "event: refused" in body
+        assert "event: retrying" not in body
+        assert "aiomqtt" in body
+    finally:
+        store.close()

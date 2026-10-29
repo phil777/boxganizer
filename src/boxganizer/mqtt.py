@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import ssl
+import sys
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,7 +40,52 @@ RETRY_SECONDS = 2.0
 MAX_RETRY_SECONDS = 30.0
 
 #: States an event stream moves through. `value` carries a reading; the rest do not.
-STATES = ("connecting", "live", "value", "retrying", "error")
+#:
+#: `retrying` and `refused` are different sentences on purpose. A broker that went away is a
+#: Tuesday: the stream waits and goes back, and the page says so. A box that cannot be read at
+#: all — no extra installed, an address that names nothing — will fail identically at three in
+#: the morning, so retrying it is not patience but noise, and the page has to stop, say why,
+#: and say what to run.
+STATES = ("connecting", "live", "value", "retrying", "refused")
+
+#: The module the live view needs, and the extra that brings it.
+DEPENDENCY = "aiomqtt"
+EXTRA = "live"
+
+
+def has_dependency() -> bool:
+    """Whether this install can speak MQTT at all.
+
+    Asked with `find_spec` rather than an import: the answer is needed to label a type in a
+    list, and importing a networking library to find out whether it is installed would be a
+    strange price for a yes/no question.
+    """
+    return importlib.util.find_spec(DEPENDENCY) is not None
+
+
+def install_hint() -> str:
+    """The command that fixes this install, in the form its own installer understands.
+
+    A generic `pip install "boxganizer[live]"` is a small lie to the largest group of people
+    who will read it: `box` is a console script inside an isolated environment, and running
+    pip in the wrong Python installs the library somewhere the running program will never
+    look. So the answer is read off the environment the server is actually running in —
+    pipx, uv, or a plain venv — rather than guessed at from documentation.
+    """
+    prefix = sys.prefix.replace("\\", "/").lower()
+    if "/pipx/" in prefix:
+        return f"pipx inject boxganizer {DEPENDENCY}"
+    if "/uv/tools/" in prefix:
+        return f"uv tool install 'boxganizer[{EXTRA}]' --force"
+    return f"python -m pip install 'boxganizer[{EXTRA}]'"
+
+
+def missing_dependency() -> MqttError:
+    """The refusal, with the thing to run in it."""
+    return MqttError(
+        f"this install cannot listen to MQTT: the {DEPENDENCY!r} module is missing. "
+        f"Install it, then start the server again — {install_hint()}"
+    )
 
 
 @dataclass(frozen=True)
@@ -255,10 +302,10 @@ async def aiomqtt_events(target: Target) -> AsyncIterator[Event]:
     """
     try:
         import aiomqtt
-    except ModuleNotFoundError as exc:  # pragma: no cover - needs the extra absent
-        raise MqttError(
-            "the MQTT view needs the 'live' extra: pip install 'boxganizer[live]'"
-        ) from exc
+    except ModuleNotFoundError as exc:
+        # Not a drop. Waiting will not fetch a package, and a page that said "retrying" here
+        # would be hiding the only sentence that tells a person what to do.
+        raise missing_dependency() from exc
 
     yield Event(state="connecting")
     delay = RETRY_SECONDS

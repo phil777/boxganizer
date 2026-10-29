@@ -181,9 +181,7 @@ def destination(box: Any) -> Destination:
             # The rule of the whole module, enforced at the one place a password could
             # arrive: this box will not hold one, and saying so here is the only way to
             # be sure nothing downstream ever prints it.
-            raise SshError(
-                "an SSH box keeps no password — use a key, an agent, or ~/.ssh/config"
-            )
+            raise SshError("an SSH box keeps no password — use a key, an agent, or ~/.ssh/config")
         if parts.hostname:
             host = parts.hostname
         if parts.username:

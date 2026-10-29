@@ -1802,7 +1802,13 @@ def create_app(
                         latest.remember(box_uuid, event.reading)
                     yield _sse(event.state, event.as_dict())
             except MqttError as exc:
-                yield _sse("error", {"state": "error", "reading": None, "detail": str(exc)})
+                # `refused`, not `error`, and deliberately terminal. The browser would
+                # otherwise reconnect to a box that fails identically every time — a retry
+                # loop against a missing package — and the reconnect's own anonymous error
+                # would overwrite this sentence with something vaguer. That is exactly how a
+                # person ends up reading "the stream dropped" when the truth was "install
+                # aiomqtt".
+                yield _sse("refused", {"state": "refused", "reading": None, "detail": str(exc)})
 
         return StreamingResponse(
             feed(),

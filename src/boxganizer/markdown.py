@@ -56,9 +56,7 @@ def parser() -> MarkdownIt:
     """
     global _parser
     if _parser is None:
-        instance = MarkdownIt(
-            "commonmark", {"html": False, "linkify": False, "typographer": False}
-        )
+        instance = MarkdownIt("commonmark", {"html": False, "linkify": False, "typographer": False})
         instance.enable(EXTRA_RULES)
         instance.core.ruler.push("boxganizer_safe_urls", _neutralise_urls)
         _parser = instance
@@ -112,7 +110,7 @@ def render(text: str) -> str:
     except Exception:  # markdown-it raises whatever the grammar hits; the box must show
         from html import escape
 
-        return f"<pre class=\"markdown-fallback\">{escape(source)}</pre>"
+        return f'<pre class="markdown-fallback">{escape(source)}</pre>'
 
 
 def summary(text: str, *, length: int = 160) -> str:

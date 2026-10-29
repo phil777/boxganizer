@@ -27,6 +27,12 @@ pip install -e ".[dev]"          # core + CLI + web + text UI + tooling
 
 Extras on their own: `pip install -e ".[web]"` or `pip install -e ".[tui]"`.
 
+Installing `box` as a command, the way you would install any tool — `pipx install boxganizer`
+or `uv tool install boxganizer` — puts it in an environment of its own, where plain `pip
+install` of an extra would land in a Python the tool never imports. That is why the message a
+missing extra produces is generated from the running process rather than copied out of this
+file: a pipx install is told `pipx inject boxganizer aiomqtt`, and it is the right command.
+
 ## Use
 
 ```bash
@@ -203,9 +209,12 @@ nobody has placed yet.
 
 An MQTT box is the one kind that talks to something outside the machine: while
 its page is open the server subscribes to `mqtt://` or `mqtts://host[:port]/topic`
-and pushes every message to the page. That needs the `live` extra —
-`pip install 'boxganizer[live]'` — and without it the box says so instead of
-failing silently. `box value NAME` reads one message and exits, for scripts.
+and pushes every message to the page. That needs the `live` extra. Without it, the box type
+says *"not in this install"* while you are still choosing it, the dialog names the module and
+prints the command that fixes this particular install, and the opened box shows **"cannot
+listen"** with that sentence instead of a message about a dropped stream — a box that cannot
+work is refused, not retried forever. `box value NAME` reads one message and exits, for scripts,
+and reports the same way. ADR 18.
 
 `box serve` and `box tui` import their own framework, so `box --help` works
 even when only the core is installed; asking for one without its extra prints

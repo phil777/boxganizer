@@ -289,3 +289,43 @@ def test_a_plain_box_keeps_the_generic_icon() -> None:
 
 def test_exactly_one_type_is_the_graph_root() -> None:
     assert {cls.key for cls in boxtypes.all_types() if cls.is_root} == {"root"}
+
+
+def test_a_type_can_say_its_live_behaviour_needs_a_module_it_lacks() -> None:
+    """An optional feature must be able to admit it is not installed.
+
+    The box stays legitimate — the graph, the index and another machine that *can* listen are
+    all real — but the interfaces need a yes/no to show, instead of letting a person build a
+    box that only ever says something about a dropped stream.
+    """
+    from boxganizer.boxtypes.dynamic import MQTTResource
+
+    assert MQTTResource.dependency == "aiomqtt"
+    assert MQTTResource.dependency_extra == "live"
+    # the default: a type that declares nothing is always available
+    folder = boxtypes.get("folder")
+    assert folder.dependency is None
+    assert folder.is_available() is True
+    assert folder.unavailable_reason() == ""
+
+    described = MQTTResource.describe()
+    assert described["dependency"] == "aiomqtt"
+    assert set(described) >= {"available", "unavailable_reason"}
+
+
+def test_the_reason_names_the_module_and_only_appears_when_it_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from boxganizer import mqtt as mqtt_module
+    from boxganizer.boxtypes.dynamic import MQTTResource
+
+    monkeypatch.setattr(mqtt_module, "has_dependency", lambda: True)
+    assert MQTTResource.is_available() is True
+    assert MQTTResource.unavailable_reason() == ""
+
+    monkeypatch.setattr(mqtt_module, "has_dependency", lambda: False)
+    assert MQTTResource.is_available() is False
+    reason = MQTTResource.unavailable_reason()
+    assert "aiomqtt" in reason
+    # the override's whole point: a command, not just a diagnosis
+    assert "pipx inject" in reason or "pip install" in reason or "uv tool" in reason

@@ -665,8 +665,10 @@ class BoxStore:
                 )
             # A row made before this was noticed — a folder box pointed at a directory that
             # has since been created — is corrected here rather than lying forever.
-            self._execute("UPDATE resources SET is_dir = ? WHERE id = ? AND is_dir = 0",
-                          (int(resources.is_directory(raw)), existing))
+            self._execute(
+                "UPDATE resources SET is_dir = ? WHERE id = ? AND is_dir = 0",
+                (int(resources.is_directory(raw)), existing),
+            )
             return existing
         where = origin or resources.origin_of(raw)
         if index_it is None:
