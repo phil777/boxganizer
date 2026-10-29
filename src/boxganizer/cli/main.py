@@ -456,11 +456,14 @@ def box_search(
                 for resource_id, _score, passage in store.content_search(
                     planned.content_match, limit=limit * 2
                 ):
-                    for box in store.boxes_by_resources([resource_id]).get(resource_id, []):
+                    # A file inside an indexed folder has no box of its own: the folder
+                    # answers, naming the file that spoke.
+                    for box, inside in store.boxes_for_text(resource_id):
                         if box.name in shown:
                             continue
                         shown.add(box.name)
-                        hits.append((f"{box.icon} {box.name}", " ".join(passage.split())))
+                        label = f"{box.icon} {box.name}" + (f" \u2192 {inside}" if inside else "")
+                        hits.append((label, " ".join(passage.split())))
                         if len(hits) >= limit:
                             break
                     if len(hits) >= limit:

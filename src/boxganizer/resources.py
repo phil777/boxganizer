@@ -140,6 +140,95 @@ def index_by_default(reference: str, *, origin: str | None = None) -> bool:
     return path.suffix.lower() in INDEXABLE_SUFFIXES
 
 
+def is_directory(reference: str) -> bool:
+    """Whether this address names a folder here and now.
+
+    Asked once, when the row is made or re-seen, and then remembered on the row: the count
+    of what the index holds has to be able to tell a folder from an unreadable file without
+    walking the disk to work it out.
+    """
+    if origin_of(reference) != LOCAL or not (reference or "").strip():
+        # A blank address is not the current directory. `Path("")` is `.`, and answering
+        # "yes, a folder" to that would make an empty field in the dialog look like a
+        # folder full of notes.
+        return False
+    try:
+        return Path(normalise(reference)).is_dir()
+    except OSError:
+        return False
+
+
+#: How many files one folder is allowed to bring into the index in one walk.
+#:
+#: A number has to exist, because the alternative is a folder box pointed at a home
+#: directory or at a `node_modules` and a first pass that never finishes. Past the cap the
+#: walk stops and says so: a partial index you know is partial beats a machine that appears
+#: to have stopped working.
+MAX_DIRECTORY_FILES = 2000
+
+
+def walk_files(
+    directory: Path,
+    *,
+    confine: Path | None = None,
+    limit: int = MAX_DIRECTORY_FILES,
+    include_hidden: bool = False,
+) -> tuple[list[Path], str]:
+    """The files inside a folder, recursively, that could hold words worth indexing.
+
+    Four exclusions, each one there because leaving it in would be worse than leaving it
+    out:
+
+    * **hidden entries** — `.git`, `.cache`, `.venv`. A folder box usually names a folder
+      of notes, and the version control metadata under it is not what anyone meant to
+      search. Ask explicitly with `include_hidden`.
+    * **symlinks, never followed** — a link out of the folder is a way of indexing half the
+      disk through a door the content confine was set up to keep shut, and a link into an
+      ancestor is an infinite walk.
+    * **files nothing can read words out of** — a `.jpg` gets no row. A resource row that
+      can only ever be empty is not an index entry; it is the "could not be read" line that
+      would then sit on the panel forever.
+    * **anything outside the confine** when one is set.
+
+    Returns the files and a note: empty when the walk finished, or what stopped it early.
+    """
+    from boxganizer import paths as path_tools
+
+    found: list[Path] = []
+    note = ""
+    if not directory.is_dir():
+        return found, f"{directory} is not a folder"
+    queue = [directory]
+    while queue:
+        current = queue.pop(0)
+        try:
+            entries = sorted(current.iterdir(), key=lambda item: item.name)
+        except OSError as exc:  # unreadable directory: keep walking what we can
+            note = note or f"{current}: {exc}"
+            continue
+        for entry in entries:
+            if len(found) >= limit:
+                return found, f"stopped after {limit} files under {directory}"
+            try:
+                if entry.is_symlink():
+                    continue
+                if not include_hidden and entry.name.startswith("."):
+                    continue
+                if entry.is_dir():
+                    queue.append(entry)
+                    continue
+                if not entry.is_file():
+                    continue
+                if confine is not None and not path_tools.inside(entry, confine):
+                    continue
+                if not index_by_default(str(entry)):
+                    continue
+            except OSError:
+                continue  # a dangling name in a directory being changed under us
+            found.append(entry)
+    return found, note
+
+
 def display(reference: str) -> str:
     """What to call this resource in a line of terminal output.
 
@@ -160,6 +249,15 @@ def why_indexed(reference: str, *, indexes_content: bool = False) -> tuple[bool,
     The page shows the reason beside the checkbox, because a box that is silently left
     out of the search is indistinguishable from a search that is broken.
     """
+    if is_directory(reference):
+        files, _note = walk_files(Path(normalise(reference)), limit=40)
+        counted = f"{len(files)} text file" + ("" if len(files) == 1 else "s")
+        left = "" if len(files) < 40 else " (so far: a folder is not walked to answer this)"
+        return (
+            bool(files),
+            f"a folder is indexed by reading the {counted} inside it{left}, "
+            "and following them as they change",
+        )
     if indexes_content:
         return True, "this kind of box holds words, so its file is read into the index"
     where = origin_of(reference)
@@ -231,6 +329,9 @@ class Resource:
     #: because the file may have been fixed or deleted since, but the flag is what a
     #: list of "3 files changed" is built from without stat-ing the disk.
     marked_stale: bool = False
+    #: A folder, remembered from when the row was made. A folder is indexed by walking it
+    #: and reading what is inside, so it must never be counted as a file that failed.
+    is_dir: bool = False
 
     @property
     def indexed(self) -> bool:

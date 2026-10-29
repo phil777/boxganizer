@@ -83,6 +83,10 @@ const api = {
     }),
   resolveFolder: (ref) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/resolve`, { method: "POST" }),
+  indexStatus: (check) => request(`/api/index/status${check ? "?check=1" : ""}`),
+  indexRun: (scope) =>
+    request("/api/index/run", { method: "POST", body: JSON.stringify({ scope }) }),
+  health: () => request("/api/health"),
   mqtt: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/mqtt`),
   mqttStreamUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/mqtt/stream`,
   contentUrl: (ref, sub) =>
@@ -525,7 +529,11 @@ function renderSide() {
     if (box.match && box.match.how === "content" && box.match.passage) {
       const passage = document.createElement("span");
       passage.className = "hit-passage muted";
-      passage.textContent = box.match.passage;
+      // A folder that answers for a file has to say which one, or the passage looks like it
+      // came out of the folder itself.
+      passage.textContent = box.match.in_file
+        ? `${box.match.in_file}: ${box.match.passage}`
+        : box.match.passage;
       item.append(passage);
       item.classList.add("content-hit");
     }
@@ -541,7 +549,7 @@ function renderSide() {
     });
     list.append(item);
   });
-  el("side-status").textContent = `${state.boxes.length} box${state.boxes.length === 1 ? "" : "es"}`;
+  el("box-count").textContent = `${state.boxes.length} box${state.boxes.length === 1 ? "" : "es"}`;
   const note = el("search-note");
   if (note) {
     // The server sends this only when it actually added something to the words, so a
@@ -1244,6 +1252,123 @@ async function goToRoot() {
 
 /* ---------------------------------------------------------------- init ----- */
 
+/* -- the special-actions menu, and the standing index line -------------------
+ *
+ * The menu holds whatever is about the library rather than about the box on screen; there
+ * is nowhere else in this layout for such a thing, and putting it in every box's context
+ * menu would be a lie about what it applies to.
+ *
+ * The index line at the bottom is the same idea pointing the other way: whether a search
+ * will find what is in your files is something you want known *while you are looking*, not
+ * inferred after a search comes back empty. So it is drawn on every panel, in front of the
+ * count it sits beside, and it says what the database believes — unless it was just asked
+ * to look at the files, which is what happens when the panel is opened and when a pass ends.
+ */
+
+function indexWords(status_) {
+  if (status_.running) return "indexing…";
+  if (status_.stale) return `${status_.stale} out of date`;
+  if (status_.outstanding) return `${status_.outstanding} to index`;
+  if (!status_.wanted) return "nothing to index";
+  return `${status_.indexed} indexed`;
+}
+
+function indexDetail(status_) {
+  const parts = [
+    `${status_.wanted} file${status_.wanted === 1 ? "" : "s"} wanted in the index`,
+    `${status_.indexed} read into it`,
+  ];
+  if (status_.stale) parts.push(`${status_.stale} changed since they were read`);
+  if (status_.outstanding) parts.push(`${status_.outstanding} not read yet`);
+  const last = status_.last;
+  const quiet = status_.unreadable_examples || [];
+  if (status_.unreadable) {
+    parts.push(
+      `${status_.unreadable} hold nothing to read` +
+        (quiet.length ? ` (${quiet.join(", ")})` : "")
+    );
+  }
+  if (last) {
+    parts.push(
+      last.error
+        ? `last pass stopped: ${last.error}`
+        : `last pass: ${last.in_index} files in the index, ${last.added} brought in, ` +
+          `${last.skipped} could not be read (${last.seconds}s)`
+    );
+  }
+  return parts.join(" · ");
+}
+
+let indexTimer = null;
+
+async function refreshIndexStatus({ check = false } = {}) {
+  const spot = el("index-status");
+  let status_;
+  try {
+    // Asked, not awaited, by the caller: a pass over the files is a stat per file, and the
+    // panel would rather draw now and correct itself a moment later.
+    status_ = await api.indexStatus(check);
+  } catch (error) {
+    spot.textContent = "index: unknown";
+    spot.title = error.message;
+    return;
+  }
+  spot.textContent = indexWords(status_);
+  spot.title = indexDetail(status_);
+  spot.classList.toggle("is-running", !!status_.running);
+  spot.classList.toggle("has-stale", !status_.running && (status_.stale > 0 || status_.outstanding > 0));
+  if (status_.running) {
+    if (!indexTimer) indexTimer = setInterval(() => refreshIndexStatus(), 1200);
+  } else if (indexTimer) {
+    clearInterval(indexTimer);
+    indexTimer = null;
+    // Files were read while the timer ran, so what the search finds has changed underneath
+    // the panel. The counts and the list are re-read rather than left as they were.
+    refreshSide();
+  }
+}
+
+async function runIndexation(scope) {
+  try {
+    await api.indexRun(scope);
+    el("index-status").textContent = "indexing…";
+    status(scope === "everything" ? "re-reading every file the index is wanted for…" : "reading what changed…");
+    refreshIndexStatus();
+  } catch (error) {
+    status(error.message, true);
+  }
+}
+
+async function showAbout() {
+  const modal = el("about-modal");
+  el("about-version").textContent = "reading…";
+  modal.showModal();
+  try {
+    const health = await api.health();
+    el("about-version").textContent = `version ${health.version}`;
+  } catch (error) {
+    // The window opened, so it should say what it does not know rather than nothing.
+    el("about-version").textContent = `version unknown: ${error.message}`;
+  }
+}
+
+function openSideMenu(event) {
+  event.preventDefault();
+  event.stopPropagation(); // the document hides the menu on any click, including this one
+  const button = event.currentTarget;
+  button.setAttribute("aria-expanded", "true");
+  document.addEventListener("click", () => button.setAttribute("aria-expanded", "false"), {
+    once: true,
+  });
+  const where = button.getBoundingClientRect();
+  showMenu(where.left, where.bottom + 4, [
+    { label: "About", run: showAbout },
+    { separator: true },
+    { label: "Index what changed", run: () => runIndexation("outstanding") },
+    { label: "Re-read the whole library", run: () => runIndexation("everything") },
+  ]);
+}
+
 async function init() {
   try {
     const types = await api.types();
@@ -1319,7 +1444,14 @@ async function init() {
     if (event.key === "Escape") hideMenu();
   });
 
+  el("side-menu").addEventListener("click", openSideMenu);
+  el("about-close").addEventListener("click", () => el("about-modal").close());
+  el("about-modal").addEventListener("click", (event) => {
+    if (event.target === el("about-modal")) el("about-modal").close(); // a click past the card
+  });
+
   await refreshSide();
+  refreshIndexStatus({ check: true }); // the panel draws first; the files are counted after
   // The way in is the root box, not the first box the list happens to show.
   const root = await findRoot();
   if (root) await openBox(root.uuid);

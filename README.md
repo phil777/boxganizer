@@ -195,6 +195,14 @@ Boxes whose words Boxganizer writes itself — a checklist — keep them next to
 through a resource row like any other file, and they are not deleted when the box is: the
 row can be re-created, the words cannot.
 
+A **folder** marked for indexing is not read — there is nothing to read in a folder — it is
+walked, and every text file inside it becomes a resource of its own: its own modification
+time, its own entry in the index, its own answer to "has this changed". The folder keeps a
+link to each one it brought in, so a file deleted from the folder stops answering searches,
+and a file the library also holds directly is never discarded by the folder. Hidden entries,
+symlinks and files nothing can read words out of are left alone, and a hit inside a folder
+answers with the folder and names the file that spoke. ADR 16.
+
 ## Layout
 
 ```

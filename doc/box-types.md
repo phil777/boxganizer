@@ -34,7 +34,8 @@ other boxes. Rules in brackets are enforced by the store.
       - `video` 🎥 Video — leaf; resource required; extensions: .mp4 .webm .mov .m4v .ogv .ogg *(added, see below)*
       - `archive` 🗜️ Archive — leaf; resource required; extensions: .zip .tar .gz .tgz .bz2 .xz .7z .rar
     - `directory` 📁 Directory — resource required; schemes: file
-      - `indexed-directory` 🗂️ Indexed Directory — resource required; schemes: file
+      - `indexed-directory` 🗂️ Indexed Directory — resource required; schemes: file;
+        its files are read into the search index (ADR 16)
     - `dynamic` ⚡ Dynamic Resource — group
       - `web` 🌐 Web Page — resource required; schemes: http https
         - `browser` 🧭 Browser — resource required; schemes: http https

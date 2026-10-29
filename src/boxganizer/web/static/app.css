@@ -44,6 +44,26 @@ body {
   padding: 0.1rem 0.15rem 0;
 }
 
+.burger {
+  /* The name on the left, the way into everything else on the right. */
+  margin-left: auto;
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid transparent;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.burger:hover,
+.burger[aria-expanded="true"] {
+  border-color: var(--line);
+  background: var(--panel);
+}
+
 .side-actions {
   display: flex;
   gap: var(--gap);
@@ -1332,6 +1352,48 @@ pre.text {
   font-size: 0.85em;
   font-style: italic;
 }
+
+/* ---------- the standing index line ---------- */
+#side-status {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.index-status {
+  /* Out of date is the one state worth colouring: everything else is the index being
+     what it is supposed to be. */
+  color: inherit;
+  white-space: nowrap;
+}
+.index-status.has-stale {
+  color: var(--accent);
+  font-weight: 600;
+}
+.index-status.is-running {
+  opacity: 0.75;
+  font-style: italic;
+}
+#box-count {
+  white-space: nowrap;
+}
+
+#about-modal {
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  padding: 1rem 1.2rem;
+  width: min(22rem, 90vw);
+  background: Canvas;
+  color: CanvasText;
+}
+#about-modal .about {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+#about-modal h2 { margin: 0; font-size: 1.05rem; }
+#about-modal p { margin: 0.1rem 0 0; font-size: 0.85rem; }
+#about-modal footer { display: flex; justify-content: flex-end; margin-top: 0.9rem; }
 .cell-content .checklist-view {
   overflow: hidden;
   padding: 4px;

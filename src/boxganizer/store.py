@@ -43,7 +43,7 @@ from boxganizer.models import DEFAULT_ICON, Box, canonical_name, new_uuid
 #: indexed once serves every box that points at it — and "does this need reindexing?"
 #: finally has somewhere to be remembered. See :mod:`boxganizer.resources` and
 #: :meth:`BoxStore._split_resources_out`.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = f"""
 PRAGMA user_version = {SCHEMA_VERSION};
@@ -105,8 +105,34 @@ CREATE TABLE IF NOT EXISTS resources (
     digest      TEXT,
     /* Something noticed that makes the index wrong: a file edited outside Boxganizer,
        or one that has gone away. Set by `check`, cleared by a reindex. */
-    stale       INTEGER NOT NULL DEFAULT 0
+    stale       INTEGER NOT NULL DEFAULT 0,
+    /* A folder holds other people's words rather than words of its own. Remembered
+       rather than re-stat'd, because a count of what the index holds must be able to
+       tell "this one was read and is empty" from "this one is a folder, and its words
+       live in the rows under it" — without walking the disk to find out. */
+    is_dir      INTEGER NOT NULL DEFAULT 0
 );
+
+/*
+ * Which folders a file was found inside.
+ *
+ * A folder marked for indexing does not get read — there is nothing to read in a folder —
+ * it gets walked, and the files that come out are resources in their own right, with rows
+ * of their own, so the ordinary "has this one changed" mechanism works on them unchanged.
+ * What a folder still has to be able to say is which files *it* brought in, because that
+ * is the only way to tell a file that has been deleted from the folder from one that was
+ * simply never inside it, and the first is a reason to take words out of the index.
+ *
+ * Links, not ownership. A file inside two indexed folders is one resource with two links,
+ * and removing one folder from the library must not delete the other's index entries.
+ */
+CREATE TABLE IF NOT EXISTS resource_link (
+    parent_id INTEGER NOT NULL REFERENCES resources (id) ON DELETE CASCADE,
+    child_id  INTEGER NOT NULL REFERENCES resources (id) ON DELETE CASCADE,
+    PRIMARY KEY (parent_id, child_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS resource_link_child_idx ON resource_link (child_id);
 
 CREATE INDEX IF NOT EXISTS resources_stale_idx ON resources (stale, index_it);
 
@@ -138,7 +164,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 _BOX_COLUMNS = """SELECT b.*, r.reference AS resource_uri, r.id AS res_id,
        r.origin AS res_origin, r.index_it AS res_index_it,
        r.indexed_at AS res_indexed_at, r.mtime AS res_mtime, r.bytes AS res_bytes,
-       r.digest AS res_digest, r.stale AS res_stale"""
+       r.digest AS res_digest, r.stale AS res_stale, r.is_dir AS res_is_dir"""
 
 _BOX_FROM = "FROM boxes b LEFT JOIN resources r ON r.id = b.resource_id"
 
@@ -637,13 +663,18 @@ class BoxStore:
                     "UPDATE resources SET index_it = ?, stale = 0 WHERE id = ?",
                     (int(bool(index_it)), existing),
                 )
+            # A row made before this was noticed — a folder box pointed at a directory that
+            # has since been created — is corrected here rather than lying forever.
+            self._execute("UPDATE resources SET is_dir = ? WHERE id = ? AND is_dir = 0",
+                          (int(resources.is_directory(raw)), existing))
             return existing
         where = origin or resources.origin_of(raw)
         if index_it is None:
             index_it = bool(indexes_content) or resources.index_by_default(raw, origin=where)
         return self._execute(
-            "INSERT INTO resources (reference, ref_key, origin, index_it) VALUES (?, ?, ?, ?)",
-            (raw, key, where, int(bool(index_it))),
+            "INSERT INTO resources (reference, ref_key, origin, index_it, is_dir)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (raw, key, where, int(bool(index_it)), int(resources.is_directory(raw))),
             lastrowid=True,
         )
 
@@ -711,6 +742,7 @@ class BoxStore:
             reference=str(row["resource_uri"] or ""),
             origin=str(row["res_origin"]),
             index_it=bool(row["res_index_it"]),
+            is_dir=bool(row["res_is_dir"]) if "res_is_dir" in keys else False,
             indexed_at=str(row["res_indexed_at"]) if row["res_indexed_at"] else None,
             fingerprint=resources.Fingerprint(
                 mtime=float(row["res_mtime"]) if row["res_mtime"] is not None else None,
@@ -734,7 +766,178 @@ class BoxStore:
                 digest=str(row["digest"]) if row["digest"] else None,
             ),
             marked_stale=bool(row["stale"]),
+            # whole `resources` rows always carry it: the column ships with the table and is
+            # added to older databases by the v8 step
+            is_dir=bool(row["is_dir"]),
         )
+
+    # -- folders and the files they bring in ---------------------------------------
+
+    def link_resource(self, parent_id: int, child_id: int) -> bool:
+        """Record that this file was found inside that folder. Returns whether it is new.
+
+        A link is not ownership: the same file under two indexed folders has two links and
+        one row, one mtime and one copy of its words.
+        """
+        if parent_id == child_id:
+            return False
+        before = self._rows(
+            "SELECT 1 FROM resource_link WHERE parent_id = ? AND child_id = ?",
+            (parent_id, child_id),
+        )
+        if before:
+            return False
+        self._execute(
+            "INSERT INTO resource_link (parent_id, child_id) VALUES (?, ?)", (parent_id, child_id)
+        )
+        return True
+
+    def linked_resources(self, parent_id: int) -> list[resources.Resource]:
+        """The files a folder walk brought in, in address order."""
+        return [
+            self._resource_from_row(row)
+            for row in self._rows(
+                "SELECT r.* FROM resources r JOIN resource_link l ON l.child_id = r.id"
+                " WHERE l.parent_id = ? ORDER BY r.ref_key",
+                (parent_id,),
+            )
+        ]
+
+    def unlink_resource(self, parent_id: int, child_id: int) -> None:
+        self._execute(
+            "DELETE FROM resource_link WHERE parent_id = ? AND child_id = ?",
+            (parent_id, child_id),
+        )
+
+    def release_links(self, parent_id: int, *, keep_pointed_at: bool = True) -> int:
+        """Let go of every file a folder brought in, and return how many went away.
+
+        A file another box points at is kept — the folder was not the only reason it was
+        here — and so is a file some other indexed folder still claims. What is left over
+        after a folder stops being indexed is nothing but a copy of the past.
+        """
+        gone = 0
+        for child in self.linked_resources(parent_id):
+            if keep_pointed_at and self._rows(
+                "SELECT 1 FROM boxes WHERE resource_id = ? LIMIT 1", (child.id,)
+            ):
+                self.unlink_resource(parent_id, child.id)
+                continue
+            self.unlink_resource(parent_id, child.id)
+            if self.drop_resource_if_alone(child.id):
+                gone += 1
+        return gone
+
+    def drop_resource_if_alone(self, resource_id: int) -> bool:
+        """Delete a resource row, and its words, if nothing needs them any more.
+
+        'Nothing needs them' is two questions, and both have to be no: no box points at it,
+        and no folder still claims to contain it. A file taken out of one of two indexed
+        folders keeps its index because the other folder is still holding it up; a file
+        deleted from the only folder that knew it leaves nothing behind, which is what makes
+        a folder's index follow the folder rather than accumulating ghosts.
+        """
+        claimed = self._rows(
+            """
+            SELECT 1 FROM boxes WHERE resource_id = ?
+            UNION ALL
+            SELECT 1 FROM resource_link WHERE child_id = ?
+            LIMIT 1
+            """,
+            (resource_id, resource_id),
+        )
+        if claimed:
+            return False
+        self._execute(_DELETE_DOC, (resource_id,))
+        self._execute("DELETE FROM resource_link WHERE parent_id = ?", (resource_id,))
+        self._execute("DELETE FROM resources WHERE id = ?", (resource_id,))
+        return True
+
+    def unreadable_references(self, *, limit: int = 3) -> list[str]:
+        """Addresses marked for indexing that hold no words, and are not folders.
+
+        A count of these is worth showing; the count alone is a riddle. The empty-file case
+        is in here too, which is why the sentence about them says "nothing to read" rather
+        than "failed": a 0-byte note is not an error, it is a note with nothing in it.
+        """
+        return [
+            str(row["reference"])
+            for row in self._rows(
+                """
+                SELECT reference FROM resources r
+                 WHERE index_it = 1 AND is_dir = 0 AND indexed_at IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM resource_text t WHERE t.resource_id = r.id)
+                 ORDER BY reference
+                 LIMIT ?
+                """,
+                (limit,),
+            )
+        ]
+
+    def index_counts(self) -> dict[str, int]:
+        """How much of the index is there, how much is wanted, how much is out of date.
+
+        One query and no `stat`: this is asked by the page every time it draws the side
+        panel, so it reads the flags already stored rather than looking at the files. The
+        numbers are therefore as fresh as the last pass — which is why the panel says
+        "out of date" from what the database was told, and the action that indexes updates
+        them by looking properly.
+        """
+        rows = self._rows(
+            """
+            SELECT
+                SUM(index_it)                                   AS wanted,
+                SUM(is_dir)                                     AS folders,
+                SUM(CASE WHEN index_it = 1 AND indexed_at IS NOT NULL
+                          AND EXISTS (SELECT 1 FROM resource_text t
+                                       WHERE t.resource_id = resources.id)
+                         THEN 1 ELSE 0 END)                     AS with_words,
+                SUM(CASE WHEN index_it = 1 AND indexed_at IS NOT NULL
+                          AND is_dir = 0
+                          AND NOT EXISTS (SELECT 1 FROM resource_text t
+                                       WHERE t.resource_id = resources.id)
+                         THEN 1 ELSE 0 END)                     AS unreadable,
+                SUM(CASE WHEN index_it = 1 AND indexed_at IS NULL
+                         THEN 1 ELSE 0 END)                     AS untouched,
+                SUM(CASE WHEN index_it = 1 AND stale = 1
+                         THEN 1 ELSE 0 END)                     AS stale
+              FROM resources
+            """
+        )
+        if not rows:
+            return {
+                "wanted": 0,
+                "indexed": 0,
+                "outstanding": 0,
+                "stale": 0,
+                "folders": 0,
+                "unreadable": 0,
+            }
+        counts = rows[0]
+
+        def number(key: str) -> int:
+            # `SUM` over no rows is NULL, and over rows that are all zero it is 0: both
+            # mean "none", and neither is a reason to hand back None to a page.
+            value = counts[key]
+            return int(value) if value is not None else 0
+
+        wanted = number("wanted")
+        # "indexed" means the index holds words for it. A folder that was walked, and a
+        # file that could not be read, both have an `indexed_at` and neither has any text:
+        # counting either as indexed is how a panel ends up saying everything is fine about
+        # a library where two thirds of the files were never opened.
+        with_words = number("with_words")
+        unreadable = number("unreadable")
+        return {
+            "wanted": wanted,
+            "indexed": with_words,
+            # wanted, and the index does not hold what it is for: new, changed, unreadable
+            "outstanding": max(wanted - with_words - number("folders"), 0),
+            "stale": number("stale"),
+            "folders": number("folders"),
+            "unreadable": unreadable,
+            "untouched": number("untouched"),
+        }
 
     def indexed_resources(self) -> list[resources.Resource]:
         """Every resource the index is being kept up to date for."""
@@ -771,6 +974,14 @@ class BoxStore:
                 " digest = NULL WHERE id = ?",
                 (found.id,),
             )
+            if found.is_dir:
+                # A folder that is no longer indexed holds nothing the index should keep:
+                # the files it brought in were only ever there because it was. Done here
+                # rather than on the next pass, because the next pass looks at resources
+                # that want indexing, and this one has just stopped wanting it — a folder
+                # whose children linger until something happens to notice is a slow leak of
+                # words nobody asked to search.
+                self.release_links(found.id, keep_pointed_at=True)
         return self.resource(found.id)
 
     def record_index(
@@ -847,6 +1058,38 @@ class BoxStore:
         except StoreError:
             return []
         return [(int(row["resource_id"]), float(row["score"]), str(row["passage"])) for row in rows]
+
+    def boxes_for_text(self, resource_id: int) -> list[tuple[Box, str | None]]:
+        """The boxes to answer with when this resource's words matched, and where they came from.
+
+        Usually one box: the one that points at the file. A file inside an indexed folder is
+        different — nothing in the library points at it, because what the person filed is
+        the folder — so the folder answers, and says which file spoke. That pair is the
+        difference between a hit you can open and a number in a passage you have to go and
+        find by hand.
+
+        The second half of each pair is the path *inside* the folder, or None when the box
+        points at the file itself. Nested folders share names across subtrees, so a bare
+        name would send someone to the wrong file.
+        """
+        answers: list[tuple[Box, str | None]] = [
+            (box, None) for box in self.boxes_by_resources([resource_id]).get(resource_id, [])
+        ]
+        rows = self._rows("SELECT parent_id FROM resource_link WHERE child_id = ?", (resource_id,))
+        if not rows:
+            return answers
+        child = self.resource(resource_id)
+        for row in rows:
+            parent_id = int(row["parent_id"])
+            parent = self.resource(parent_id)
+            for box in self.boxes_by_resources([parent_id]).get(parent_id, []):
+                inside = child.reference if child is not None else ""
+                if parent is not None and inside:
+                    head = parent.reference.rstrip("/") + "/"
+                    if inside.startswith(head):
+                        inside = inside[len(head) :]
+                answers.append((box, inside or None))
+        return answers
 
     def boxes_by_resources(self, resource_ids: Sequence[int]) -> dict[int, list[Box]]:
         """The boxes pointing at each of these resources, in the order asked for.
@@ -1030,6 +1273,18 @@ class BoxStore:
         # an address, and reading every box with its address still in a column that is
         # about to disappear would resolve the membership of each folder against
         # nothing. This is why the v7 step sits above the v5 one rather than under it.
+        if stored_version < 8:
+            # The table itself arrives with the schema scripts, which run before this.
+            columns = {str(row["name"]) for row in self._rows("PRAGMA table_info(resources)")}
+            if "is_dir" not in columns:
+                self._execute("ALTER TABLE resources ADD COLUMN is_dir INTEGER NOT NULL DEFAULT 0")
+            # Rows written before the column existed are not all files, and a folder left
+            # believing it is a file is counted as a read that failed forever. One `stat`
+            # per row, once, on the way up: cheaper than a panel that lies afterwards.
+            local = self._rows("SELECT id, reference FROM resources WHERE origin = 'local'")
+            for row in local:
+                if resources.is_directory(str(row["reference"])):
+                    self._execute("UPDATE resources SET is_dir = 1 WHERE id = ?", (row["id"],))
         if stored_version < 7:
             self._split_resources_out()
         if stored_version < 5:

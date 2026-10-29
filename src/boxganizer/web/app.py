@@ -15,7 +15,9 @@ import tarfile
 import zipfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Annotated, Any
 from uuid import uuid4
 
@@ -287,6 +289,17 @@ def _store_of(request: Request) -> BoxStore:
     if store is None:  # pragma: no cover - defensive
         raise HTTPException(status_code=503, detail="no store attached")
     return store
+
+
+class IndexRun(BaseModel):
+    """Which pass the page is asking for.
+
+    `outstanding` is the everyday one: look at the files, then read the ones that changed,
+    went missing or were never read. `everything` re-reads the library, which is what a
+    database copied to a new machine needs and what nothing else does.
+    """
+
+    scope: str = "outstanding"
 
 
 class VncInput(BaseModel):
@@ -1141,6 +1154,109 @@ def create_app(
             return {"html": "", "source": "", "note": found.note}
         return {"html": markdown.render(found.text), "source": found.text, "note": ""}
 
+    def _index_job(request: Request) -> dict[str, Any]:
+        """The running or last indexation, as this process remembers it.
+
+        Kept on the app rather than the database because it describes work happening now,
+        in this process: a second Boxganizer reading the same files is a different job, and
+        after a restart there is nothing to report but the counts.
+        """
+        job = getattr(request.app.state, "index_job", None)
+        if job is None:
+            job = {"running": False, "scope": "", "started": "", "last": None, "task": None}
+            request.app.state.index_job = job
+        return job
+
+    @app.get("/api/index/status")
+    def index_status(
+        request: Request,
+        store: StoreDep,
+        check: Annotated[
+            bool,
+            Query(description="Look at the files first, so 'out of date' is not stale news."),
+        ] = False,
+    ) -> dict[str, Any]:
+        """What the index holds, what it is waiting for, and whether a pass is running.
+
+        `check=1` stats every watched file before counting. Without it the answer is what
+        the database was last told, which for a file edited in a text editor an hour ago is
+        a polite lie. The stat pass is one `stat` per file and reads nothing — the same
+        thing `box index --check` does — so the page asks for it when the panel is drawn,
+        and asks plainly while a pass is running and the numbers are moving anyway.
+
+        It writes, and that is allowed here for one reason: what it writes is a cache of
+        what the filesystem says about a file, not anything a person typed. The stored flag
+        is not a decision and loses nothing if it is refreshed twice.
+        """
+        if check:
+            store.check_observations()
+        body: dict[str, Any] = dict(store.index_counts())
+        if body["unreadable"]:
+            # Named, because "1 could not be read" is a riddle: the useful part is which.
+            body["unreadable_examples"] = store.unreadable_references(limit=3)
+        job = _index_job(request)
+        return {**body, "running": job["running"], "scope": job["scope"], "last": job["last"]}
+
+    @app.post("/api/index/run")
+    async def index_run(request: Request, store: StoreDep, body: IndexRun) -> dict[str, Any]:
+        """Read the files, in the background, and let the page ask how it went.
+
+        A pass over a library is not a fast request: it opens every file the index is
+        wanted for, and a page that waits on it looks frozen and gets closed. So the work
+        runs on a worker thread — reading files is exactly the kind of thing the event loop
+        should not do itself — and the answer here is only that it started.
+        """
+        job = _index_job(request)
+        if job["running"]:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "index_running", "scope": job["scope"]},
+            )
+        scope = body.scope if body.scope in ("outstanding", "everything") else "outstanding"
+        root = getattr(request.app.state, "content_root", None)
+
+        async def pass_() -> None:
+            job["running"] = True
+            job["scope"] = scope
+            job["started"] = datetime.now(UTC).isoformat(timespec="seconds")
+            began = monotonic()
+            try:
+                if scope == "outstanding":
+                    # Look first, then read what that noticed: a file edited outside
+                    # Boxganizer is invisible until something stats it.
+                    await asyncio.to_thread(store.check_observations)
+                before = store.index_counts()
+                report = await asyncio.to_thread(
+                    text_search.rebuild, store, root=root, only_stale=(scope == "outstanding")
+                )
+                after = store.index_counts()
+                # What the pass changed is read back from the index rather than added up as
+                # it went: a folder walk brings in files that were not on the list the pass
+                # was built from, so a tally kept by the loop under-reports exactly the work
+                # the folder did — "0 read" under a panel that has just filled with 70.
+                job["last"] = {
+                    "scope": scope,
+                    "resources": report.resources,
+                    "indexed": report.indexed,
+                    "added": max(0, int(after["indexed"]) - int(before["indexed"])),
+                    "in_index": after["indexed"],
+                    "unchanged": report.unchanged,
+                    "skipped": len(report.skipped),
+                    "unreadable": after["unreadable"],
+                    "seconds": round(monotonic() - began, 2),
+                    "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                }
+            except Exception as exc:  # a pass that died must still be over
+                job["last"] = {"scope": scope, "error": str(exc) or type(exc).__name__}
+            finally:
+                job["running"] = False
+
+        # Held on the job: a task nothing references can be garbage-collected before it
+        # finishes, which would leave the panel saying "indexing…" for a job that stopped.
+        job["task"] = asyncio.create_task(pass_())
+        job["task"].add_done_callback(lambda done: job.pop("task", None))
+        return {"started": True, "scope": scope}
+
     @app.get("/api/index-suggestion")
     def index_suggestion(
         store: StoreDep,
@@ -1676,7 +1792,7 @@ def create_app(
             # a true answer, so each is offered with the same passage and the same
             # reason — and a box already listed by its own name is not listed twice.
             for resource_id, _score, passage in hits:
-                for box in store.boxes_by_resources([resource_id]).get(resource_id, []):
+                for box, inside in store.boxes_for_text(resource_id):
                     if box.uuid in seen:
                         continue
                     seen.add(box.uuid)
@@ -1687,6 +1803,9 @@ def create_app(
                                 "how": "content",
                                 "passage": passage,
                                 "resource": resource_id,
+                                # which file inside the folder answered, when the box is a
+                                # folder and the words came from one of its files
+                                "in_file": inside,
                             }
                         }
                     )

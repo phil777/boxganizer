@@ -596,6 +596,11 @@ class Report:
     indexed: int = 0
     unchanged: int = 0
     skipped: tuple[tuple[str, str], ...] = ()
+    #: How many resources hold words in the index once the pass is done. Counted from the
+    #: database rather than added up as it goes, because a folder read brings in files that
+    #: were not on the list this pass was built from, and a tally that misses those is a
+    #: number nobody can act on.
+    in_index: int | None = None
 
     def summary(self) -> str:
         """What was read, what did not need reading, and what could not be read.
@@ -606,7 +611,16 @@ class Report:
         read = f"{self.indexed} file{'' if self.indexed == 1 else 's'} read into the index"
         held = f", {self.unchanged} already up to date" if self.unchanged else ""
         tail = f"; {len(self.skipped)} nothing to read" if self.skipped else ""
-        return f"{read}, out of {self.resources}{held}{tail}"
+        # Where the library stands when the pass is over, rather than what this pass
+        # touched: a folder brings in files that were not on the list the pass was built
+        # from, so "3 read" and "41 in the index" are both true and only one of them tells
+        # you whether the search will find your words tomorrow.
+        whole = (
+            f"; {self.in_index} file{'' if self.in_index == 1 else 's'} in the index"
+            if self.in_index is not None
+            else ""
+        )
+        return f"{read}, out of {self.resources}{held}{tail}{whole}"
 
 
 def _confine_of(store: Any) -> Path | None:
@@ -621,7 +635,99 @@ def _confine_of(store: Any) -> Path | None:
     return Path(found) if found else None
 
 
-def sync_resource(store: Any, resource_id: int, *, root: Path | str | None = None) -> str:
+def expand_directory(
+    store: Any,
+    resource_id: int,
+    *,
+    root: Path | str | None = None,
+    walk_always: bool = False,
+) -> str:
+    """Index a folder by indexing the files inside it, and keep that in step with the disk.
+
+    A folder has no words of its own, so `index_it` on a folder row can only mean one
+    thing: bring what is inside into the index. The files become resources like any other —
+    rows of their own, with their own mtime and their own text — which is what lets the
+    ordinary "has this changed since it was read" mechanism work on them unchanged. The
+    folder is not their owner, only where they were found: the links are recorded in
+    `resource_link`, a file under two indexed folders is one row with two links, and a
+    folder that stops being indexed takes its links with it and leaves the files alone.
+
+    Two things a plain reindex does not have to answer, and a folder does:
+
+    **What appeared?** A new file is a file that is walked over and has no row yet, so it is
+    made, linked and read. That is only noticed on a walk, and a walk costs a directory
+    listing per folder — so the everyday door (`sync_resource`, called when a box is saved)
+    walks only when the folder itself changed, while a pass over the library walks
+    whatever it reaches. Deleting a file changes the folder's mtime; editing one does not,
+    and the file's own row notices that instead.
+
+    **What disappeared?** A linked file that is no longer on disk has its words taken out of
+    the index — otherwise a search keeps offering a note somebody deleted, which is the
+    failure mode that makes people stop trusting the search box. The row itself goes only if
+    nothing else needs it: no box points at it, and no other folder still claims it.
+
+    Returns a note when something stopped the walk, empty when it finished.
+    """
+    parent = store.resource(resource_id)
+    if parent is None:
+        return ""
+    if not parent.index_it:
+        # opted out: the links go, the files stay, and their text goes only with them
+        for child in store.linked_resources(int(resource_id)):
+            store.unlink_resource(int(resource_id), int(child.id))
+            store.drop_resource_if_alone(int(child.id))
+        store.record_index(int(resource_id), body=None, seen=address.stat(parent.reference))
+        return ""
+
+    confine = Path(root) if root is not None else _confine_of(store)
+    target = Path(address.normalise(parent.reference))
+    fresh = parent.stale() is False
+    if fresh and not walk_always:
+        return ""  # folder unchanged, and the files inside answer for themselves
+
+    files, note = address.walk_files(target, confine=confine)
+    known: set[str] = set()
+    indexed = 0
+    for path in files:
+        key = address.normalise(str(path))
+        known.add(key)
+        # A file the person explicitly left out stays left out. The folder's `index_it` says
+        # what the folder wants for the files inside it, and a no said about one file is a
+        # better answer than a walk that quietly overrules it every pass.
+        already = store.resource(str(path))
+        if already is not None and not already.index_it:
+            continue
+        record = store.register_resource(str(path), index_it=True)
+        if record is None or record.id is None:
+            continue
+        store.link_resource(int(resource_id), int(record.id))
+        if sync_resource(store, int(record.id), root=confine, walk_always=False) == "":
+            indexed += 1
+
+    # What the folder used to hold and does not hold now. `known` is the whole current list,
+    # so a file that merely stopped being indexable (renamed to a `.jpg`) is dropped here too
+    # — its words no longer describe anything a search should return.
+    for child in store.linked_resources(int(resource_id)):
+        if address.normalise(child.reference) in known:
+            continue
+        store.record_index(int(child.id), body=None, seen=address.Fingerprint())
+        store.unlink_resource(int(resource_id), int(child.id))
+        store.drop_resource_if_alone(int(child.id))
+
+    # The folder's own row records the walk, so an unchanged folder is not listed again on
+    # the next pass. It holds no text and is not counted as if it should: see `index_counts`.
+    store.record_index(int(resource_id), body=None, seen=address.stat(parent.reference))
+    del indexed  # the count is the caller's business; the report counts resources
+    return note
+
+
+def sync_resource(
+    store: Any,
+    resource_id: int,
+    *,
+    root: Path | str | None = None,
+    walk_always: bool = False,
+) -> str:
     """Read one resource into the index if it is worth reading, and say what stopped it.
 
     This is the whole of the reindexing rule in one place, called from every door:
@@ -638,6 +744,13 @@ def sync_resource(store: Any, resource_id: int, *, root: Path | str | None = Non
     resource = store.resource(resource_id)
     if resource is None:
         return ""
+    if resource.is_dir:
+        # A folder is not read; it is walked, and the files that come out are indexed as
+        # the resources they are. See `expand_directory`.
+        return expand_directory(
+            store, int(resource_id), root=root if root is not None else _confine_of(store),
+            walk_always=walk_always,
+        )
     if not resource.index_it:
         if resource.indexed:
             store.record_index(resource.id, body=None, seen=address.Fingerprint())
@@ -680,13 +793,35 @@ def rebuild(store: Any, *, root: Path | str | None = None, only_stale: bool = Fa
     about, which is what a scheduled reindex wants rather than a whole library read on a
     timer.
     """
-    watched = list(store.check_observations()) if only_stale else store.indexed_resources()
+    if only_stale:
+        watched = list(store.check_observations())
+        # Folders are added whatever their own mtime says. A file created two levels down
+        # does not touch the mtime of the folder above, so a narrowed pass that trusted
+        # mtimes would never list the folder and so would never notice the file — and
+        # "Index what changed" would be a button that misses the changes people mean.
+        # Listing a folder is not reading it: this is the cheap half of the work.
+        seen = {int(item.id or 0) for item in watched}
+        watched.extend(
+            item
+            for item in store.indexed_resources()
+            if item.is_dir and int(item.id or 0) not in seen
+        )
+    else:
+        watched = store.indexed_resources()
     skipped: list[tuple[str, str]] = []
     indexed = 0
     unchanged = 0
     for resource in watched:
         before = resource.indexed and resource.stale() is False
-        note = sync_resource(store, resource.id, root=root)  # the store's confine applies
+        note = sync_resource(
+            # A pass over the library is the deliberate one, so a folder is walked rather
+            # than trusted to its mtime: a file added two levels down does not change the
+            # mtime of the folder above, and discovery is what this pass is for.
+            store,
+            resource.id,
+            root=root,
+            walk_always=True,
+        )
         if note:
             skipped.append((address.display(resource.reference), note))
         elif before:
@@ -698,6 +833,7 @@ def rebuild(store: Any, *, root: Path | str | None = None, only_stale: bool = Fa
         indexed=indexed,
         unchanged=unchanged,
         skipped=tuple(skipped),
+        in_index=store.index_counts()["indexed"],
     )
 
 

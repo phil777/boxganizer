@@ -2519,3 +2519,80 @@ def test_the_index_choice_is_one_line_and_says_little(client: TestClient) -> Non
     box = css.index('#new-box-modal label.index-choice input[type="checkbox"],')
     block = css[box : css.index("}", box)]
     assert "padding: 0;" in block and "width: auto;" in block
+
+
+def test_the_panel_carries_a_menu_of_actions_on_the_library_itself(client: TestClient) -> None:
+    """Not every action belongs to the box on screen."""
+    page = client.get("/").text
+    assert 'id="side-menu"' in page
+    assert 'class="burger"' in page
+    assert 'aria-haspopup="true"' in page
+    # on the name's line, at its right end
+    css = client.get("/static/app.css").text
+    start = css.index(".burger {")
+    assert "margin-left: auto;" in css[start : css.index("}", start)]
+    script = client.get("/static/app.js").text
+    assert 'label: "About", run: showAbout' in script
+    assert 'run: () => runIndexation("outstanding")' in script
+    assert 'run: () => runIndexation("everything")' in script
+
+
+def test_about_reports_the_version_the_server_is_running(client: TestClient) -> None:
+    """The version comes from the server: the page must not know its own number twice."""
+    page = client.get("/").text
+    assert 'id="about-modal"' in page
+    assert 'id="about-version"' in page
+    script = client.get("/static/app.js").text
+    assert "api.health()" in script
+    assert "version ${health.version}" in script
+    assert client.get("/api/health").json()["version"]
+
+
+def test_the_index_is_reported_on_every_panel_and_can_be_run_from_the_page(
+    client: TestClient,
+) -> None:
+    """The status sits in front of the count, and the action that fills it is one click away."""
+    page = client.get("/").text
+    assert 'id="index-status"' in page
+    assert 'id="box-count"' in page
+    css = client.get("/static/app.css").text
+    start = css.index("#side-status {")
+    rule = css[start : css.index("}", start)]
+    assert "justify-content: flex-end;" in rule
+
+    status = client.get("/api/index/status").json()
+    assert {"wanted", "indexed", "outstanding", "stale", "folders", "unreadable"} <= set(status)
+    assert status["running"] is False
+
+    run = client.post("/api/index/run", json={"scope": "outstanding"})
+    assert run.status_code == 200
+    assert run.json()["started"] is True
+
+    # The pass is backgrounded, so the answer is only that it started; the numbers are
+    # polled. A request that read the whole library would look like a frozen page.
+    script = client.get("/static/app.js").text
+    assert 'indexTimer = setInterval(() => refreshIndexStatus(), 1200)' in script
+    assert "refreshIndexStatus({ check: true })" in script
+
+
+def test_checking_the_status_looks_at_the_files_when_asked(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """`?check=1` is the difference between what the database believes and what is true."""
+    from boxganizer import search as text_search
+    from boxganizer.models import Box as _Box
+    from boxganizer.store import BoxStore as _BoxStore
+
+    note = tmp_path / "note.md"
+    note.write_text("the first words about the boiler\n", encoding="utf-8")
+    store = _BoxStore(tmp_path / "st.db", content_root=tmp_path)
+    try:
+        store.add(_Box(name="Note", box_type="markdown", resource_uri=str(note)))
+        text_search.rebuild(store)
+        with TestClient(create_app(store, content_root=tmp_path)) as fresh:
+            assert fresh.get("/api/index/status").json()["stale"] == 0
+            note.write_text("the second words about the boiler\n", encoding="utf-8")
+            assert fresh.get("/api/index/status").json()["stale"] == 0  # what it was told
+            assert fresh.get("/api/index/status", params={"check": True}).json()["stale"] == 1
+    finally:
+        store.close()

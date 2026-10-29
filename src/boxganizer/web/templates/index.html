@@ -15,6 +15,17 @@
         <div class="side-brand">
           <span class="brand-glyph" aria-hidden="true">📦</span>
           <span class="brand-name">boxganizer</span>
+          <!-- Everything that is not about one box comes out of here. -->
+          <button
+            id="side-menu"
+            type="button"
+            class="burger"
+            aria-haspopup="true"
+            aria-expanded="false"
+            title="More actions"
+          >
+            ☰
+          </button>
         </div>
         <div class="side-actions">
           <button id="go-root" type="button" title="Show the root box">🌲 Root</button>
@@ -26,7 +37,11 @@
         <!-- What the words were widened to: stems, synonyms, near-miss spellings. -->
         <p id="search-note" class="muted" hidden></p>
         <ul id="box-list" role="listbox" aria-label="Boxes"></ul>
-        <p id="side-status" class="muted"></p>
+        <!-- The index is reported on every draw, in front of the count it sits beside. -->
+        <p id="side-status" class="muted">
+          <span id="index-status" class="index-status"></span>
+          <span id="box-count"></span>
+        </p>
       </aside>
 
       <!-- Main pane: the selected box, as its content. -->
@@ -122,6 +137,20 @@
     </dialog>
 
     <!-- A file selector over the server's filesystem, for the resource field. -->
+    <dialog id="about-modal" aria-label="About boxganizer">
+      <div class="about">
+        <span class="brand-glyph" aria-hidden="true">📦</span>
+        <div>
+          <h2>boxganizer</h2>
+          <!-- Filled from the server: the page should not know its own version twice. -->
+          <p id="about-version" class="muted"></p>
+        </div>
+      </div>
+      <footer>
+        <button type="button" id="about-close">Close</button>
+      </footer>
+    </dialog>
+
     <dialog id="file-picker" aria-label="Choose a file">
       <div class="picker-head">
         <input id="fp-path" placeholder="/path" aria-label="Path" />
