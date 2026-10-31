@@ -39,8 +39,10 @@
         <ul id="box-list" role="listbox" aria-label="Boxes"></ul>
         <!-- The index is reported on every draw, in front of the count it sits beside. -->
         <p id="side-status" class="muted">
-          <span id="index-status" class="index-status"></span>
           <span id="box-count"></span>
+          <!-- A button, not a span: the number is a question people ask, and the names
+               behind it are the answer. -->
+          <button type="button" id="index-status" class="index-status"></button>
         </p>
       </aside>
 
@@ -149,6 +151,17 @@
     </dialog>
 
     <!-- A file selector over the server's filesystem, for the resource field. -->
+    <dialog id="index-modal" aria-label="What the index is waiting for">
+      <h2>Waiting for the index</h2>
+      <p id="index-pending-summary" class="muted"></p>
+      <ul id="index-pending-list" class="pending-list"></ul>
+      <footer>
+        <button type="button" id="pending-reindex">Reindex them</button>
+        <button type="button" id="pending-look">Look at the files again</button>
+        <button type="button" id="index-close">Close</button>
+      </footer>
+    </dialog>
+
     <dialog id="check-modal" aria-label="Check the library">
       <h2>Check the library</h2>
       <p id="check-summary" class="muted"></p>

@@ -1342,6 +1342,18 @@ def create_app(
         job = _index_job(request)
         return {**body, "running": job["running"], "scope": job["scope"], "last": job["last"]}
 
+    @app.get("/api/index/pending")
+    def index_pending(
+        store: StoreDep, limit: Annotated[int, Query(ge=1, le=1000)] = 200
+    ) -> dict[str, Any]:
+        """The names behind the number in the status line.
+
+        Read from the rows, not from the filesystem: this is the companion of the standing
+        line, which says what the database believes. A person who wants the truth about the
+        disk clicks "Index what changed", and that pass looks and then re-draws this.
+        """
+        return {"items": store.needing_index(limit=limit), **store.index_counts()}
+
     @app.post("/api/index/run")
     async def index_run(request: Request, store: StoreDep, body: IndexRun) -> dict[str, Any]:
         """Read the files, in the background, and let the page ask how it went.

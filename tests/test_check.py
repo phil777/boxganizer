@@ -91,9 +91,7 @@ def test_a_file_changed_since_it_was_read_is_reported_stale(library: BoxStore) -
     text_search.rebuild(library, root=root)
     (root / "here.md").write_text("# Here\n\nthe boiler is leaking now\n", encoding="utf-8")
     assert "Here:stale" in kinds(library, root)
-    assert checker.REINDEX in next(
-        f for f in checker.run(library) if f.box_name == "Here"
-    ).fixes
+    assert checker.REINDEX in next(f for f in checker.run(library) if f.box_name == "Here").fixes
 
 
 def test_an_empty_file_that_was_read_is_not_called_broken(library: BoxStore) -> None:

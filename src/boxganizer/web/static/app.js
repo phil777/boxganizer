@@ -86,6 +86,10 @@ const api = {
   resolveFolder: (ref) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/resolve`, { method: "POST" }),
   indexStatus: (check) => request(`/api/index/status${check ? "?check=1" : ""}`),
+  indexPending: () => request("/api/index/pending"),
+  // "Look at the files again" without reading any of them: the status endpoint is the one
+  // that stats, and `check=1` is what turns "to reindex" from old news into a fresh answer.
+  indexStatFiles: () => request("/api/index/status?check=1"),
   indexRun: (scope) =>
     request("/api/index/run", { method: "POST", body: JSON.stringify({ scope }) }),
   health: () => request("/api/health"),
@@ -1551,10 +1555,18 @@ async function sendFix(finding, action, value) {
  * to look at the files, which is what happens when the panel is opened and when a pass ends.
  */
 
+/** How many resources a pass would take another look at, and so what to call them. */
+function indexWaiting(status_) {
+  return (status_.stale || 0) + (status_.untouched || 0);
+}
+
 function indexWords(status_) {
   if (status_.running) return "indexing…";
-  if (status_.stale) return `${status_.stale} out of date`;
-  if (status_.outstanding) return `${status_.outstanding} to index`;
+  const waiting = indexWaiting(status_);
+  // "reindex" only when something was read and has since changed; a file the index has never
+  // opened is not being re-read, and a line that says otherwise teaches people to distrust it.
+  if (status_.stale) return `${waiting} to reindex`;
+  if (waiting) return `${waiting} to index`;
   if (!status_.wanted) return "nothing to index";
   return `${status_.indexed} indexed`;
 }
@@ -1601,6 +1613,12 @@ async function refreshIndexStatus({ check = false } = {}) {
   }
   spot.textContent = indexWords(status_);
   spot.title = indexDetail(status_);
+  // A number with nothing behind it should not invite a click, and should not pretend to be
+  // a control to a keyboard either.
+  const waiting = indexWaiting(status_);
+  spot.disabled = waiting === 0;
+  if (spot.disabled) spot.removeAttribute("aria-haspopup");
+  else spot.setAttribute("aria-haspopup", "dialog");
   spot.classList.toggle("is-running", !!status_.running);
   spot.classList.toggle("has-stale", !status_.running && (status_.stale > 0 || status_.outstanding > 0));
   if (status_.running) {
@@ -1612,6 +1630,130 @@ async function refreshIndexStatus({ check = false } = {}) {
     // the panel. The counts and the list are re-read rather than left as they were.
     refreshSide();
   }
+}
+
+/**
+ * The names behind the number in the status line.
+ *
+ * "2 to reindex" is a claim about the library, and a claim a person can click should show its
+ * evidence and offer the repair in the same place. The rows are resources rather than boxes
+ * because that is what the index is keyed on: several boxes may share one file, and the files
+ * a folder brought in belong to no box of their own — they are named by the folder, which is
+ * why those chips are dashed.
+ *
+ * It opens read-only. The button says what is waiting; the pass stays a separate decision,
+ * taken with the button in the footer, because reading a library is not a side effect of
+ * looking at a list.
+ */
+async function openIndexModal() {
+  el("index-modal").showModal();
+  await drawPending({ check: false });
+}
+
+async function drawPending({ check = false } = {}) {
+  const list = el("index-pending-list");
+  const summary = el("index-pending-summary");
+  summary.textContent = check
+    ? "looking at the files…"
+    : "reading what the index already believes…";
+  list.textContent = "";
+  let report;
+  try {
+    if (check) await api.indexStatFiles();
+    report = await api.indexPending();
+  } catch (error) {
+    summary.textContent = `the index could not be asked: ${error.message}`;
+    return;
+  }
+  const items = report.items || [];
+  const fixable = items.filter((item) => item.fixable);
+  const hopeless = items.filter((item) => !item.fixable);
+  el("pending-reindex").disabled = fixable.length === 0;
+  if (!items.length) {
+    const fine = document.createElement("li");
+    fine.className = "pending-none";
+    fine.textContent = "Nothing is waiting: every file the index is wanted for has been read.";
+    list.append(fine);
+    summary.textContent = `${report.indexed} in the index, ${report.wanted} wanted`;
+    refreshIndexStatus();
+    return;
+  }
+  // Two groups, because they are two different claims. The number in the status line counts
+  // only the first group; a list that quietly included the second would say "3 to reindex"
+  // about two files that would still be there after any number of passes.
+  const waiting = fixable.length;
+  summary.textContent =
+    (waiting
+      ? `${waiting} file${waiting === 1 ? "" : "s"} the index can catch up on`
+      : "nothing the index is behind on") +
+    (hopeless.length
+      ? ` · ${hopeless.length} with no text in it to index`
+      : "") +
+    ` · ${report.wanted} wanted in the index`;
+  const draw = (item, heading) => {
+    if (heading) {
+      const head = document.createElement("li");
+      head.className = "pending-heading";
+      head.textContent = heading;
+      list.append(head);
+    }
+    const row = document.createElement("li");
+    const what = document.createElement("span");
+    what.className = "pending-what";
+    what.textContent = item.reference;
+    what.title = item.reference;
+    row.append(what);
+    item.boxes.forEach((holder) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "pending-box" + (holder.inside ? " inside" : "");
+      chip.textContent = holder.inside ? `in ${holder.name}` : holder.name;
+      chip.title = holder.inside
+        ? "a file inside an indexed folder, so it has no box of its own"
+        : "open this box";
+      chip.addEventListener("click", () => {
+        el("index-modal").close();
+        openBox(holder.uuid);
+      });
+      row.append(chip);
+    });
+    if (!item.boxes.length) {
+      const orphan = document.createElement("span");
+      orphan.className = "pending-box inside";
+      orphan.textContent = "no box";
+      orphan.title = "a resource the index is kept for that no box points at";
+      row.append(orphan);
+    }
+    const why = document.createElement("span");
+    why.className = "pending-why";
+    // The third kind is told apart because reindexing will not help: a binary that gave up no
+    // text will give up no text again, and a list that promised otherwise is a list still here
+    // tomorrow.
+    why.textContent = item.words;
+    row.append(why);
+    list.append(row);
+  };
+  // Said out loud, because the list is a query over what the index has rows for, and a file
+  // added inside an indexed folder since the last pass has no row yet: nothing here can name
+  // it. A pass will find it — which is the other button, and the reason both are on screen.
+  if (report.folders) {
+    const note = document.createElement("li");
+    note.className = "pending-caveat";
+    note.textContent =
+      "A file added inside an indexed folder since the last pass is not here yet: it has" +
+      " no row until something walks the folder. Reindexing does that.";
+    list.append(note);
+  }
+  fixable.forEach((item) => draw(item, ""));
+  hopeless.forEach((item, index) =>
+    draw(
+      item,
+      index === 0
+        ? "Read, and nothing in them for the index. Reindexing will not change this one."
+        : ""
+    )
+  );
+  refreshIndexStatus();
 }
 
 async function runIndexation(scope) {
@@ -1735,6 +1877,13 @@ async function init() {
   el("up").addEventListener("click", goUp);
   el("new-box").addEventListener("click", () => openNewBoxModal());
   el("go-root").addEventListener("click", goToRoot);
+  el("index-status").addEventListener("click", openIndexModal);
+  el("index-close").addEventListener("click", () => el("index-modal").close());
+  el("pending-look").addEventListener("click", () => drawPending({ check: true }));
+  el("pending-reindex").addEventListener("click", () => {
+    el("index-modal").close();
+    runIndexation("outstanding");
+  });
   el("nb-cancel").addEventListener("click", () => el("new-box-modal").close());
   el(CREATE_MODAL.type).addEventListener("change", () => {
     renderConfigFields(CREATE_MODAL);

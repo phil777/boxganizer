@@ -70,7 +70,7 @@ def test_raw_html_in_a_file_stays_text_on_the_screen() -> None:
 
 
 def test_an_attribute_cannot_be_smuggled_through_an_image_tag() -> None:
-    html = md.render('<img src=x onerror=alert(1)>')
+    html = md.render("<img src=x onerror=alert(1)>")
     assert "onerror" not in html or "<img" not in html
 
 

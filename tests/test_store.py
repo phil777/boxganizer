@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+from boxganizer import search as indexing
 from boxganizer.errors import BoxNotFound, DuplicateBoxName
 from boxganizer.models import Box
 from boxganizer.store import SCHEMA_VERSION, BoxStore
@@ -807,3 +809,122 @@ def test_a_dynamic_folder_is_recut_on_upgrade_too(db_path: Path) -> None:
 
     with BoxStore(db_path) as reopened:
         assert [box.name for box in reopened.children("Pics")] == ["pic"]
+
+
+def test_which_boxes_are_waiting_on_the_index(tmp_path: Path) -> None:
+    """The names behind the number in the status line.
+
+    Three states are told apart because the advice differs, and one of them must not be
+    offered as work at all: an empty file has no words to bring in, and a list that said
+    otherwise would grow by one item every time somebody created a note.
+    """
+    store = BoxStore(tmp_path / "pending.db", content_root=tmp_path)
+    try:
+        changed = tmp_path / "changed.md"
+        changed.write_text("plumbing", encoding="utf-8")
+        unreadable = tmp_path / "binary.bin"
+        unreadable.write_bytes(b"\x00\x01\x02binary\x00\x01" * 200)
+        empty = tmp_path / "empty.md"
+        empty.write_text("", encoding="utf-8")
+        later = tmp_path / "later.md"
+        later.write_text("boiler", encoding="utf-8")
+
+        store.add(Box(name="Changed", box_type="markdown", resource_uri=str(changed)))
+        store.add(Box(name="Binary", box_type="text", resource_uri=str(unreadable)))
+        store.add(Box(name="Empty", box_type="note", resource_uri=str(empty)))
+        store.add(Box(name="Later", box_type="markdown", resource_uri=str(later)))
+        indexing.rebuild(store, root=tmp_path)
+        # The binary is already in the list, and that is the point: it is the one kind of
+        # item a pass cannot clear, which is why the status line counts only the fixable
+        # ones and this list says which is which.
+        after_pass = store.needing_index()
+        assert [item["reference"] for item in after_pass] == ["binary.bin"]
+        assert after_pass[0]["fixable"] is False
+
+        # one file edited outside Boxganizer, which a pass will catch
+        changed.write_text("plumbing and boilers", encoding="utf-8")
+        os.utime(changed, (changed.stat().st_atime, changed.stat().st_mtime + 5))
+        store.check_observations()
+        # one file the index has never opened: the row says so, whatever put it there
+        untouched(store, "later.md")
+        # one file that was read, has bytes, and gave up no words: named, not promised
+        read_and_empty_handed(store, "binary.bin")
+
+        listed = {item["reference"].split("/")[-1]: item for item in store.needing_index()}
+        assert set(listed) == {"changed.md", "later.md", "binary.bin"}, listed
+        assert "empty.md" not in listed, "an empty file has nothing to index, forever"
+
+        assert listed["changed.md"]["why"] == "changed"
+        assert listed["changed.md"]["fixable"] is True
+        assert [box["name"] for box in listed["changed.md"]["boxes"]] == ["Changed"]
+
+        assert listed["later.md"]["why"] == "never"
+        assert listed["later.md"]["fixable"] is True
+        assert listed["later.md"]["words"] == "has not been read yet"
+
+        assert listed["binary.bin"]["fixable"] is False
+        assert "no text" in listed["binary.bin"]["words"]
+    finally:
+        store.close()
+
+
+def untouched(store: BoxStore, name: str) -> None:
+    """Put a resource back to the state a never-read one is in."""
+    store._execute(
+        "UPDATE resources SET indexed_at = NULL, mtime = NULL, bytes = NULL, digest = NULL,"
+        " stale = 0 WHERE reference LIKE ?",
+        (f"%{name}%",),
+    )
+    store._execute(
+        "DELETE FROM resource_text WHERE resource_id IN (SELECT id FROM resources"
+        " WHERE reference LIKE ?)",
+        (f"%{name}%",),
+    )
+
+
+def read_and_empty_handed(store: BoxStore, name: str) -> None:
+    """A file that was read, has bytes, and yielded nothing searchable."""
+    store._execute(
+        "UPDATE resources SET stale = 0, indexed_at = '2026-01-01T00:00:00+00:00',"
+        " bytes = 3200 WHERE reference LIKE ?",
+        (f"%{name}%",),
+    )
+
+
+def test_a_file_inside_an_indexed_folder_is_named_by_its_folder(tmp_path: Path) -> None:
+    """A folder's files have no box of their own, so the folder lends them its name.
+
+    The walk brings in text files and skips everything else, so a file inside a folder is a
+    row once a pass has seen it — and the only useful thing left to ask is which of those rows
+    have gone stale, which is what a search would get wrong in silence. Notably *not* tested
+    here: a file added since the last pass. It has no row yet, no query can name it, and the
+    page says so rather than implying the list is the whole truth.
+    """
+    store = BoxStore(tmp_path / "folder-pending.db", content_root=tmp_path)
+    try:
+        folder = tmp_path / "notes"
+        folder.mkdir()
+        one = folder / "one.md"
+        one.write_text("first words", encoding="utf-8")
+        (folder / "bad.bin").write_bytes(b"\x00\x02binary\x00" * 400)
+        holder = store.add(
+            Box(name="Notes", box_type="indexed-directory", resource_uri=str(folder))
+        )
+        # A folder is indexed when somebody marks it, not because a folder box exists: the
+        # request was "when a directory box is marked for indexing", and the tick means it.
+        store.set_index_flag(holder, True)
+        indexing.rebuild(store, root=tmp_path)
+        assert store.needing_index() == [], "the pass read what it could and skipped the rest"
+
+        one.write_text("first words, and then some more", encoding="utf-8")
+        os.utime(one, (one.stat().st_atime, one.stat().st_mtime + 5))
+        store.check_observations()
+
+        listed = {item["reference"].split("/")[-1]: item for item in store.needing_index()}
+        assert set(listed) == {"one.md"}, listed
+        boxes = listed["one.md"]["boxes"]
+        assert boxes and boxes[0]["name"] == "Notes" and boxes[0]["inside"] is True
+        assert boxes[0]["uuid"] == holder.uuid
+        assert listed["one.md"]["fixable"] is True
+    finally:
+        store.close()

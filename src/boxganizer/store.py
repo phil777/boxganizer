@@ -18,6 +18,7 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 from boxganizer import boxtypes, config, filters, paths, resources
 from boxganizer.errors import (
@@ -946,6 +947,94 @@ class BoxStore:
             "unreadable": unreadable,
             "untouched": number("untouched"),
         }
+
+    def needing_index(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Which boxes are waiting on the index, and what is waiting for them.
+
+        The standing status line is one number. When somebody clicks it they want names, and
+        a number that cannot be interrogated is decoration. Three states are told apart
+        because the advice differs: a file that changed will be fixed by a pass, a file never
+        read is waiting for its first one, and a file that was read and gave up — a binary, an
+        archive, something too big — will still be there after any number of passes, and saying
+        "2 to reindex" about one of those is a promise this feature cannot keep.
+
+        A resource may be shared by several boxes, so all of them come back: reindexing is a
+        decision about the file, and a person should see whose boxes it will change.
+        """
+        rows = self._rows(
+            """
+            SELECT
+                r.id                    AS id,
+                r.reference             AS reference,
+                r.origin                AS origin,
+                r.indexed_at            AS indexed_at,
+                r.stale                 AS stale,
+                b.uuid                  AS uuid,
+                b.name                  AS name,
+                pb.uuid                 AS parent_uuid,
+                pb.name                 AS parent_name
+              FROM resources r
+              LEFT JOIN boxes b ON b.resource_id = r.id
+              LEFT JOIN resource_link l ON l.child_id = r.id
+              LEFT JOIN boxes pb ON pb.resource_id = l.parent_id
+             WHERE r.index_it = 1 AND r.is_dir = 0
+               AND (
+                    r.stale = 1
+                    OR r.indexed_at IS NULL
+                    /* A file that was read and gave up no text is only worth naming if it has
+                       text in it: an empty note, or a checklist nobody has typed into yet, has
+                       no words to bring in and would sit in this list forever. `bytes` is what
+                       the last look at the file said, so this asks the same question the index
+                       already answered rather than guessing from the name. */
+                    OR (r.bytes > 0 AND NOT EXISTS (
+                          SELECT 1 FROM resource_text t WHERE t.resource_id = r.id
+                        ))
+                  )
+             ORDER BY r.reference, b.name, pb.name
+            """,
+        )
+        by_resource: dict[int, dict[str, Any]] = {}
+        order: list[int] = []
+        for row in rows:
+            entry = by_resource.get(int(row["id"]))
+            if entry is None:
+                if row["stale"]:
+                    why, words, fixable = "changed", "changed since it was last read", True
+                elif row["indexed_at"] is None:
+                    why, words, fixable = "never", "has not been read yet", True
+                else:
+                    # Named, and left out of the count in the status line: a pass will read it
+                    # again, find no words again, and the list will be exactly as long tomorrow.
+                    why, words, fixable = (
+                        "nothing",
+                        "has bytes but gave up no text to index",
+                        False,
+                    )
+                entry = {
+                    "resource_id": int(row["id"]),
+                    "reference": resources.display(str(row["reference"])),
+                    "why": why,
+                    "words": words,
+                    "fixable": fixable,
+                    "boxes": [],
+                }
+                by_resource[int(row["id"])] = entry
+                order.append(int(row["id"]))
+            holder = (
+                {"uuid": row["uuid"], "name": row["name"]}
+                if row["uuid"]
+                else (
+                    {"uuid": row["parent_uuid"], "name": row["parent_name"], "inside": True}
+                    if row["parent_uuid"]
+                    else None
+                )
+            )
+            if holder and holder not in entry["boxes"]:
+                entry["boxes"].append(holder)
+        collected = [by_resource[key] for key in order][:limit]
+        for entry in collected:
+            entry["count"] = len(entry["boxes"])
+        return collected
 
     def indexed_resources(self) -> list[resources.Resource]:
         """Every resource the index is being kept up to date for."""

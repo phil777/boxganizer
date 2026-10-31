@@ -522,12 +522,19 @@ pre.text {
   display: flex;
   overflow: hidden;
 }
-.cell-content > * { min-width: 0; min-height: 0; }
-.cell-content .icon-view { width: 100%; }
-.cell-content .image-view,
-.cell-content .text-view,
-.cell-content .children-view,
-.cell-content .grid-board { width: 100%; height: 100%; }
+/* A view drawn inside a cell fills the cell.
+
+   This rule used to name the views that existed when it was written. Every view added since
+   then — the checklist, the note — arrived shrink-to-fit, and drew a 317-pixel strip in a
+   539-pixel cell: a checklist that looked like a note stuck to the left of its own box. The
+   general statement is the one that stays true. */
+.cell-content > * {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
 .cell-content .children-toolbar { display: none; }
 .cell-content .child { padding: 0.15rem 0.25rem; }
 .cell-caption { font-size: 0.7rem; opacity: 0.75; text-align: center; flex: none; }
@@ -1411,16 +1418,39 @@ pre.text {
 /* ---------- the standing index line ---------- */
 #side-status {
   display: flex;
+  /* the count is a fact about the library and sits where a fact starts; the index is a
+     thing that may need doing, so it sits at the end, where the eye checks before acting */
   align-items: baseline;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 0.5rem;
 }
+
 .index-status {
-  /* Out of date is the one state worth colouring: everything else is the index being
-     what it is supposed to be. */
+  /* it looks like the sentence it has always been, and it is a button: the difference is
+     that it now answers when clicked */
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
   color: inherit;
+  cursor: pointer;
+  text-align: right;
   white-space: nowrap;
 }
+
+.index-status:disabled {
+  cursor: default;
+}
+
+.index-status:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+/* Out of date is the one state worth colouring: everything else is the index being
+   what it is supposed to be. */
+.index-status { color: inherit; }
 .index-status.has-stale {
   color: var(--accent);
   font-weight: 600;
@@ -1428,6 +1458,74 @@ pre.text {
 .index-status.is-running {
   opacity: 0.75;
   font-style: italic;
+}
+
+.pending-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.pending-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.pending-list .pending-what {
+  /* the file is the longest thing in the row and the one worth reading */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pending-list .pending-why {
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.pending-list .pending-box {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 999px;
+  background: none;
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.05rem 0.45rem;
+  cursor: pointer;
+}
+
+.pending-list .pending-box.inside {
+  border-style: dashed;
+}
+
+.pending-heading {
+  display: block;
+  padding: 0.7rem 0 0.2rem;
+  border: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.pending-caveat {
+  display: block;
+  border: 0;
+  padding: 0.15rem 0 0.35rem;
+  font-size: 0.8rem;
+  font-style: italic;
+  opacity: 0.72;
+}
+
+.pending-none {
+  color: #1a7f37;
 }
 #box-count {
   white-space: nowrap;

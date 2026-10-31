@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2598,14 +2599,19 @@ def test_about_reports_the_version_the_server_is_running(client: TestClient) -> 
 def test_the_index_is_reported_on_every_panel_and_can_be_run_from_the_page(
     client: TestClient,
 ) -> None:
-    """The status sits in front of the count, and the action that fills it is one click away."""
+    """The count leads, the index ends the line, and the action that fills it is one click away.
+
+    (This rule changed: the two used to be crammed together at the right edge, index first.
+    See `test_the_status_line_is_two_halves_and_one_of_them_is_a_button` for why.)
+    """
     page = client.get("/").text
     assert 'id="index-status"' in page
     assert 'id="box-count"' in page
+    assert page.index('id="box-count"') < page.index('id="index-status"')
     css = client.get("/static/app.css").text
     start = css.index("#side-status {")
     rule = css[start : css.index("}", start)]
-    assert "justify-content: flex-end;" in rule
+    assert "justify-content: space-between;" in rule
 
     status = client.get("/api/index/status").json()
     assert {"wanted", "indexed", "outstanding", "stale", "folders", "unreadable"} <= set(status)
@@ -2742,7 +2748,7 @@ def test_the_type_list_says_which_types_this_install_cannot_run(client: TestClie
     assert set(kinds["mqtt"]) >= {"available", "unavailable_reason"}
     assert kinds["folder"]["available"] is True
     script = client.get("/static/app.js").text
-    assert '— not in this install' in script
+    assert "— not in this install" in script
     assert "modalWarning(modal, kind.available === false" in script
     page = client.get("/").text
     assert 'id="nb-warning"' in page and 'id="eb-warning"' in page
@@ -2759,7 +2765,7 @@ def test_a_refused_mqtt_box_stops_retrying_and_keeps_the_reason(client: TestClie
     event: the page closes the stream and leaves the server's words where they are.
     """
     script = client.get("/static/app.js").text
-    view = script[script.index("const mqttView = {") : script.index("registerView(\"mqtt\"")]
+    view = script[script.index("const mqttView = {") : script.index('registerView("mqtt"')]
     assert '"connecting", "live", "value", "retrying", "refused"' in view
     assert "if (refused) return;" in view
     assert "source.close();" in view
@@ -2771,3 +2777,100 @@ def test_a_refused_mqtt_box_stops_retrying_and_keeps_the_reason(client: TestClie
     states = script[script.index("const MQTT_STATES = {") :]
     assert "refused:" in states[: states.index("};")]
     assert "error:" not in states[: states.index("};")]
+
+
+def test_the_status_line_is_two_halves_and_one_of_them_is_a_button(client: TestClient) -> None:
+    """ "37 boxes" starts the line; what the index is behind ends it, and opens when clicked.
+
+    Both halves used to sit at the right edge, with the index first, so the line read as one
+    long complaint about the index and the count — the fact worth knowing — ended it. And the
+    number was a claim nobody could interrogate: "2 to reindex" with no way to ask which two.
+    """
+    page = client.get("/").text
+    count_at = page.index('id="box-count"')
+    status_at = page.index('id="index-status"')
+    assert count_at < status_at, "the count comes first: it is the sentence, not the tail"
+    assert '<button type="button" id="index-status"' in page
+    assert 'aria-label="What the index is waiting for"' in page
+    assert 'id="pending-reindex"' in page and 'id="pending-look"' in page
+    css = client.get("/static/app.css").text
+    line_rule = css[css.index("#side-status {") :]
+    line_rule = line_rule[: line_rule.index("}")]
+    assert "justify-content: space-between;" in line_rule
+    assert "flex-end" not in line_rule, "the count must not be pushed to the right with it"
+
+    script = client.get("/static/app.js").text
+    assert 'indexPending: () => request("/api/index/pending")' in script
+    assert 'el("index-status").addEventListener("click", openIndexModal)' in script
+    words = script[script.index("function indexWords(") :]
+    words = words[: words.index("\n}\n")]
+    # "out of date" is gone: the line says what a pass would do about it
+    assert "out of date" not in words
+    assert "to reindex" in words and "to index" in words
+    # and a number with nothing behind it is not a control
+    assert "spot.disabled = waiting === 0;" in script
+
+
+def test_the_pending_list_tells_work_apart_from_a_dead_end(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """A file that has nothing to index would sit in this list forever.
+
+    So it is named — that is useful — in its own group, marked unfixable, and left out of the
+    number on the panel. A list that counted it as work would be a promise this feature cannot
+    keep, and a person would press "Reindex them" every morning for a year.
+    """
+    store = BoxStore(tmp_path / "pend.db", content_root=tmp_path)
+    try:
+        note = tmp_path / "note.md"
+        note.write_text("words about plumbing", encoding="utf-8")
+        box = store.add(Box(name="Note", box_type="markdown", resource_uri=str(note)))
+        with TestClient(create_app(store, content_root=tmp_path)) as test_client:
+            assert test_client.get("/api/index/pending").json()["items"] == []
+            note.write_text("words about plumbing and boilers", encoding="utf-8")
+            os.utime(note, (note.stat().st_atime, note.stat().st_mtime + 5))
+            # the rows are what this answers from, so look at the files first — which is what
+            # the dialog's "Look at the files again" button does, and what opening the panel
+            # with `check=1` already did
+            test_client.get("/api/index/status?check=1")
+            body = test_client.get("/api/index/pending").json()
+            items = body["items"]
+            assert [item["why"] for item in items] == ["changed"]
+            assert items[0]["fixable"] is True
+            assert [held["name"] for held in items[0]["boxes"]] == ["Note"]
+            assert items[0]["count"] == 1
+            assert body["wanted"] >= 1
+            assert box.name == "Note"
+
+            # a file with nothing searchable in it is named, and not offered as work
+            store._execute(
+                "UPDATE resources SET indexed_at = '2026-01-01T00:00:00+00:00', bytes = 4096,"
+                " stale = 0",
+            )
+            store._execute("DELETE FROM resource_text")
+            body = test_client.get("/api/index/pending").json()
+            assert [item["fixable"] for item in body["items"]] == [False]
+            assert "no text" in body["items"][0]["words"]
+
+        script = client.get("/static/app.js").text
+        assert "items.filter((item) => item.fixable)" in script
+        assert "Reindexing will not change this one." in script
+        assert "it has\n      \" no row until something walks the folder" not in script
+    finally:
+        store.close()
+
+
+def test_a_view_in_a_cell_fills_the_cell(client: TestClient) -> None:
+    """The bug: a checklist drew a 317px strip in a 539px cell.
+
+    The rule named the views that existed when it was written — image, text, children, grid —
+    and every view added since arrived shrink-to-fit inside a box the width of the pane.
+    """
+    css = client.get("/static/app.css").text
+    block = css[css.index(".cell-content > * {") :]
+    block = block[: block.index("}")]
+    assert "width: 100%;" in block and "height: 100%;" in block
+    assert "min-width: 0;" in block and "min-height: 0;" in block
+    # the enumeration is gone, because that was the bug rather than the fix
+    assert ".cell-content .image-view," not in css
+    assert ".cell-content .icon-view { width: 100%; }" not in css

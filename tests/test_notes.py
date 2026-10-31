@@ -86,9 +86,7 @@ def test_the_words_of_a_note_are_found_by_search(store: BoxStore, client: TestCl
     assert "Boiler" in [hit["name"] for hit in hits]
 
 
-def test_a_note_is_reindexed_every_time_it_is_written(
-    store: BoxStore, client: TestClient
-) -> None:
+def test_a_note_is_reindexed_every_time_it_is_written(store: BoxStore, client: TestClient) -> None:
     note = store.add(Box(name="Boiler", box_type="note"))
     client.put(f"/api/boxes/{note.uuid}/note", json={"source": "anode corroding badly"})
     client.put(f"/api/boxes/{note.uuid}/note", json={"source": "thermocouple replaced"})

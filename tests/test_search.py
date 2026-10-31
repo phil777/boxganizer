@@ -40,9 +40,7 @@ def _pdf_with(text: str) -> bytes:
     out += b"0000000000 65535 f \n"
     for offset in offsets:
         out += f"{offset:010d} 00000 n \n".encode()
-    out += (
-        f"trailer\n<< /Size {len(body) + 1} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode()
-    )
+    out += f"trailer\n<< /Size {len(body) + 1} /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode()
     return bytes(out)
 
 
@@ -138,9 +136,7 @@ def test_a_user_file_is_merged_with_the_bundled_words(
         search.reset_thesaurus()
 
 
-def test_a_broken_user_file_is_ignored(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_a_broken_user_file_is_ignored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data = tmp_path / "data"
     data.mkdir()
     (data / "thesaurus.json").write_text("{not json", encoding="utf-8")
