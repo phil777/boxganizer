@@ -7079,7 +7079,11 @@ async function noteView(canvas, box, ctx, opts = {}) {
   wrap.dataset.format = format;
 
   const bar = document.createElement("div");
-  bar.className = "note-bar box-config";
+  // Not `box-config`: the gear folds a box's *settings*, and this row is the note's toolbar —
+  // format, the edit switch, the markdown toolbox. Folding it meant the way to start writing a
+  // note lived behind an icon one click away from being unnoticed, which is a stranger claim about
+  // a note than "choose what this box is" ever was. The cue on the sheet still says the state.
+  bar.className = "note-bar";
   wrap.append(bar);
 
   const surface = document.createElement("div");
@@ -7181,14 +7185,30 @@ async function noteView(canvas, box, ctx, opts = {}) {
       // a button, and `aria-pressed` carries the state for anyone not reading the label.
       const shape = document.createElement("div");
       shape.className = "note-group";
+      // A switch, not a button that changes name. The two-state button worked, but it read as an
+      // action ("Write") rather than a state, so the note's condition had to be remembered from
+      // the last click instead of seen. A switch shows the condition where the action used to be,
+      // and the word beside it is the thing being switched — it does not move.
+      // (Plain-text notes have no rendering to look at, so they are always editable and the
+      // switch is not offered for them; that is `format !== "markdown"` above, unchanged here.)
       const mode = document.createElement("button");
       mode.type = "button";
+      mode.className = "note-switch";
       mode.dataset.toggle = "mode";
-      mode.textContent = writing ? "Read" : "Write";
+      mode.setAttribute("role", "switch");
+      mode.setAttribute("aria-checked", String(writing));
       mode.title = writing
-        ? "stop editing and read the note as it will be read"
-        : "edit the note's own text";
-      mode.setAttribute("aria-pressed", String(writing));
+        ? "editing this note — click to read it as it will be read"
+        : "this note is read-only — click to edit its text";
+      const word = document.createElement("span");
+      word.className = "note-switch-label";
+      word.textContent = "edit";
+      const track = document.createElement("span");
+      track.className = "note-switch-track";
+      const knob = document.createElement("span");
+      knob.className = "note-switch-knob";
+      track.append(knob);
+      mode.append(word, track);
       mode.addEventListener("click", () => setWriting(!writing));
       shape.append(mode);
       bar.append(shape);

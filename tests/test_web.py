@@ -3111,7 +3111,6 @@ def test_the_settings_row_is_marked_by_convention_not_by_a_list_of_views(
         "markdown-bar",
         "mindmap-toolbar",
         "mqtt-head",
-        "note-bar",
         "ssh-head",
         "vnc-controls",
         "browser-bar",
@@ -3120,6 +3119,10 @@ def test_the_settings_row_is_marked_by_convention_not_by_a_list_of_views(
     assert script.count("box-config") >= 12
     # a row that *reports* is not a row that *configures*: the checklist head shows a tally
     assert '"checklist-head box-config"' not in script
+    # and a row that is how you *write* is not a setting either: folding the note's toolbar behind
+    # the gear meant the way to start editing a note was one unnoticed click away (task-1)
+    assert 'bar.className = "note-bar";' in script
+    assert '"note-bar box-config"' not in script
     # and the stylesheet mentions no view name to find the drawer
     assert ".children-toolbar" in css  # existing rules may still style it
     drawer = css[
@@ -3268,8 +3271,15 @@ def test_the_note_says_whether_it_can_be_typed_into_without_opening_the_drawer(
     note = script[script.index("function paintBar()") :]
     note = note[: note.index("function paintEditor") if "function paintEditor" in note else 3000]
     assert 'mode.dataset.toggle = "mode";' in script
-    assert 'writing ? "Read" : "Write"' in script
-    assert 'mode.setAttribute("aria-pressed", String(writing))' in script
+    assert 'mode.setAttribute("role", "switch");' in script
+    assert 'mode.setAttribute("aria-checked", String(writing));' in script
+    assert 'word.textContent = "edit";' in script
+    # the word beside the switch is the state's name and never changes; only `aria-checked` moves
+    assert 'writing ? "Read" : "Write"' not in script
+    assert 'word.className = "note-switch-label";' in script
+    # the state lives in the switch now; a leftover pressed-button attribute would mean two
+    # different accessibility stories for one control
+    assert 'mode.setAttribute("aria-pressed", String(writing))' not in script
     assert 'toggle(shape, "mode", "Read"' not in script
     assert 'toggle(shape, "mode", "Write"' not in script
     # the cue is on the note, replaced rather than accumulated, and styled as a warning/ok pair
@@ -3277,6 +3287,13 @@ def test_the_note_says_whether_it_can_be_typed_into_without_opening_the_drawer(
     assert 'className = writing ? "note-cue editing" : "note-cue readonly"' in script
     css = client.get("/static/app.css").text
     assert ".note-cue.readonly" in css and ".note-cue.editing" in css
+    for rule in (
+        ".note-switch",
+        ".note-switch-track",
+        ".note-switch-knob",
+        '.note-switch[aria-checked="true"]',
+    ):
+        assert rule in css, rule
     assert (
         ".note-view {" in css
         and "position: relative"

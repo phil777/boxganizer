@@ -1097,6 +1097,58 @@ pre.text {
   margin: 0;
 }
 
+/* The note's edit switch: the state is the picture, the word is the state's name and never moves. */
+.note-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: inherit;
+  font-size: 0.78rem;
+  background: none;
+  border: 0;
+  padding: 0.1rem 0.15rem;
+  cursor: pointer;
+}
+
+.note-switch-track {
+  position: relative;
+  display: inline-block;
+  width: 1.7rem;
+  height: 0.95rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  transition: background 0.12s ease;
+}
+
+.note-switch-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+  transition: left 0.12s ease;
+}
+
+.note-switch[aria-checked="true"] .note-switch-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.note-switch[aria-checked="true"] .note-switch-knob {
+  left: calc(100% - 0.8rem);
+  opacity: 1;
+  background: #fff;
+}
+
+.note-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* What a dynamic folder asks for, and the controls to change it. */
 .filter-bar {
   display: flex;
