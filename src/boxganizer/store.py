@@ -20,7 +20,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from boxganizer import boxtypes, config, filters, paths, resources
+from boxganizer import boxtypes, config, filters, paths, resources, tags
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
@@ -44,7 +44,7 @@ from boxganizer.models import DEFAULT_ICON, Box, canonical_name, new_uuid
 #: indexed once serves every box that points at it — and "does this need reindexing?"
 #: finally has somewhere to be remembered. See :mod:`boxganizer.resources` and
 #: :meth:`BoxStore._split_resources_out`.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = f"""
 PRAGMA user_version = {SCHEMA_VERSION};
@@ -134,6 +134,47 @@ CREATE TABLE IF NOT EXISTS resource_link (
 ) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS resource_link_child_idx ON resource_link (child_id);
+
+/*
+ * Tags: the person's own words for what a box is *about*.
+ *
+ * The type says what a box is; a tag says what it concerns, and a box concerns several things
+ * at once. `COLLATE NOCASE` is what makes `Home` and `home` one tag rather than two chips that
+ * look identical — the difference between them is never what somebody meant.
+ *
+ * One parent, so the tags are a tree. A tag with two parents would make a box's implied tags
+ * depend on which path was walked to them, and `tag:home` in a filter would stop meaning one
+ * thing.
+ *
+ * Deleting a tag leaves its children parentless in the schema, which is the safety net for a
+ * database edited outside Boxganizer; `BoxStore.delete_tag` re-parents them properly first.
+ */
+CREATE TABLE IF NOT EXISTS tags (
+    id        INTEGER PRIMARY KEY,
+    name      TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    parent_id INTEGER REFERENCES tags (id) ON DELETE SET NULL,
+    /* An explicit colour, or NULL to take the one derived from the tag's root. Most tags want
+       the derived one: forty hand-picked colours is a library that looks like a bag of
+       marbles. */
+    colour    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS tags_parent_idx ON tags (parent_id);
+
+/*
+ * The tags a box was *given*. Everything inherited from them is computed by
+ * `boxganizer.tags.Hierarchy.implied`, because storing the inheritance as well would be two
+ * copies of one fact, and a tag moved in the hierarchy would leave the old parents behind on
+ * every box that had inherited them.
+ */
+CREATE TABLE IF NOT EXISTS box_tags (
+    box_id INTEGER NOT NULL REFERENCES boxes (id) ON DELETE CASCADE,
+    tag_id INTEGER NOT NULL REFERENCES tags (id) ON DELETE CASCADE,
+    PRIMARY KEY (box_id, tag_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS box_tags_tag_idx ON box_tags (tag_id);
+
 
 CREATE INDEX IF NOT EXISTS resources_stale_idx ON resources (stale, index_it);
 
@@ -1136,6 +1177,323 @@ class BoxStore:
                     )
                 )
         return stale
+
+    # -- tags -----------------------------------------------------------------
+    #
+    # A tag is a name the person chose, and the hierarchy above it is what makes one name mean
+    # a family of them. The explicit set (what was given to the box) and the implied set (what
+    # that commits the box to) are kept apart everywhere they are shown: un-tagging an
+    # inherited tag means moving it in the hierarchy, not editing the box, and a UI that blurred
+    # the two would offer an action that does nothing.
+
+    def hierarchy(self) -> tags.Hierarchy:
+        """Every tag, with the parent links, ready to be asked questions."""
+        return tags.Hierarchy.build(
+            tags.Tag(
+                name=str(row["name"]),
+                parent=None if row["parent_id"] is None else self._tag_name(int(row["parent_id"])),
+                id=int(row["id"]),
+                colour=None if row["colour"] is None else str(row["colour"]),
+            )
+            for row in self._rows("SELECT id, name, parent_id, colour FROM tags ORDER BY name")
+        )
+
+    def _tag_name(self, tag_id: int) -> str | None:
+        row = self._rows("SELECT name FROM tags WHERE id = ?", (tag_id,))
+        return None if not row else str(row[0]["name"])
+
+    def _tag_row(self, name: str) -> sqlite3.Row | None:
+        """The tag row for a name, whatever case it was typed in.
+
+        `COLLATE NOCASE` on the column is what makes this find `Home` when `home` is asked for,
+        which is the same rule `canonical()` states for every other comparison: the difference
+        between two chips that look alike is never what somebody meant.
+        """
+        rows = self._rows(
+            "SELECT id, name, parent_id, colour FROM tags WHERE name = ?", (name.strip(),)
+        )
+        return rows[0] if rows else None
+
+    def tag_id(self, name: str) -> int | None:
+        """The id of a tag by name, or None. Names are the identity a person sees."""
+        row = self._tag_row(name)
+        return None if row is None else int(row["id"])
+
+    def add_tag(
+        self, name: str, *, parent: str | None = None, colour: str | None = None
+    ) -> tags.Tag:
+        """Create one tag, under `parent` if there is one.
+
+        A colour is accepted only in a form this module can reason about, because a chip whose
+        colour the browser silently rejects is a chip nobody can read — and the text colour is
+        derived from it, which needs to be able to parse it too.
+        """
+        clean = tags.validate(name)
+        if self.tag_id(clean) is not None:
+            raise tags.TagError(f"there is already a tag called {clean!r}")
+        parent_id = None
+        if parent is not None and parent.strip():
+            row = self._tag_row(parent)
+            if row is None:
+                raise tags.TagError(f"there is no tag {str(parent)!r} to put {clean!r} inside")
+            parent_id = int(row["id"])
+            if self.hierarchy().depth(str(row["name"])) + 1 >= tags.MAX_DEPTH:
+                raise tags.TagError(
+                    f"{clean!r} would be more than {tags.MAX_DEPTH} levels deep; that is a "
+                    "filing cabinet, not a tag"
+                )
+        wanted = tags.validate_colour(colour) if colour else None
+        self._execute(
+            "INSERT INTO tags (name, parent_id, colour) VALUES (?, ?, ?)",
+            (clean, parent_id, wanted),
+        )
+        return tags.Tag(name=clean, parent=parent, id=self.tag_id(clean), colour=wanted)
+
+    def add_tag_path(self, path: str) -> tags.Tag:
+        """Create a tag and any parents its path names, and return the leaf.
+
+        This is what a person typing `home/kitchen/boiler` into a field means: one gesture, a
+        branch. Making them create the parents first would be a rule about the schema rather
+        than about their filing.
+        """
+        parts = tags.split_path(path)
+        if not parts:
+            raise tags.TagError("a tag needs a name")
+        if len(parts) > tags.MAX_DEPTH:
+            # Checked on the whole path, not only per level: each individual step of a seven-name
+            # path is legal on its own, which is how a limit enforced one level at a time is no
+            # limit at all.
+            raise tags.TagError(
+                f"{path!r} is {len(parts)} levels deep and a tag path stops at {tags.MAX_DEPTH}"
+            )
+        parent: str | None = None
+        made: tags.Tag | None = None
+        for part in parts:
+            existing = self.tag_id(part)
+            if existing is None:
+                made = self.add_tag(part, parent=parent)
+            else:
+                made = tags.Tag(
+                    name=str(self._tag_name(existing)),
+                    parent=parent,
+                    id=existing,
+                )
+            parent = made.name
+        assert made is not None
+        return made
+
+    def rename_tag(self, name: str, new_name: str) -> tags.Tag:
+        """Rename a tag in place. Boxes keep holding it, and the path shows the new name."""
+        row = self._tag_row(name)
+        if row is None:
+            raise tags.TagError(f"there is no tag {name!r}")
+        clean = tags.validate(new_name)
+        clash = self.tag_id(clean)
+        if clash is not None and clash != int(row["id"]):
+            raise tags.TagError(f"there is already a tag called {clean!r}")
+        self._execute("UPDATE tags SET name = ? WHERE id = ?", (clean, int(row["id"])))
+        return tags.Tag(
+            name=clean,
+            parent=self._tag_name(int(row["parent_id"])) if row["parent_id"] else None,
+            id=int(row["id"]),
+            colour=None if row["colour"] is None else str(row["colour"]),
+        )
+
+    def move_tag(self, name: str, parent: str | None) -> tags.Tag:
+        """Re-parent a tag — the one edit that can make a hierarchy stop being one."""
+        row = self._tag_row(name)
+        if row is None:
+            raise tags.TagError(f"there is no tag {name!r}")
+        held = str(row["name"])
+        wanted = (parent or "").strip() or None
+        if wanted:
+            target = self._tag_row(wanted)
+            if target is None:
+                raise tags.TagError(f"there is no tag {wanted!r} to move {held!r} inside")
+            if self.hierarchy().would_cycle(held, str(target["name"])):
+                raise tags.TagError(
+                    f"{held!r} cannot go inside {str(target['name'])!r}: that would put a tag "
+                    "inside itself, and the tree would never finish drawing"
+                )
+            depth = self.hierarchy().depth(str(target["name"])) + 1
+            below = max(
+                (
+                    self.hierarchy().depth(descendant)
+                    for descendant in self.hierarchy().descendants_of(held)
+                ),
+                default=depth - 1,
+            )
+            if depth + (below - self.hierarchy().depth(held)) > tags.MAX_DEPTH:
+                raise tags.TagError(
+                    f"moving {held!r} there would push a tag past {tags.MAX_DEPTH} levels"
+                )
+            parent_id: int | None = int(target["id"])
+        else:
+            parent_id = None
+        self._execute("UPDATE tags SET parent_id = ? WHERE id = ?", (parent_id, int(row["id"])))
+        return tags.Tag(name=held, parent=wanted, id=int(row["id"]))
+
+    def set_tag_colour(self, name: str, colour: str | None) -> tags.Tag:
+        """Choose a colour for a tag, or None to hand it back to the derived palette."""
+        row = self._tag_row(name)
+        if row is None:
+            raise tags.TagError(f"there is no tag {name!r}")
+        wanted = tags.validate_colour(colour) if colour else None
+        self._execute("UPDATE tags SET colour = ? WHERE id = ?", (wanted, int(row["id"])))
+        return tags.Tag(
+            name=str(row["name"]),
+            parent=self._tag_name(int(row["parent_id"])) if row["parent_id"] else None,
+            id=int(row["id"]),
+            colour=wanted,
+        )
+
+    def delete_tag(self, name: str) -> dict[str, object]:
+        """Remove a tag: its children take its place, its boxes stop holding it.
+
+        Re-parenting rather than deleting the branch is the whole reason this is a decision and
+        not a `DELETE`: a person removing the word `home` from a library does not mean they want
+        `boiler`, `garden` and `invoices` untagged as well, and a delete that quietly empties
+        hundreds of boxes is not reversible from a confirmation dialog nobody reads carefully.
+        """
+        row = self._tag_row(name)
+        if row is None:
+            raise tags.TagError(f"there is no tag {name!r}")
+        held_id, parent_id, held = int(row["id"]), row["parent_id"], str(row["name"])
+        children = [
+            str(child["name"])
+            for child in self._rows("SELECT name FROM tags WHERE parent_id = ?", (held_id,))
+        ]
+        self._execute("UPDATE tags SET parent_id = ? WHERE parent_id = ?", (parent_id, held_id))
+        boxes = self._rows("SELECT box_id FROM box_tags WHERE tag_id = ?", (held_id,))
+        self._execute("DELETE FROM box_tags WHERE tag_id = ?", (held_id,))
+        self._execute("DELETE FROM tags WHERE id = ?", (held_id,))
+        return {
+            "tag": held,
+            "reparented": children,
+            "boxes": len(boxes),
+        }
+
+    def assign_tag(self, box: Box | str, name: str) -> tuple[str, ...]:
+        """Give a box a tag, creating the tag when the name is new.
+
+        A new name typed into a tag field is the person inventing a tag, and asking them to
+        create it somewhere else first is a workflow invented by the schema.
+        """
+        held = self._tag_row(name)
+        if held is None:
+            made = self.add_tag_path(name)
+            tag_id = int(made.id or 0)
+        else:
+            tag_id = int(held["id"])
+        self._execute(
+            "INSERT OR IGNORE INTO box_tags (box_id, tag_id) VALUES (?, ?)",
+            (self._box_id_for(box), tag_id),
+        )
+        return self.box_tags(box)
+
+    def unassign_tag(self, box: Box | str, name: str) -> tuple[str, ...]:
+        """Take one tag off a box. An inherited tag is not a thing to take off here."""
+        tag_id = self.tag_id(name)
+        if tag_id is None:
+            return self.box_tags(box)
+        box_id = self._box_id_for(box)
+        self._execute("DELETE FROM box_tags WHERE box_id = ? AND tag_id = ?", (box_id, tag_id))
+        return self.box_tags(box)
+
+    def set_box_tags(self, box: Box | str, names: Iterable[str]) -> tuple[str, ...]:
+        """The whole explicit set, replacing what was there. Empty clears it."""
+        box_id = self._box_id_for(box)
+        wanted: list[int] = []
+        for raw in names:
+            text = str(raw).strip()
+            if not text:
+                continue
+            existing = self._tag_row(text)
+            wanted.append(int(existing["id"]) if existing else int(self.add_tag_path(text).id or 0))
+        self._execute("DELETE FROM box_tags WHERE box_id = ?", (box_id,))
+        for tag_id in dict.fromkeys(wanted):
+            self._execute(
+                "INSERT OR IGNORE INTO box_tags (box_id, tag_id) VALUES (?, ?)", (box_id, tag_id)
+            )
+        return self.box_tags(box)
+
+    def box_tags(self, box: Box | str) -> tuple[str, ...]:
+        """The tags this box was given, in the order they were added."""
+        rows = self._rows(
+            "SELECT t.name FROM box_tags bt JOIN tags t ON t.id = bt.tag_id"
+            " WHERE bt.box_id = ? ORDER BY bt.tag_id",
+            (self._box_id_for(box),),
+        )
+        return tuple(str(row["name"]) for row in rows)
+
+    def _box_id_for(self, box: Box | str) -> int:
+        """The row a box argument names, whether it is a Box, a name, or a uuid.
+
+        Resolved the same way every other interface resolves a box, because a second rule for
+        the same lookup is how a tag ends up on one box and reported on another.
+        """
+        if isinstance(box, Box) and box.id is not None:
+            return int(box.id)
+        found = self.resolve(box.name if isinstance(box, Box) else str(box))
+        if found.id is None:
+            raise BoxNotFound(str(box))
+        return int(found.id)
+
+    def tag_counts(self) -> dict[str, int]:
+        """How many boxes carry each tag explicitly, keyed on the canonical name."""
+        rows = self._rows(
+            "SELECT t.name AS name, COUNT(bt.box_id) AS held"
+            " FROM tags t LEFT JOIN box_tags bt ON bt.tag_id = t.id"
+            " GROUP BY t.id"
+        )
+        return {tags.canonical(str(row["name"])): int(row["held"]) for row in rows}
+
+    def tag_counts_including_inherited(self) -> dict[str, int]:
+        """How many boxes answer to each tag, its whole branch included.
+
+        Two counts, not one, because they answer two different questions: "how many boxes did I
+        put `home` on" is what a manage window shows beside the name you typed, and "how many
+        would a filter on `home` find" is what decides whether the tag is worth having. Shown
+        together they also explain the hierarchy without a paragraph about it.
+        """
+        hierarchy = self.hierarchy()
+        rows = self._rows(
+            "SELECT t.name AS name, bt.box_id AS box"
+            " FROM box_tags bt JOIN tags t ON t.id = bt.tag_id"
+        )
+        held: dict[str, set[int]] = {}
+        for row in rows:
+            box_id = int(row["box"])
+            for implied in hierarchy.implied([str(row["name"])]):
+                held.setdefault(tags.canonical(implied), set()).add(box_id)
+        return {key: len(value) for key, value in held.items()}
+
+    def boxes_with_tag(self, name: str, *, descendants: bool = True) -> list[str]:
+        """The uuids of boxes that answer to a tag, its whole branch included.
+
+        Asking about a parent means the children too — that is what the hierarchy is for, and
+        the alternative is a filter that says `tag:home` and finds the three boxes someone
+        tagged `home` directly while missing the forty they tagged `boiler`.
+        """
+        tag_id = self.tag_id(name)
+        if tag_id is None:
+            return []
+        wanted = {tag_id}
+        if descendants:
+            hierarchy = self.hierarchy()
+            for held in hierarchy.descendants_of(self._tag_name(tag_id) or name):
+                found = self.tag_id(held)
+                if found is not None:
+                    wanted.add(found)
+        marks = ",".join("?" for _ in wanted)
+        return [
+            str(row["uuid"])
+            for row in self._rows(
+                f"SELECT b.uuid FROM box_tags bt JOIN boxes b ON b.id = bt.box_id"
+                f" WHERE bt.tag_id IN ({marks}) ORDER BY b.name",
+                tuple(wanted),
+            )
+        ]
 
     # -- the full-text index ------------------------------------------------
     #

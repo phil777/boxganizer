@@ -36,6 +36,7 @@ from boxganizer import (
     paths,
     resources,
     ssh,
+    tags,
     thumbs,
     vnc,
 )
@@ -325,6 +326,33 @@ class IndexRun(BaseModel):
     scope: str = "outstanding"
 
 
+class TagCreate(BaseModel):
+    """A new tag: one name, a path, or both (`home/kitchen` under nothing)."""
+
+    name: str
+    parent: str | None = None
+    colour: str | None = None
+
+
+class TagEdit(BaseModel):
+    """What to change about a tag. Omitted fields are left alone.
+
+    `parent` is a name, or "" for the top of the tree — because "make this a root" has to be
+    sayable, and leaving the field out cannot mean both "unchanged" and "no parent".
+    """
+
+    name: str | None = None
+    parent: str | None = None
+    colour: str | None = None
+    clear_colour: bool = False
+
+
+class BoxTags(BaseModel):
+    """The whole tag set for one box. Empty clears it."""
+
+    tags: list[str] = Field(default_factory=list)
+
+
 class VncOpen(BaseModel):
     """The password a screen wants, if it wants one.
 
@@ -525,6 +553,12 @@ def create_app(
         """
         return JSONResponse(
             status_code=422, content={"detail": {"error": "bad_placement", "reason": str(exc)}}
+        )
+
+    @app.exception_handler(tags.TagError)
+    async def _bad_tag(request: Request, exc: tags.TagError) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content={"detail": {"error": "bad_tag", "reason": str(exc)}}
         )
 
     @app.exception_handler(MqttError)
@@ -1827,6 +1861,126 @@ def create_app(
             media_type="text/event-stream",
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
         )
+
+    def _tag_nodes(store: BoxStore) -> list[dict[str, Any]]:
+        """The whole hierarchy, with the colour and the count each chip needs.
+
+        Computed here rather than in the page: the colour is derived from a tag's root, the page
+        would have to reimplement that rule to draw one chip, and a chip that disagrees with the
+        manage window about a tag's colour is a bug report waiting to happen.
+        """
+        hierarchy = store.hierarchy()
+        counts = store.tag_counts()
+        held = store.tag_counts_including_inherited()
+        nodes: list[dict[str, Any]] = []
+        for tag in hierarchy.tags:
+            colour = tags.colour_for(hierarchy, tag.name)
+            nodes.append(
+                {
+                    "name": tag.name,
+                    "parent": tag.parent,
+                    "path": list(hierarchy.path(tag.name)),
+                    "depth": hierarchy.depth(tag.name),
+                    "colour": colour,
+                    "text": tags.text_colour_for(colour),
+                    "explicit_colour": tag.colour,
+                    "count": counts.get(tags.canonical(tag.name), 0),
+                    "includingBelow": held.get(tags.canonical(tag.name), 0),
+                }
+            )
+        nodes.sort(key=lambda node: (tags.canonical(node["parent"] or ""), node["name"].casefold()))
+        return nodes
+
+    @app.get("/api/tags")
+    def read_tags(store: StoreDep) -> dict[str, Any]:
+        """Every tag in the library, in tree order, with what each one is worth."""
+        return {"tags": _tag_nodes(store)}
+
+    @app.post("/api/tags", status_code=201)
+    def create_tag(store: StoreDep, body: TagCreate) -> dict[str, Any]:
+        try:
+            made = (
+                store.add_tag(body.name, parent=body.parent, colour=body.colour)
+                if "/" not in body.name
+                else store.add_tag_path(body.name)
+            )
+        except tags.TagError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_tag", "reason": str(exc)}
+            ) from exc
+        return {"name": made.name, "parent": made.parent, "tags": _tag_nodes(store)}
+
+    @app.patch("/api/tags/{name}")
+    def edit_tag(name: str, store: StoreDep, body: TagEdit) -> dict[str, Any]:
+        """Rename, re-parent or re-colour one tag.
+
+        All three in one call because the manage window edits a tag as a row, and three round
+        trips for one row edited is three chances for two of them to land.
+        """
+        try:
+            if body.colour is not None or body.clear_colour:
+                store.set_tag_colour(
+                    name, None if body.clear_colour else str(body.colour or "").strip() or None
+                )
+            if body.parent is not None:
+                store.move_tag(name, body.parent.strip() or None)
+            if body.name and tags.canonical(body.name) != tags.canonical(name):
+                store.rename_tag(name, body.name)
+        except tags.TagError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_tag", "reason": str(exc)}
+            ) from exc
+        return {"tags": _tag_nodes(store)}
+
+    @app.delete("/api/tags/{name}")
+    def remove_tag(name: str, store: StoreDep) -> dict[str, Any]:
+        """Delete a tag. Its children take its place; its boxes are told."""
+        try:
+            done = store.delete_tag(name)
+        except tags.TagError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_tag", "reason": str(exc)}
+            ) from exc
+        return {**done, "tags": _tag_nodes(store)}
+
+    @app.get("/api/boxes/{ref}/tags")
+    def read_box_tags(ref: str, store: StoreDep) -> dict[str, Any]:
+        """A box's tags, split into what it was given and what that commits it to.
+
+        The split is the point. A chip for an inherited tag has no cross on it, because
+        removing it means moving the tag in the hierarchy, not editing the box — and a page
+        that offered a control which cannot do the thing would be worse than no control.
+        """
+        box = store.resolve(ref)
+        held = store.box_tags(box)
+        hierarchy = store.hierarchy()
+        implied = [
+            name
+            for name in hierarchy.implied(held)
+            if tags.canonical(name) not in {tags.canonical(one) for one in held}
+        ]
+        chips = [
+            {
+                "name": name,
+                "explicit": tags.canonical(name) in {tags.canonical(one) for one in held},
+                "colour": tags.colour_for(hierarchy, name),
+                "text": tags.text_colour_for(tags.colour_for(hierarchy, name)),
+                "path": list(hierarchy.path(name)),
+            }
+            for name in hierarchy.implied(held)
+        ]
+        return {"explicit": list(held), "inherited": implied, "chips": chips}
+
+    @app.put("/api/boxes/{ref}/tags")
+    def write_box_tags(ref: str, store: StoreDep, body: BoxTags) -> dict[str, Any]:
+        box = store.resolve(ref)
+        try:
+            store.set_box_tags(box, body.tags)
+        except tags.TagError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_tag", "reason": str(exc)}
+            ) from exc
+        return read_box_tags(ref, store)
 
     @app.get("/api/boxes/{ref}/filter", response_model=FilterBody)
     def read_filter(ref: str, store: StoreDep) -> FilterBody:

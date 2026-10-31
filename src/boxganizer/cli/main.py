@@ -37,6 +37,7 @@ from boxganizer import (
     paths,
     resources,
     ssh,
+    tags,
     thumbs,
 )
 
@@ -296,10 +297,19 @@ def box_list(
     ctx: typer.Context,
     limit: Annotated[int, typer.Option("--limit", "-n", min=1)] = 50,
     as_json: Annotated[bool, typer.Option("--json", help="Machine readable output.")] = False,
+    tag: Annotated[
+        str | None,
+        typer.Option("--tag", help="Only boxes carrying this tag, or one below it."),
+    ] = None,
 ) -> None:
     """List boxes. `box ls` is the same command."""
     with _open(ctx, _db_of(ctx)) as store:
         found = store.list_boxes(limit=limit)
+        if tag is not None:
+            # The whole branch: a filter on a parent that missed every box tagged with one of
+            # its children would make the hierarchy a decoration.
+            wanted = set(store.boxes_with_tag(tag))
+            found = [box for box in found if box.uuid in wanted]
     if as_json:
         console.print_json(json.dumps([b.to_dict() for b in found]))
         return
@@ -318,6 +328,158 @@ def box_list(
 # The shorter spelling, kept out of the command list so --help shows one entry
 # for this command and points at the alias instead of repeating it.
 app.command("ls", hidden=True)(box_list)
+
+
+tag_app = typer.Typer(
+    name="tag",
+    help="Tags: the library's own words for what a box is about.",
+    no_args_is_help=True,
+)
+app.add_typer(tag_app, name="tag")
+
+
+@tag_app.command("add")
+def tag_add(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="One word, or a path: home/kitchen/boiler.")],
+    parent: Annotated[str | None, typer.Option("--parent")] = None,
+    colour: Annotated[str | None, typer.Option("--colour", "-c")] = None,
+) -> None:
+    """Create a tag. A path creates the parents it names on the way down."""
+    with _open(ctx, _db_of(ctx)) as store:
+        made = (
+            store.add_tag_path(name)
+            if "/" in name
+            else store.add_tag(name, parent=parent, colour=colour)
+        )
+    say("created tag", made.name)
+
+
+@tag_app.command("ls")
+def tag_list(
+    ctx: typer.Context,
+    box: Annotated[
+        str | None, typer.Argument(help="A box name: shows what it carries, inherited included.")
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """The tag tree with what each tag holds, or one box's tags."""
+    with _open(ctx, _db_of(ctx)) as store:
+        if box is not None:
+            held = store.box_tags(box)
+            implied = store.hierarchy().implied(held)
+            if as_json:
+                console.print_json(
+                    json.dumps({"box": box, "given": list(held), "means": list(implied)})
+                )
+                return
+            lit(f"{box} carries   : {', '.join(held) or 'nothing'}")
+            extra = [name for name in implied if name not in held]
+            lit(f"and therefore  : {', '.join(extra) or 'nothing'}")
+            return
+        counts = store.tag_counts()
+        below = store.tag_counts_including_inherited()
+        if as_json:
+            console.print_json(json.dumps(store.hierarchy().as_json(counts, below)))
+            return
+        hierarchy = store.hierarchy()
+        if not len(hierarchy):
+            lit("no tags yet — try: box tag add home")
+            return
+
+        def branch(name: str | None, depth: int) -> None:
+            for child in hierarchy.children_of(name):
+                direct = counts.get(tags.canonical(child.name), 0)
+                whole = below.get(tags.canonical(child.name), 0)
+                note = f"({direct})"
+                if whole != direct:
+                    note += f"  · {whole} counting the tags below it"
+                console.print(
+                    Text("  " * depth + child.name, style="bold" if depth == 0 else "")
+                    + Text(f"  {note}", style="dim")
+                )
+                branch(child.name, depth + 1)
+
+        branch(None, 0)
+
+
+@tag_app.command("rename")
+def tag_rename(
+    ctx: typer.Context,
+    name: str,
+    new_name: Annotated[str, typer.Argument(help="The new name.")],
+) -> None:
+    """Rename a tag. Every box carrying it keeps holding it, under the new word."""
+    with _open(ctx, _db_of(ctx)) as store:
+        made = store.rename_tag(name, new_name)
+    say("renamed tag", made.name)
+
+
+@tag_app.command("move")
+def tag_move(
+    ctx: typer.Context,
+    name: str,
+    parent: Annotated[str | None, typer.Option("--parent")] = None,
+    top: Annotated[bool, typer.Option("--top", help="Make it a root tag.")] = False,
+) -> None:
+    """Re-parent a tag. A move that would put a tag inside itself is refused."""
+    with _open(ctx, _db_of(ctx)) as store:
+        moved = store.move_tag(name, None if top else parent)
+    say("moved tag", f"{moved.name} → {moved.parent or 'top level'}")
+
+
+@tag_app.command("colour")
+def tag_colour(
+    ctx: typer.Context,
+    name: str,
+    colour: Annotated[str | None, typer.Argument(help="#rrggbb, or nothing to give it back.")],
+) -> None:
+    """Choose a colour for a tag, or hand it back to the derived palette."""
+    with _open(ctx, _db_of(ctx)) as store:
+        store.set_tag_colour(name, colour)
+    say("tag colour", f"{name}: {colour or 'derived again'}")
+
+
+@tag_app.command("rm")
+def tag_remove(
+    ctx: typer.Context,
+    name: str,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask.")] = False,
+) -> None:
+    """Delete a tag. Its children take its place in the tree."""
+    with _open(ctx, _db_of(ctx)) as store:
+        if not yes:
+            typer.confirm(f"delete the tag {name!r}?", abort=True)
+        done = store.delete_tag(name)
+    say("deleted tag", f"{done['tag']} ({done['boxes']} box(es) stopped carrying it)")
+    reparented = done["reparented"]
+    assert isinstance(reparented, list)
+    if reparented:
+        lit(f"  moved up a level: {', '.join(str(name) for name in reparented)}")
+
+
+@tag_app.command("give")
+def tag_give(
+    ctx: typer.Context,
+    box: str,
+    name: Annotated[str, typer.Argument(help="The tag; created if it is new.")],
+) -> None:
+    """Tag a box."""
+    with _open(ctx, _db_of(ctx)) as store:
+        held = store.assign_tag(box, name)
+    say("tagged", f"{box}: {', '.join(held)}")
+
+
+@tag_app.command("take")
+def tag_take(
+    ctx: typer.Context,
+    box: str,
+    name: str,
+) -> None:
+    """Take one tag off a box. An inherited one is removed by moving it in the tree."""
+    with _open(ctx, _db_of(ctx)) as store:
+        held = store.unassign_tag(box, name)
+    say("untagged", f"{box}: {', '.join(held) or 'nothing'}")
 
 
 @app.command("show")
