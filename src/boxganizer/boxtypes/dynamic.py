@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from boxganizer import sensors
 from boxganizer.boxtypes.resource import ResourceBox
 from boxganizer.errors import MqttError
 from boxganizer.models import Box
@@ -166,7 +167,26 @@ class SensorResource(DynamicResource):
     label: ClassVar[str] = "Sensor"
     icon: ClassVar[str] = "\U0001f4e1"  # 📡
     summary: ClassVar[str] = "A value that arrives from outside and updates itself."
-    planned: ClassVar[str] = "Keep the last reading and its timestamp; alert on change."
+    planned: ClassVar[str] = "Alert on change; keep readings across a restart."
+
+    #: The three templates `boxganizer.sensors` runs over a reading, in order. They live in the
+    #: box's own config because what a reading *means* is the owner's business: a boiler sends
+    #: JSON and a door sensor sends the word `open`, and no list of unit dropdowns this project
+    #: guessed at would cover both.
+    sensor_templates: ClassVar[tuple[str, ...]] = sensors.TEMPLATES
+
+    @classmethod
+    def check(cls, box: Box) -> None:
+        """Templates are checked when the box is saved, not when it next reports.
+
+        A Jinja typo found at render time is a box showing an apology where a number should be.
+        Found at save time it is a sentence in the form that made it — and every way of writing a
+        box (the page, `box edit`, a raw config write) arrives through this same hook.
+        """
+        super().check(box)
+        problem = sensors.check_templates(box.config)
+        if problem:
+            cls._reject(box, problem)
 
 
 class MQTTResource(SensorResource):
@@ -218,6 +238,12 @@ class MQTTResource(SensorResource):
         address says it — the path is the topic — and metadata stays what it always was,
         an override for a topic that will not fit in a path.
         """
+        # The sensor's own rules first: a template that cannot run is refused whatever the
+        # address says. Overriding `check` is not a licence to drop the parent's check, and this
+        # type's did exactly that — the box was saved with a broken template and apologised on
+        # screen instead, which is the failure this hook exists to prevent.
+        super().check(box)
+
         from boxganizer import mqtt
 
         try:

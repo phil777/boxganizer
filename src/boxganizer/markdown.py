@@ -63,8 +63,13 @@ def parser() -> MarkdownIt:
     return _parser
 
 
-def _safe_url(value: str) -> bool:
+def safe_url(value: str) -> bool:
     """Whether this address may be clicked.
+
+    Public because it is the answer to a question the whole codebase asks once: a sensor's
+    styling template (`boxganizer.sensors`) meets the same shape in a `style` attribute, and two
+    lists of dangerous schemes would drift the first time one of them is updated.
+
 
     Anything that is not an obvious scheme — `http://`, `mailto:`, a relative path, an
     anchor — is judged by what it does *not* start with, because the list of safe shapes
@@ -87,7 +92,7 @@ def _walk(tokens: list[Token]) -> None:
             continue
         cleaned: dict[str, str] = {}
         for name, value in attrs.items():
-            if name in ("href", "src") and not _safe_url(str(value)):
+            if name in ("href", "src") and not safe_url(str(value)):
                 cleaned[name] = "#"
                 cleaned["data-blocked"] = str(value)
             else:

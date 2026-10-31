@@ -637,6 +637,61 @@ pre.text {
   font-style: italic;
 }
 
+/* A sensor's own classes: the names a styling template may use, and nothing else. The page owns
+   the colours; a template picks one, which is why they are not inline styles it invents. */
+.sensor-good {
+  color: #1b7f3a;
+}
+
+.sensor-warn {
+  color: #a86a00;
+}
+
+.sensor-bad {
+  color: var(--accent);
+}
+
+.sensor-unknown {
+  color: var(--muted);
+}
+
+.sensor-mono {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+.sensor-problem {
+  color: var(--accent);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+/* Where the owner writes what a reading means. */
+.sensor-templates {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.sensor-template {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr;
+  gap: 0.35rem;
+  align-items: start;
+  font-size: 0.76rem;
+}
+
+.sensor-template textarea {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.74rem;
+  padding: 0.2rem 0.3rem;
+  resize: vertical;
+}
+
+.sensor-templates-note {
+  font-size: 0.72rem;
+  margin: 0;
+}
+
 /* What a dynamic folder asks for, and the controls to change it. */
 .filter-bar {
   display: flex;

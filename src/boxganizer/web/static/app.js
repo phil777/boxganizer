@@ -4730,6 +4730,73 @@ const MQTT_HISTORY = 8;
  * A grid cell shows the last value alone. One subscription per cell would be one
  * per box on the wall, and the opened box is where the listening belongs.
  */
+/**
+ * The three templates a sensor box runs over a reading, where the owner writes them.
+ *
+ * It lives in the settings drawer beside every other box setting, and it saves the whole config
+ * it can see rather than the one field being typed in: the three templates are one pipeline, and
+ * a form that could save a display template against a half-typed extraction template would let a
+ * person leave a box in a state it cannot render.
+ */
+function sensorTemplateEditor(box, ctx, preview) {
+  const editor = document.createElement("div");
+  editor.className = "sensor-templates box-config";
+
+  const fields = [
+    ["extract_template", "The value in what arrived", "{{ data.pressure }}"],
+    ["display_template", "How the value is worded", "{{ value }} bar"],
+    ["style_template", "How the words are dressed", '<b style="color: {{ \'red\' if number > 1.3 else \'inherit\' }}">{{ display }}</b>'],
+  ];
+
+  const keep = document.createElement("p");
+  keep.className = "sensor-templates-note muted";
+  keep.textContent =
+    "Jinja. `value`, `raw`, `data` (the payload, when it is JSON), `number`, plus each earlier "
+    + "step: `extracted` and `display`. Styling may use formatting tags only.";
+  editor.append(keep);
+
+  const inputs = [];
+  fields.forEach(([key, label, hint]) => {
+    const line = document.createElement("label");
+    line.className = "sensor-template";
+    const title = document.createElement("span");
+    title.textContent = label;
+    const area = document.createElement("textarea");
+    area.rows = 2;
+    area.spellcheck = false;
+    area.placeholder = hint;
+    area.name = `sensor:${key}`;
+    area.value = (box.config && box.config[key]) || "";
+    line.append(title, area);
+    editor.append(line);
+    inputs.push([key, area]);
+  });
+
+  const save = document.createElement("button");
+  save.type = "button";
+  save.dataset.action = "save-sensor-templates";
+  save.textContent = "Save templates";
+  save.addEventListener("click", async () => {
+    const config = { ...(box.config || {}) };
+    inputs.forEach(([key, area]) => {
+      const text = area.value.trim();
+      if (text) config[key] = text;
+      else delete config[key];
+    });
+    try {
+      await api.updateBox(box.uuid, { config });
+      ctx.status("templates saved");
+      ctx.reload();
+    } catch (error) {
+      // The server checks the templates before it stores them, so a Jinja typo is answered here,
+      // in the field that holds it, rather than by a box that apologises later.
+      ctx.status(`templates refused: ${error.message}`, true);
+    }
+  });
+  editor.append(save);
+  return editor;
+}
+
 const mqttView = {
   async render(canvas, box, ctx, mode, opts = {}) {
 
@@ -4754,6 +4821,13 @@ const mqttView = {
     const value = document.createElement("span");
     value.className = "mqtt-value";
     value.textContent = "\u2014";
+    // A template that fails is answered beside the reading, not instead of it: a sensor whose
+    // number vanished looks like a sensor that heard nothing, and the two are very different
+    // problems to be sitting in front of.
+    const problem = document.createElement("div");
+    problem.className = "sensor-problem";
+    problem.hidden = true;
+    problem.setAttribute("role", "status");
     const badge = document.createElement("span");
     badge.className = "mqtt-badge";
     badge.hidden = true;
@@ -4769,7 +4843,7 @@ const mqttView = {
     const log = document.createElement("ul");
     log.className = "mqtt-log";
 
-    wrap.append(head, readout, detail, log);
+    wrap.append(head, readout, problem, detail, sensorTemplateEditor(box, ctx, value), log);
     canvas.append(wrap);
 
     let info;
@@ -4790,15 +4864,26 @@ const mqttView = {
       address.title = `${address.textContent} — the user and password stay in the box`;
     }
 
-    function show(reading, { newest = false } = {}) {
-      value.textContent = reading.value === "" ? "(empty message)" : reading.value;
+    function show(reading, { newest = false, shown = null } = {}) {
+      const binary = reading.encoding && reading.encoding !== "utf-8";
+      if (shown && shown.styled) {
+        // The one place this page puts a box's own text in as HTML. `sensors.sanitise` rebuilt it
+        // from an allow-list of formatting tags and style properties before it left the server, so
+        // what arrives here cannot script, navigate, load, or re-layout anything.
+        value.innerHTML = shown.styled;
+      } else {
+        const words = shown ? shown.display : reading.value;
+        value.textContent = words === "" ? "(empty message)" : words;
+      }
       value.dataset.encoding = reading.encoding || "utf-8";
       // The note explains *this* message, so a text message after a binary one
       // must not be left wearing the binary one's tooltip.
-      value.title =
-        reading.encoding && reading.encoding !== "utf-8"
-          ? `the broker sent bytes that are not text, shown as ${reading.encoding}`
-          : "";
+      const notes = [];
+      if (binary) notes.push(`the broker sent bytes that are not text, shown as ${reading.encoding}`);
+      if (shown && shown.display !== reading.value) notes.push(`the broker sent: ${reading.value}`);
+      value.title = notes.join(" — ");
+      problem.hidden = !(shown && shown.problem);
+      if (shown && shown.problem) problem.textContent = shown.problem;
       badge.hidden = !reading.retained;
       badge.textContent = "retained";
       badge.title = "the broker kept this message for a subscription that started later";
@@ -4813,19 +4898,20 @@ const mqttView = {
       if (at) clock.dateTime = reading.received_at;
       const text = document.createElement("span");
       text.textContent = reading.value === "" ? "(empty message)" : reading.value;
+      if (shown && shown.display !== reading.value) text.title = shown.display;
       line.append(clock, text);
       log.prepend(line);
       while (log.children.length > MQTT_HISTORY) log.lastElementChild.remove();
     }
 
-    function apply(next, reading, note) {
+    function apply(next, reading, note, shown = null) {
       chip.dataset.state = next;
       chip.textContent = MQTT_STATES[next] || next;
       detail.textContent = note || "";
-      if (reading) show(reading, { newest: true });
+      if (reading) show(reading, { newest: true, shown });
     }
 
-    if (info.reading) show(info.reading);
+    if (info.reading) show(info.reading, { shown: info.shown });
     if (opts.cell) {
       // A cell never subscribes, so it must not claim to be connecting. It shows
       // what the server last heard — and says so — or admits it has nothing yet.
@@ -4877,7 +4963,7 @@ const mqttView = {
         return;
       }
       lastWords = payload.detail || "";
-      apply(state, payload.reading || null, lastWords);
+      apply(state, payload.reading || null, lastWords, payload.shown || null);
     };
 
     ["connecting", "live", "value", "retrying", "refused"].forEach((name) => {

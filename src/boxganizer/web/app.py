@@ -1871,6 +1871,8 @@ def create_app(
             "address": mqtt.redact(box.resource_uri),
             "target": target.as_public_dict(),
             "reading": reading.as_dict() if reading else None,
+            # what the box's own templates make of that reading, or None until one arrives
+            "shown": _shown(box, reading),
         }
 
     @app.get("/api/boxes/{ref}/mqtt/stream")
@@ -1889,9 +1891,11 @@ def create_app(
         async def feed() -> AsyncIterator[str]:
             try:
                 async for event in source(target):
+                    payload = event.as_dict()
                     if event.reading is not None:
                         latest.remember(box_uuid, event.reading)
-                    yield _sse(event.state, event.as_dict())
+                        payload["shown"] = _shown(box, event.reading)
+                    yield _sse(event.state, payload)
             except MqttError as exc:
                 # `refused`, not `error`, and deliberately terminal. The browser would
                 # otherwise reconnect to a box that fails identically every time — a retry
@@ -2420,6 +2424,29 @@ def _is_in_map(store: BoxStore, box: Box, uuid: str) -> bool:
     if uuid == box.uuid:
         return True
     return mindmap.find(mindmap.node(store, box.uuid), uuid) is not None
+
+
+def _shown(box: Box, reading: mqtt.Reading | None) -> dict[str, object] | None:
+    """The reading as the box's own templates word it.
+
+    Rendered here rather than in the page for the same reason markdown is: the rules about what
+    a template may say — and what may reach the screen from it — are one implementation, in the
+    language that owns the allow-list. `sensors.present` never raises; a template that fails
+    travels with the sentence that says so, beside the value it could not dress.
+    """
+    from boxganizer import sensors
+
+    if reading is None:
+        return None
+    return sensors.present(
+        box,
+        reading.value,
+        extra={
+            "topic": reading.topic,
+            "at": reading.received_at.isoformat(timespec="seconds"),
+            "retained": reading.retained,
+        },
+    ).as_dict()
 
 
 def _resolving_box(store: BoxStore, ref: str) -> Box:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -3178,3 +3179,104 @@ def test_the_note_says_whether_it_can_be_typed_into_without_opening_the_drawer(
         and "position: relative"
         in css[css.index(".note-view {") : css.index("}", css.index(".note-view {"))]
     )
+
+
+def test_the_page_shows_the_worded_value_and_the_editor_for_it(client: TestClient) -> None:
+    """The page draws what the server decided the reading means, and offers the templates.
+
+    The `innerHTML` here is deliberate and single: `sensors.sanitise` rebuilt that string from an
+    allow-list before it was sent, which is the arrangement — one rule, in the language that owns
+    it — and the test is where the arrangement is written down.
+    """
+    script = client.get("/static/app.js").text
+    for needle in (
+        "function sensorTemplateEditor(box, ctx, preview)",
+        "value.innerHTML = shown.styled;",
+        "problem.hidden = !(shown && shown.problem);",
+        "`the broker sent: ${reading.value}`",
+        "area.name = `sensor:${key}`;",
+        '"extract_template", "The value in what arrived"',
+        '"display_template", "How the value is worded"',
+        '"style_template", "How the words are dressed"',
+        "await api.updateBox(box.uuid, { config });",
+        "templates refused:",
+    ):
+        assert needle in script, needle
+
+    css = client.get("/static/app.css").text
+    for rule in (
+        ".sensor-problem",
+        ".sensor-templates",
+        ".sensor-template",
+        ".sensor-good",
+        ".sensor-bad",
+    ):
+        assert rule in css, rule
+
+
+def test_a_live_reading_arrives_worded_by_the_box_itself(populated: BoxStore, sensor: Box) -> None:
+    """`shown` is the server's answer, so an owner's template is run once, in one language.
+
+    The page is not trusted with what the Jinja means, and it is not trusted to be the thing that
+    decides whether a styling template may put a `<script>` on screen: `sensors.present` renders
+    and sanitises here, before the bytes leave. Both the snapshot endpoint and the stream say the
+    same words about the same message, which is the point of doing it once.
+    """
+    from boxganizer import sensors
+
+    populated.update(
+        replace(
+            sensor,
+            config={
+                "extract_template": "{{ data.pressure }} {{ data.unit }}",
+                "style_template": (
+                    '<b class="sensor-value">{{ display }}</b><script>alert(1)</script>'
+                ),
+            },
+        )
+    )
+    events = [mqtt.Event("value", _reading('{"pressure": 1.42, "unit": "bar"}'))]
+    with TestClient(create_app(populated, mqtt_events=_scripted(events))) as probe:
+        stream = probe.get("/api/boxes/Cellar temp/mqtt/stream").text
+        body = probe.get("/api/boxes/Cellar temp/mqtt").json()
+
+    assert '"extracted": "1.42 bar"' in stream, stream
+    assert "alert" not in stream
+    shown = body["shown"]
+    assert shown is not None
+    assert shown["extracted"] == "1.42 bar"
+    assert shown["styled"] == '<b class="sensor-value">1.42 bar</b>'
+    assert shown["problem"] == ""
+    assert sensors.present(sensor, "x").styled == "x", "no templates, no dressing"
+
+
+def test_a_box_refuses_a_template_that_could_not_run(populated: BoxStore, sensor: Box) -> None:
+    """The typo is answered in the form that made it, not later, on the box."""
+    from boxganizer.errors import InvalidBoxContent
+
+    with pytest.raises(InvalidBoxContent, match="extract_template"):
+        populated.update(replace(sensor, config={"extract_template": "{{ data.pressure"}))
+
+    # a template that compiles is accepted, and reaches the box unchanged
+    populated.update(replace(sensor, config={"extract_template": "{{ data.pressure }}"}))
+    assert populated.get(sensor.name).config == {"extract_template": "{{ data.pressure }}"}
+
+
+def test_only_a_sensor_is_asked_for_templates(client: TestClient) -> None:
+    """A note has no reading to word, so a template on one is nobody's business and stays put."""
+    note = client.post(
+        "/api/boxes",
+        json={"name": "A note", "box_type": "note", "config": {"style_template": "<b>x</b>"}},
+    )
+    assert note.status_code == 201, note.text
+    refused = client.post(
+        "/api/boxes",
+        json={
+            "name": "Broken sensor",
+            "box_type": "mqtt",
+            "resource_uri": "mqtt://b:1883/t",
+            "config": {"style_template": "{% if %}"},
+        },
+    )
+    assert refused.status_code == 422
+    assert "style_template" in refused.text

@@ -44,7 +44,9 @@ other boxes. Rules in brackets are enforced by the store.
         - `ssh` 🔐 SSH Terminal — schemes: ssh; the host comes from the address
       - `vnc` 💻 VNC Screen — schemes: vnc; this machine speaks RFB, the page is shown frames;
         optional metadata: `password_file`
-      - `sensor` 📡 Sensor
+      - `sensor` 📡 Sensor — a reading is turned into a value by three templates in `config`
+        (`extract_template`, `display_template`, `style_template`); the styling output is filtered
+        against an allow-list before the page sees it (ADR 21)
         - `mqtt` 📶 MQTT Sensor — schemes: mqtt mqtts; the topic is the path
         of the address (`metadata["topic"]` remains as an override)
         needs the `live` extra (`aiomqtt`): the type, the dialog and `box types` all say so

@@ -17,6 +17,11 @@ dependencies = [
     # twice. It arrived before as a dependency of rich; depending on that would be
     # depending on someone else's choices.
     "markdown-it-py>=3.0",
+    # A sensor's value is turned into what is shown by a template the owner writes, and
+    # templates are a language: parsing one with a regex would be a second, worse language.
+    # jinja2 arrived before as a dependency of rich (through typer); depending on that would
+    # be depending on someone else's choices, and they are free to drop it.
+    "jinja2>=3.1",
     "pillow>=10.0",
     "pypdfium2>=4.30",
     "pyyaml>=6.0",
