@@ -77,3 +77,17 @@ class WindowedViewport(ViewportBox):
     icon: ClassVar[str] = "\U0001fa9f"  # 🪟
     summary: ClassVar[str] = "Windows that move, resize, and come back."
     viewport_layout: ClassVar[str | None] = "windowed"
+
+    @classmethod
+    def check(cls, box: Box) -> None:
+        """The layout, and how see-through the windows are asked to be.
+
+        A transparency that hides the box inside is not a window; the floor is where the contents
+        stop being readable. It lives here rather than in the layout because the layout is rewritten
+        on every split, move and resize, and this is not part of where the windows are.
+        """
+        problem = viewports.check(
+            box.config, None, cls.viewport_layout
+        ) or viewports.opacity_problem(box.config)
+        if problem:
+            cls._reject(box, problem)

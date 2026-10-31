@@ -189,6 +189,20 @@ path proposes `directory`. `boxganizer/paths.py` holds the one URI parser that
 inference, the file endpoint and the type all share — three readers of the same
 field was three chances to disagree about `file://` quoting.
 
+## What a windowed viewport remembers about each window
+
+A window carries a rectangle, a state, and — only while it is maximized — the rectangle underneath
+(`restore`). Nothing else: the state is one of `normal`, `maximized`, `minimized`, and the rectangle is
+never thrown away when one of the other two is on. Maximizing keeps the rect it is covering; minimizing
+keeps the rect it had, including the one it had before maximizing. This is why `move_window` and
+`resize_window` rebuild a window *with* its state: a drag of a minimized title that silently reopened
+the window would be a layout write undoing a button, which nobody could diagnose from the screen.
+
+The transparency of the windows is not part of the layout. It lives in its own config section
+(`windowed.opacity`, 0.2 to 1, refused outside that range by the type's `check`) because the layout is
+rewritten wholesale on every split, move and resize — and a person's choice of how solid their windows
+are is not part of where they are.
+
 ## How a dynamic folder decides what it holds
 
 A dynamic folder stores one expression. The page writes it, the store reads it, and both use the

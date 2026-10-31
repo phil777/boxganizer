@@ -98,9 +98,16 @@ class Window:
     y: int = 0
     width: int = 480
     height: int = 320
+    #: "normal", "maximized" or "minimized". The rectangle is never thrown away when one of the
+    #: other two is on: a maximized window keeps the rect it had, and a minimized one keeps the rect
+    #: it had *before* it was maximized if it was. Nothing about where a window lives is lost by
+    #: looking at it differently — that is the whole promise of the pile on a desk.
+    state: str = "normal"
+    #: The rect to return to, kept only while a maximized window is maximized.
+    restore: tuple[int, int, int, int] | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        out: dict[str, object] = {
             "node": self.node,
             "child": self.child,
             "x": self.x,
@@ -108,9 +115,68 @@ class Window:
             "width": self.width,
             "height": self.height,
         }
+        if self.state != "normal":
+            out["state"] = self.state
+        if self.restore is not None:
+            out["restore"] = list(self.restore)
+        return out
+
+    def with_state(self, state: str) -> Window:
+        """Maximize, minimize, or come back to where the window was.
+
+        Maximize remembers the rect it is covering; restore returns to it, whether the window was
+        sitting there or maximized first and then minimized from there. Minimize changes nothing but
+        the drawing: the rect stays, because a minimized window that reopens somewhere else is a
+        window the person has to find again.
+        """
+        if state not in WINDOW_STATES:
+            raise ViewportError(f"{state!r} is not a window state")
+        if state == self.state:
+            return self
+        if state == "maximized":
+            return Window(
+                self.node,
+                self.child,
+                self.x,
+                self.y,
+                self.width,
+                self.height,
+                "maximized",
+                (self.x, self.y, self.width, self.height),
+            )
+        if state == "minimized":
+            return Window(
+                self.node,
+                self.child,
+                self.x,
+                self.y,
+                self.width,
+                self.height,
+                "minimized",
+                self.restore,
+            )
+        if self.restore is not None:
+            x, y, width, height = self.restore
+            return Window(self.node, self.child, x, y, width, height, "normal", None)
+        return Window(
+            self.node, self.child, self.x, self.y, self.width, self.height, "normal", None
+        )
 
     def moved_to(self, x: int, y: int) -> Window:
-        return Window(self.node, self.child, max(0, x), max(0, y), self.width, self.height)
+        # State and the rectangle to come back to travel with the window. A drag that quietly turned
+        # a minimized window back into a normal one — or worse, a maximized one back into the
+        # rect it was covering — would be the layout write undoing what a button did, which is
+        # thing nobody can diagnose from the screen.
+        return Window(
+            self.node,
+            self.child,
+            max(0, x),
+            max(0, y),
+            self.width,
+            self.height,
+            self.state,
+            self.restore,
+        )
 
     def sized_to(self, width: int, height: int) -> Window:
         return Window(
@@ -120,11 +186,21 @@ class Window:
             self.y,
             max(MIN_WINDOW, width),
             max(MIN_WINDOW // 2, height),
+            self.state,
+            self.restore,
         )
 
 
 #: A window smaller than this cannot hold a path line, let alone a box.
 MIN_WINDOW = 120
+#: How little of one is left when it is minimized: the path line, and nothing else.
+MINIMIZED_HEIGHT = 34
+#: The three a window can be in. A fourth would be a state the buttons cannot reach.
+WINDOW_STATES = ("normal", "maximized", "minimized")
+#: How transparent a windowed viewport may be made before its contents stop being readable.
+MIN_OPACITY = 0.2
+MAX_OPACITY = 1.0
+OPACITY_SECTION = "windowed"
 
 
 @dataclass(frozen=True)
@@ -229,6 +305,17 @@ def _window_from(raw: object) -> Window:
     if not isinstance(raw, dict):
         raise ViewportError("a window needs a node, a child and a rectangle")
     node = _node_id(raw.get("node"))
+    state = str(raw.get("state") or "normal")
+    if state not in WINDOW_STATES:
+        state = "normal"
+    saved = raw.get("restore")
+    restore = None
+    if isinstance(saved, list) and len(saved) == 4:
+        try:
+            x, y, width, height = (_whole(item, 0) for item in saved)
+            restore = (x, y, width, height)
+        except (TypeError, ValueError):
+            restore = None
     return Window(
         node,
         str(raw.get("child") or ""),
@@ -236,6 +323,8 @@ def _window_from(raw: object) -> Window:
         _whole(raw.get("y"), 0),
         max(MIN_WINDOW, _whole(raw.get("width"), 480)),
         max(MIN_WINDOW // 2, _whole(raw.get("height"), 320)),
+        state,
+        restore,
     )
 
 
@@ -522,6 +611,90 @@ def resize_window(layout: Layout, node: str, width: object, height: object) -> L
     )
 
 
+def maximize_window(layout: Layout, node: str) -> Layout:
+    """Cover the board with one window, keeping the rectangle underneath."""
+    return _set_state(layout, node, "maximized")
+
+
+def minimize_window(layout: Layout, node: str) -> Layout:
+    """Leave only the window's path line. The rectangle is kept for when it comes back."""
+    return _set_state(layout, node, "minimized")
+
+
+def restore_window(layout: Layout, node: str) -> Layout:
+    """Undo a maximize or a minimize, whichever the window is in."""
+    return _set_state(layout, node, "normal")
+
+
+def _set_state(layout: Layout, node: str, state: str) -> Layout:
+    found = False
+
+    def change(window: Window) -> Window:
+        nonlocal found
+        if window.node != node:
+            return window
+        found = True
+        return window.with_state(state)
+
+    changed = _map_window(layout, node, change)
+    if not found:
+        raise ViewportError(f"no viewport {node!r} in this box")
+    # And bring it forward. Maximizing a window that stays under three others is not maximizing it,
+    # and a minimized title buried in the pile cannot be clicked to bring the window back. The
+    # window that was just acted on is the one the person is looking at, so the pile agrees.
+    return raise_window(changed, node)
+
+
+def split_window(layout: Layout, node: str, direction: str) -> tuple[Layout, str]:
+    """Cut one window in two, the halves sitting where the one was.
+
+    A window has no neighbours to push against, so a split cannot mean "take half of the space from
+    the pane beside you" the way it does in a tiling viewport: it means divide *this* rectangle. The
+    half that comes away is empty and focused, which is what a split is for — the second thing to
+    look at is chosen next, not guessed.
+    """
+    if layout.kind != "windowed":
+        raise ViewportError("a tiling viewport is split by its tree, not by a window")
+    found = next((window for window in layout.windows if window.node == node), None)
+    if found is None:
+        raise ViewportError(f"no viewport {node!r} in this box")
+    if found.state != "normal":
+        raise ViewportError("restore that window before splitting it")
+    if direction not in ("horizontal", "vertical"):
+        raise ViewportError(f"{direction!r} is not a direction to split in")
+    room = found.width if direction == "horizontal" else found.height
+    least = MIN_WINDOW if direction == "horizontal" else MIN_WINDOW // 2
+    if room < least * 2:
+        edge = "wide" if direction == "horizontal" else "tall"
+        raise ViewportError(
+            f"that window is not {edge} enough to split in two ({room} px); "
+            "drag its corner out first"
+        )
+    twin_node = next_node_id(layout)
+    twins: list[Window] = []
+    if direction == "horizontal":
+        left = found.width // 2
+        twins.append(
+            Window(found.node, found.child, found.x, found.y, left, found.height)
+        )
+        twins.append(
+            Window(twin_node, "", found.x + left, found.y, found.width - left, found.height)
+        )
+    else:
+        top = found.height // 2
+        twins.append(Window(found.node, found.child, found.x, found.y, found.width, top))
+        twins.append(
+            Window(twin_node, "", found.x, found.y + top, found.width, found.height - top)
+        )
+    windows = [
+        twin for window in layout.windows for twin in (twins if window.node == node else [window])
+    ]
+    # The new half on top: it is empty, and a split whose second half is invisible under the pile
+    # has not given anyone the second thing to look at.
+    order = (*tuple(item for item in layout.order if item != twin_node), twin_node)
+    return Layout(kind="windowed", windows=tuple(windows), order=order), twin_node
+
+
 def raise_window(layout: Layout, node: str) -> Layout:
     """Bring one window to the front. Position and size are untouched: the pile, not the map."""
     if layout.kind != "windowed":
@@ -644,3 +817,47 @@ def _splits(tree: Node | None) -> int:
     if isinstance(tree, Split):
         return 1 + _splits(tree.first) + _splits(tree.second)
     return 0
+
+
+def opacity_of(config: dict[str, Any] | None) -> float:
+    """How solid the windows of a windowed viewport are drawn, 0.2 to 1.
+
+    Kept out of the viewport section on purpose: that one is rewritten wholesale every time the
+    layout is saved, and a person's transparency choice is not part of the layout. Absent or
+    unreadable is solid, which is what a window was before this existed.
+    """
+    section = (config or {}).get(OPACITY_SECTION)
+    if not isinstance(section, dict):
+        return 1.0
+    try:
+        value = float(section.get("opacity", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    return min(MAX_OPACITY, max(MIN_OPACITY, value))
+
+
+def opacity_problem(config: dict[str, Any] | None) -> str:
+    """Why a stored opacity is not a legal one, or empty when it is.
+
+    The clamping above is for reading a value someone else wrote; this is for refusing one on
+    the way in, which is what `BoxType.check` is for. Silence and 1.0 are not the same answer, so
+    the section is looked at directly rather than through `opacity_of`.
+    """
+    section = (config or {}).get(OPACITY_SECTION)
+    if section is None:
+        return ""
+    if not isinstance(section, dict):
+        return f"{OPACITY_SECTION!r} must hold a settings block"
+    if "opacity" not in section:
+        return ""
+    raw = section.get("opacity")
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return f"opacity must be a number between {MIN_OPACITY} and {MAX_OPACITY}"
+    if not MIN_OPACITY <= value <= MAX_OPACITY:
+        return (
+            f"opacity must be between {MIN_OPACITY} and {MAX_OPACITY}; below that the windows "
+            "are too faint to read"
+        )
+    return ""

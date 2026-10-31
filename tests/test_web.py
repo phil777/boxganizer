@@ -2979,6 +2979,132 @@ def test_the_child_menu_does_not_offer_to_file_into_a_folder_that_refuses_it(
     assert '{ label: "New box in " + parent.name' in tile
 
 
+def test_a_windowed_viewport_answers_the_window_state_verbs(client: TestClient) -> None:
+    """Maximize, minimize, restore, and split — through the API, with the rect kept."""
+    client.post("/api/boxes", json={"name": "Desk", "box_type": "windowed-viewport"})
+    client.post("/api/boxes", json={"name": "Note A", "box_type": "note"})
+    client.post("/api/boxes/Desk/viewports/open", json={"node": "v1", "child": "Note A"})
+
+    maximized = client.post("/api/boxes/Desk/viewports/maximize", json={"node": "v1"})
+    assert maximized.status_code == 200
+    window = maximized.json()["windows"][0]
+    assert window["state"] == "maximized"
+    assert window["restore"] == [window["x"], window["y"], window["width"], window["height"]]
+    assert maximized.json()["panes"][0]["state"] == "maximized"  # the pane carries it too
+
+    minimized = client.post("/api/boxes/Desk/viewports/minimize", json={"node": "v1"})
+    assert minimized.json()["windows"][0]["state"] == "minimized"
+    assert minimized.json()["windows"][0]["restore"] == window["restore"]
+
+    back = client.post("/api/boxes/Desk/viewports/restore", json={"node": "v1"})
+    assert "state" not in back.json()["windows"][0]  # normal is not written down
+    assert back.json()["windows"][0]["width"] == window["width"]
+
+    unknown = client.post("/api/boxes/Desk/viewports/maximize", json={"node": "v9"})
+    assert unknown.status_code == 422
+    assert "no viewport" in unknown.json()["detail"]["reason"]
+
+
+def test_splitting_a_window_gives_the_same_verb_a_different_meaning(client: TestClient) -> None:
+    """One button, because nobody chooses a model; two acts, because the geometry differs.
+
+    In tiling the new pane takes half the space a divider already governs. In a pile of windows
+    there is no neighbour to take room from, so the two halves sit exactly where the one was.
+    """
+    client.post("/api/boxes", json={"name": "Pile", "box_type": "windowed-viewport"})
+    client.post("/api/boxes", json={"name": "Note B", "box_type": "note"})
+    client.post("/api/boxes/Pile/viewports/open", json={"node": "v1", "child": "Note B"})
+
+    split = client.post(
+        "/api/boxes/Pile/viewports/split", json={"node": "v1", "direction": "horizontal"}
+    )
+    assert split.status_code == 200
+    by_node = {pane["node"]: pane for pane in split.json()["panes"]}
+    assert by_node["v1"]["width"] == 320 and by_node["v1"]["x"] == 24
+    assert by_node["v2"]["width"] == 320 and by_node["v2"]["x"] == 344
+    assert by_node["v2"]["child"] == ""
+    assert split.json()["order"][-1] == "v2"
+
+    narrow = client.post("/api/boxes/Pile/viewports/resize", json={"node": "v1", "width": 150})
+    assert narrow.status_code == 200
+    refused = client.post(
+        "/api/boxes/Pile/viewports/split", json={"node": "v1", "direction": "horizontal"}
+    )
+    assert refused.status_code == 422
+    assert "drag its corner out first" in refused.json()["detail"]["reason"]
+
+
+def test_a_windowed_viewport_refuses_a_transparency_it_cannot_draw(client: TestClient) -> None:
+    """The floor is where the box inside stops being readable.
+
+    Written through the ordinary config endpoint, so the rule lives on the type and not in one
+    route: `box edit`, a raw config write and the slider all pass the same door.
+    """
+    client.post("/api/boxes", json={"name": "Glass", "box_type": "windowed-viewport"})
+    ok = client.put("/api/boxes/Glass/config", json={"config": {"windowed": {"opacity": 0.45}}})
+    assert ok.status_code == 200
+    assert client.get("/api/boxes/Glass/viewports").json()["opacity"] == 0.45
+
+    refused = client.put(
+        "/api/boxes/Glass/config", json={"config": {"windowed": {"opacity": 0.02}}}
+    )
+    assert refused.status_code == 422
+    assert "opacity must be between" in refused.json()["detail"]["reason"]
+    # the box still carries the value it had, not the one that was refused
+    assert client.get("/api/boxes/Glass").json()["config"]["windowed"]["opacity"] == 0.45
+
+    # a tiling viewport has no windows to fade and does not grow the rule
+    client.post("/api/boxes", json={"name": "Tiles", "box_type": "tiling-viewport"})
+    tiles = client.put("/api/boxes/Tiles/config", json={"config": {"windowed": {"opacity": 0.02}}})
+    assert tiles.status_code == 200
+
+
+def test_the_window_controls_are_drawn_not_typed_and_the_chosen_window_is_on_top(
+    client: TestClient,
+) -> None:
+    """What the measurements asked for: a window you select is above the rest, and its buttons
+    survive whichever font wins.
+
+    Three faults the browser found and this keeps fixed: the path line is also the drag handle,
+    and it stopped the event, so clicking a window never raised it; raising changed the pile in the
+    model and not on screen until some later repaint; and a button press raced the raise it caused,
+    so the window acted on could end up under the pile it was just lifted out of.
+    """
+    script = client.get("/static/app.js").text
+    frame = script[script.index("function windowFrame(entry, index, total)") :]
+    frame = frame[: frame.index("/** Move or resize a window by dragging.")]
+    assert "{ capture: true }," in frame
+    assert 'if (event.target.closest("button[data-action]")) return;' in frame
+    assert "frame.style.zIndex = String(Math.max(...piled, 10) + 1);" in frame
+    assert 'await act("restore", { node: entry.node });' in frame
+    assert 'frame.dataset.state = state;' in frame
+    assert 'stateButton("minimize", "vp-minimize"' in frame
+    assert 'state === "maximized"' in frame and '"vp-restore"' in frame and '"vp-maximize"' in frame
+
+    drag = script[script.index("function dragWindow(frame, grab, entry, kind)") :]
+    drag = drag[: drag.index("let briefs")]
+    assert 'if (kind === "move" && frame.dataset.state === "maximized") return;' in drag
+
+    css = client.get("/static/app.css").text
+    for glyph in ("vp-icon-minimize", "vp-icon-maximize", "vp-icon-restore"):
+        assert f".{glyph}::after" in css, glyph
+    assert 'opacity: var(--vp-window-opacity, 1);' in css
+    solid = css[css.index('.vp-window[data-focused="true"] {') :]
+    assert "opacity: 1;" in solid[:260]
+    assert css.count('.vp-window[data-focused="true"] {') == 1, "one rule per selector"
+    hidden = css[css.index('.vp-window[data-state="minimized"]') :]
+    assert "display: none;" in hidden[:400]
+    assert 'height: auto !important;' in hidden[:200]
+
+    # the transparency slider lives in the viewport's own settings row and writes its own section
+    toolbar = script[script.index('bar.className = "vp-toolbar box-config";') :]
+    toolbar = toolbar[: toolbar.index("wrap.append(bar);")]
+    assert 'slider.type = "range";' in toolbar
+    assert 'slider.min = "20";' in toolbar
+    assert 'wrap.style.setProperty("--vp-window-opacity"' in toolbar
+    assert 'saveSettingFor(box, "windowed"' in toolbar
+
+
 def test_a_dialog_reports_its_own_refusal(client: TestClient) -> None:
     """A status bar behind an open modal is a message nobody receives.
 

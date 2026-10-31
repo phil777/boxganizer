@@ -163,3 +163,44 @@ The gear hides itself in a pane whose box has no settings row, exactly as it doe
 a control with nothing to control is decoration. A checklist shows none — its head reports a tally, it
 does not configure — and neither does a note, whose toolbar is how you write (ADR on the note switch),
 nor a viewport, whose panes each have one of their own.
+
+---
+
+## Amendment (2026-11-11): a window has a state, and the window you chose is the one on top
+
+The first build let a window be moved, resized, raised and closed. It could not be minimized,
+maximized or split, and it could not be made transparent. Four decisions came out of building those.
+
+**A window carries a state and, only while maximized, the rectangle underneath.** `normal`,
+`maximized`, `minimized` — and the rectangle is never discarded when one of the other two is on.
+Maximizing keeps the rect it covers; minimizing keeps the rect it had, including the one from before a
+maximize. So "unmaximize" and "put the minimized window back" need no bookkeeping beyond the window
+itself, and both survive a reload because `as_dict` writes them. The consequence worth naming:
+`move_window` and `resize_window` must rebuild a window *with* its state. They did not, and dragging a
+minimized title across the board reopened it — a layout write undoing a button, which is invisible from
+the screen and merciless in a test.
+
+**Transparency is not part of the layout.** It lives in its own config section (`windowed.opacity`,
+0.2 to 1) because the layout section is rewritten wholesale on every split, move and resize, and how
+solid your windows are is not where they are. The floor is where the box inside stops being readable,
+and it is refused by the type's `check` — so a raw config write, `box edit` and the slider pass the same
+door. The slider fades the whole window, contents included, because the reason to make a window
+transparent is the box underneath it; a window whose frame is see-through while its contents stay
+painted is a window you still cannot see past. **The focused window is exempt and always drawn solid**:
+the one you clicked is the one you are reading, and the rest may recede.
+
+**Splitting a window is a different act from splitting a pane, behind the same verb.** A tiling pane
+takes its half from the space a divider already governs; a window has no neighbour whose room it could
+take, so the two halves sit exactly where the one was, and the new half is empty and on top — the
+second thing to look at is chosen next, not guessed. A window too small to halve is refused with the
+edge to grow (`not wide enough… drag its corner out first`), and one that is maximized or minimized is
+asked to be restored first: half of a maximized board is not a window anyone placed.
+
+**Choosing a window raises it, and the pile must move now.** Three faults, all found by measuring: the
+path line is also the drag handle and it stopped propagation, so clicking a window never raised it;
+raising rewrote the order on the server while the page left `z-index` as it was, so the chosen window
+sat under the pile until some later repaint; and a button press raced the raise it caused, so the window
+you acted on could finish underneath everything. Now the frame listens in the capture phase and lifts
+the window above its siblings immediately, buttons are excluded from that path because the actions that
+come with them raise the window server-side (maximize and minimize that stay buried do neither job), and
+a maximized window's title does not drag — it is the board.

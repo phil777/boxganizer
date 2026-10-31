@@ -1033,9 +1033,13 @@ pre.text {
   box-shadow: 0 2px 8px color-mix(in srgb, currentColor 25%, transparent);
 }
 
+/* The window you are looking at is drawn solid whatever the slider says. That is the difference
+   between a control that lets you see the desk and one that makes everything hard to read. The
+   attribute outranks the faded rule further down, so this does not depend on order to win. */
 .vp-window[data-focused="true"] {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
+  opacity: 1;
 }
 
 .vp-window .vp-pane {
@@ -1112,6 +1116,109 @@ pre.text {
 .sensor-templates-note {
   font-size: 0.72rem;
   margin: 0;
+}
+
+/* ---- a window's state, and how much of the desk shows through it ---------- */
+
+/* One variable, set by the slider in the viewport's settings row and by nothing else. It fades the
+   whole window — frame, chrome and contents — because the reason to make a window transparent is the
+   box underneath it, and a window whose frame is see-through while its contents stay painted is a
+   window you still cannot see past.
+
+   The window you are looking at is exempt: the focused one is always drawn solid. That is the
+   difference between a control that lets you see the desk and one that makes everything hard to
+   read; whichever window took your click is the one you are reading, and the rest may recede. */
+.vp-window {
+  opacity: var(--vp-window-opacity, 1);
+  transition: opacity 0.16s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vp-window {
+    transition: none;
+  }
+}
+
+.vp-window[data-state="maximized"] {
+  left: 0 !important;
+  top: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Minimized is the title line and nothing else. The rectangle the window had is kept on the box, so
+   bringing it back is not a hunt for where it was. */
+.vp-window[data-state="minimized"] {
+  height: auto !important;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.vp-window[data-state="minimized"] > .vp-pane > .vp-body {
+  display: none;
+}
+
+.vp-window[data-state="minimized"] .vp-btn:not(.vp-icon-minimize),
+.vp-window[data-state="minimized"] .vp-resize {
+  display: none;
+}
+
+.vp-opacity {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+}
+
+.vp-opacity input[type="range"] {
+  width: 7rem;
+  accent-color: var(--accent);
+}
+
+.vp-opacity-value {
+  font-variant-numeric: tabular-nums;
+  min-width: 3ch;
+}
+
+/* The three state buttons and the two split buttons, drawn rather than typed: geometric Unicode is
+   drawn by whichever font happens to win, and one of them arriving as a filled block is enough to
+   make the row unreadable. */
+.vp-icon {
+  position: relative;
+  width: 1.15rem;
+  height: 1rem;
+}
+
+.vp-icon-minimize::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 3px;
+  border-bottom: 2px solid currentColor;
+}
+
+.vp-icon-maximize::after {
+  content: "";
+  position: absolute;
+  inset: 2px 3px;
+  border: 2px solid currentColor;
+}
+
+.vp-icon-restore::after,
+.vp-icon-restore::before {
+  content: "";
+  position: absolute;
+  border: 2px solid currentColor;
+}
+
+.vp-icon-restore::before {
+  inset: 1px 6px 5px 1px;
+}
+
+.vp-icon-restore::after {
+  inset: 4px 2px 2px 5px;
+  background: var(--surface, #fff);
 }
 
 /* The note's edit switch: the state is the picture, the word is the state's name and never moves. */

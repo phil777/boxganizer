@@ -2511,6 +2511,10 @@ def _viewport_body(store: BoxStore, box: Box) -> dict[str, object]:
                     "y": window.y,
                     "width": window.width,
                     "height": window.height,
+                    # The state travels because the button depends on it: a maximized window asks to
+                    # be restored and a minimized one asks to be put back, and a page guessing from
+                    # the rectangle would fight the CSS that draws them.
+                    "state": window.state,
                 }
             )
     else:
@@ -2529,7 +2533,28 @@ def _viewport_body(store: BoxStore, box: Box) -> dict[str, object]:
         "problems": list(layout.problems),
         # The page disables the button rather than explaining afterwards why nothing happened.
         "closable": len(layout.panes()) > 1,
+        # How solid the windows are drawn. Read from its own config section rather than the layout
+        # one, which is rewritten wholesale on every layout save (see `viewports.opacity_of`).
+        "opacity": viewports.opacity_of(box.config) if layout.kind == "windowed" else 1.0,
     }
+
+
+def _window_state(store: BoxStore, ref: str, node: str, action: str) -> dict[str, object]:
+    """Maximize, minimize or restore one window, and answer with the layout that resulted."""
+    box = _viewport_box(store, ref)
+    layout = viewports.layout_of(box.config, _viewport_kind(box))
+    try:
+        if action == "maximize":
+            changed = viewports.maximize_window(layout, node)
+        elif action == "minimize":
+            changed = viewports.minimize_window(layout, node)
+        else:
+            changed = viewports.restore_window(layout, node)
+    except viewports.ViewportError as exc:
+        raise HTTPException(
+            status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+        ) from exc
+    return _save_viewport(store, box, changed)
 
 
 def _save_viewport(store: BoxStore, box: Box, layout: viewports.Layout) -> dict[str, object]:
@@ -2570,18 +2595,44 @@ def _register_viewport_routes(app: FastAPI) -> None:
 
     @app.post("/api/boxes/{ref}/viewports/split")
     def split_viewport(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        """Split one pane — or cut one window in two, which is a different act.
+
+        The verb is the same because the *button* is the same, and a person choosing "side by
+        side" should not have to know which model their viewport uses. What a split does differs: in
+        tiling the new pane takes half the space the divider already governs; in a windowed box the
+        two halves sit exactly where the one window was, because a window has no neighbour whose
+        room it could take.
+        """
         box = _viewport_box(store, ref)
+        layout = viewports.layout_of(box.config, _viewport_kind(box))
         try:
-            layout, _fresh = viewports.split(
-                viewports.layout_of(box.config, _viewport_kind(box)),
-                payload.node,
-                payload.direction,
-            )
+            if layout.kind == "windowed":
+                layout, _fresh = viewports.split_window(layout, payload.node, payload.direction)
+            else:
+                layout, _fresh = viewports.split(layout, payload.node, payload.direction)
         except viewports.ViewportError as exc:
             raise HTTPException(
                 status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
             ) from exc
         return _save_viewport(store, box, layout)
+
+    @app.post("/api/boxes/{ref}/viewports/maximize")
+    def maximize_viewport_window(
+        ref: str, payload: ViewportNode, store: StoreDep
+    ) -> dict[str, object]:
+        return _window_state(store, ref, payload.node, "maximize")
+
+    @app.post("/api/boxes/{ref}/viewports/minimize")
+    def minimize_viewport_window(
+        ref: str, payload: ViewportNode, store: StoreDep
+    ) -> dict[str, object]:
+        return _window_state(store, ref, payload.node, "minimize")
+
+    @app.post("/api/boxes/{ref}/viewports/restore")
+    def restore_viewport_window(
+        ref: str, payload: ViewportNode, store: StoreDep
+    ) -> dict[str, object]:
+        return _window_state(store, ref, payload.node, "restore")
 
     @app.post("/api/boxes/{ref}/viewports/close")
     def close_viewport(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:

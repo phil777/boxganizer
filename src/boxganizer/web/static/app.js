@@ -897,25 +897,79 @@ const viewportView = {
       frame.style.height = `${entry.height}px`;
       frame.style.zIndex = String(10 + index);
       if (index === total - 1) frame.dataset.focused = "true";
+      const state = entry.state || "normal";
+      frame.dataset.state = state;
+      if (state !== "normal") frame.classList.add(`vp-${state}`);
+      frame.setAttribute("aria-label", `${entry.box ? entry.box.name : "empty"} window${state === "normal" ? "" : `, ${state}`}`);
 
       const pane = paneShell(entry.node, entry.box);
       pane.classList.add("vp-in-window");
       frame.append(pane);
 
+      // Minimize, and maximize or restore. Drawn in CSS rather than with box-drawing characters,
+      // same as the split buttons: a glyph that some fonts render as a filled block is not a control
+      // people can read. The middle button changes which action it is — and says so — because a
+      // maximized window whose second button still promises "maximize" is a button that lies.
+      const controls = pane.querySelector(":scope > .vp-path .vp-buttons");
+      if (controls) {
+        const stateButton = (kind, action, title) => {
+          const item = document.createElement("button");
+          item.type = "button";
+          item.className = `vp-btn vp-icon vp-icon-${kind}`;
+          item.dataset.action = action;
+          item.dataset.node = entry.node;
+          item.title = title;
+          item.setAttribute("aria-label", `${title} (viewport ${entry.node})`);
+          return item;
+        };
+        controls.append(
+          stateButton("minimize", "vp-minimize", "Minimize this window to its title"),
+          state === "maximized"
+            ? stateButton("restore", "vp-restore", "Restore this window to its own size")
+            : stateButton("maximize", "vp-maximize", "Maximize this window over the board"),
+        );
+      }
+
       // Clicking anywhere in a window raises it. Raising changes the pile and nothing else: the
       // other windows keep their place, because "bring this one forward" is not "rearrange my desk".
-      frame.addEventListener("pointerdown", async () => {
-        if (frame.dataset.focused === "true") return;
-        frame.parentElement.querySelectorAll(".vp-window").forEach((other) => {
-          delete other.dataset.focused;
-        });
-        frame.dataset.focused = "true";
-        try {
-          apply(await api.viewportAction(box.uuid, "raise", { node: entry.node }));
-        } catch (error) {
-          ctx.status(`could not raise that window: ${error.message}`, true);
-        }
-      });
+      frame.addEventListener(
+        "pointerdown",
+        async (event) => {
+          // A button in the path line raises the window as part of what it does — split, maximize,
+          // minimize, restore all bring their window forward on the server. Raising here too would
+          // be two writes for one click, racing each other, and the loser would be the pile the
+          // person sees.
+          if (event.target.closest("button[data-action]")) return;
+          // A minimized window is a title on the desk: clicking the title brings it back as well as
+          // raising it, because the alternative is a title that raises into another title.
+          if (frame.dataset.state === "minimized") {
+            await act("restore", { node: entry.node });
+            return;
+          }
+          if (frame.dataset.focused === "true") return;
+          frame.parentElement.querySelectorAll(".vp-window").forEach((other) => {
+            delete other.dataset.focused;
+          });
+          frame.dataset.focused = "true";
+          // Lift it above its siblings right now. The order comes back from the server and the next
+          // paint numbers the pile from it, but a window that is *chosen* and still sitting under
+          // another until a request lands has not been chosen.
+          const piled = Array.from(frame.parentElement.querySelectorAll(".vp-window")).map((other) =>
+            Number(other.style.zIndex || 0),
+          );
+          frame.style.zIndex = String(Math.max(...piled, 10) + 1);
+          try {
+            apply(await api.viewportAction(box.uuid, "raise", { node: entry.node }));
+          } catch (error) {
+            ctx.status(`could not raise that window: ${error.message}`, true);
+          }
+        },
+        // Capture, not bubble. The path line is the handle that moves the window and it stops the
+        // event so the pane underneath does not read a drag as a click on a box — which left the
+        // window that was just clicked sitting under the one it was clicked out from under. Choosing
+        // a window and raising it are the same act, and the title is where the choice is made.
+        { capture: true },
+      );
 
       dragWindow(frame, pane.querySelector(".vp-path"), entry, "move");
       const handle = document.createElement("div");
@@ -933,6 +987,7 @@ const viewportView = {
       let start = null;
       grab.addEventListener("pointerdown", (event) => {
         if (event.target.closest("button")) return;
+        if (kind === "move" && frame.dataset.state === "maximized") return;
         event.preventDefault();
         event.stopPropagation();
         grab.setPointerCapture(event.pointerId);
@@ -1002,6 +1057,44 @@ const viewportView = {
         add.textContent = "+ window";
         add.title = "Open another window";
         bar.append(add);
+
+        // How much of the desk shows through the windows. The slider is the whole point of a
+        // windowed board — the thing underneath is the reason you are looking at it — and the number
+        // beside it is what the pointer is on, because "0.62" is not a thing anyone can judge by eye
+        // while "you can read the box behind" is.
+        const label = document.createElement("label");
+        label.className = "vp-opacity";
+        const word = document.createElement("span");
+        word.textContent = "windows";
+        const slider = document.createElement("input");
+        slider.type = "range";
+        slider.min = "20";
+        slider.max = "100";
+        slider.step = "5";
+        slider.value = String(Math.round((layout.opacity ?? 1) * 100));
+        slider.dataset.action = "vp-opacity";
+        slider.setAttribute("aria-label", "how solid the windows are");
+        const readout = document.createElement("span");
+        readout.className = "vp-opacity-value";
+        readout.textContent = `${slider.value}%`;
+        const paintOpacity = () => {
+          wrap.style.setProperty("--vp-window-opacity", String(Number(slider.value) / 100));
+          readout.textContent = `${slider.value}%`;
+        };
+        paintOpacity();
+        slider.addEventListener("input", paintOpacity);
+        slider.addEventListener("change", () => {
+          // Written to its own config section, not to the layout: every split, move and resize
+          // rewrites the layout wholesale, and this is not part of where the windows are.
+          saveSettingFor(box, "windowed", { ...(box.config || {}).windowed, opacity: Number(slider.value) / 100 }, {
+            onSaved: async () => {
+              apply(await api.viewports(box.uuid));
+              ctx.status(`windows at ${slider.value}% solid`);
+            },
+          });
+        });
+        label.append(word, slider, readout);
+        bar.append(label);
         wrap.append(bar);
         paintWindows();
       } else {
@@ -1020,6 +1113,12 @@ const viewportView = {
         await act("close", { node: hit.dataset.node });
       } else if (action === "vp-window") {
         await act("window", {});
+      } else if (action === "vp-minimize") {
+        await act("minimize", { node: hit.dataset.node });
+      } else if (action === "vp-maximize") {
+        await act("maximize", { node: hit.dataset.node });
+      } else if (action === "vp-restore") {
+        await act("restore", { node: hit.dataset.node });
       }
     });
 

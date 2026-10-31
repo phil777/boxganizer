@@ -479,3 +479,153 @@ def test_opening_a_window_fills_the_empty_one_before_making_another(tmp_path: Pa
         "v2",
         fresh,
     ], "empty means another window"
+
+
+# ---- window states: maximize, minimize, restore, and splitting a window -----
+
+
+def _window(layout: viewports.Layout, node: str) -> viewports.Window:
+    return next(window for window in layout.windows if window.node == node)
+
+
+def test_maximizing_keeps_the_rectangle_underneath() -> None:
+    """A maximized window is drawn over its own rect, not instead of it."""
+    layout = viewports.new_windowed()
+    before = _window(layout, "v1")
+    maximized = viewports.maximize_window(layout, "v1")
+    window = _window(maximized, "v1")
+    assert window.state == "maximized"
+    assert window.restore == (before.x, before.y, before.width, before.height)
+    assert window.x == before.x and window.width == before.width  # the rect is untouched
+
+    back = viewports.restore_window(maximized, "v1")
+    assert _window(back, "v1").state == "normal"
+    assert _window(back, "v1").restore is None
+    assert (_window(back, "v1").x, _window(back, "v1").width) == (before.x, before.width)
+
+
+def test_a_state_change_brings_that_window_to_the_front() -> None:
+    """The window just acted on is the one being looked at, so the pile says so.
+
+    Maximizing one that stays under three others has not maximized anything, and a minimized title
+    buried in the pile cannot be clicked to bring the window back.
+    """
+    layout = viewports.new_windowed()
+    layout, _second = viewports.open_window(layout, "")
+    layout, _third = viewports.open_window(layout, "")
+    assert layout.order[-1] != "v1"
+    for changed in (
+        viewports.maximize_window(layout, "v1"),
+        viewports.minimize_window(layout, "v1"),
+    ):
+        assert changed.order[-1] == "v1"
+        assert _window(changed, "v1").state in ("maximized", "minimized")
+
+
+def test_minimizing_keeps_the_rect_and_a_maximized_history() -> None:
+    """Minimize changes how it is drawn, not where it lives."""
+    layout = viewports.maximize_window(viewports.new_windowed(), "v1")
+    minimized = viewports.minimize_window(layout, "v1")
+    window = _window(minimized, "v1")
+    assert window.state == "minimized"
+    assert window.width == 640 and window.height == 420  # the rect it had before maximizing
+    assert window.restore == (24, 24, 640, 420)
+    assert _window(viewports.restore_window(minimized, "v1"), "v1").state == "normal"
+
+
+def test_moving_or_resizing_a_window_does_not_reset_its_state() -> None:
+    """A layout write is not the person pressing the restore button.
+
+    Move and resize rebuild the window; if they forgot the state, dragging a minimized title across
+    the board would silently open it again, and a write that undoes a button cannot be diagnosed
+    from the screen.
+    """
+    layout = viewports.minimize_window(viewports.new_windowed(), "v1")
+    moved = viewports.move_window(layout, "v1", 300, 200)
+    window = _window(moved, "v1")
+    assert window.state == "minimized"
+    assert (window.x, window.y) == (300, 200)
+
+    sized = viewports.resize_window(layout, "v1", 700, 500)
+    kept = _window(sized, "v1")
+    assert kept.state == "minimized"
+    assert (kept.width, kept.height) == (700, 500)
+
+    maximized = viewports.resize_window(viewports.maximize_window(layout, "v1"), "v1", 800, 600)
+    deep = _window(maximized, "v1")
+    assert deep.state == "maximized"
+    assert deep.restore == (24, 24, 640, 420)  # still the rect it will come back to
+
+
+def test_a_window_split_lands_its_two_halves_where_the_one_was() -> None:
+    """No neighbour gives up room in a pile of windows: a split divides this rectangle."""
+    layout = viewports.new_windowed()  # (24, 24) 640x420
+    halves, fresh = viewports.split_window(layout, "v1", "horizontal")
+    left = _window(halves, "v1")
+    right = _window(halves, fresh)
+    assert (left.x, left.width) == (24, 320)
+    assert (right.x, right.width) == (344, 320)
+    assert left.height == right.height == 420
+    assert right.child == ""  # the second thing to look at is chosen next, not guessed
+    assert halves.order[-1] == fresh  # and it is on top, or the split looks like it did nothing
+
+    stacked, second = viewports.split_window(halves, "v1", "vertical")
+    upper = _window(stacked, "v1")
+    lower = _window(stacked, second)
+    assert (upper.y, upper.height) == (24, 210)
+    assert (lower.y, lower.height) == (234, 210)
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "edge"),
+    [(150, 400, "wide"), (600, 100, "tall")],
+)
+def test_a_window_too_small_to_divide_says_which_way_to_grow_it(
+    width: int, height: int, edge: str
+) -> None:
+    sized = viewports.resize_window(viewports.new_windowed(), "v1", width, height)
+    with pytest.raises(viewports.ViewportError) as raised:
+        viewports.split_window(sized, "v1", "horizontal" if edge == "wide" else "vertical")
+    assert f"not {edge} enough" in str(raised.value)
+    assert "drag its corner out first" in str(raised.value)
+
+
+def test_splitting_a_window_says_restore_first_when_it_is_not_normal() -> None:
+    """Half of a maximized board is not a window the person placed."""
+    maximized = viewports.maximize_window(viewports.new_windowed(), "v1")
+    with pytest.raises(viewports.ViewportError) as raised:
+        viewports.split_window(maximized, "v1", "horizontal")
+    assert "restore that window before splitting it" in str(raised.value)
+
+
+def test_window_states_survive_the_config_round_trip() -> None:
+    layout = viewports.maximize_window(viewports.new_windowed(), "v1")
+    layout, _fresh = viewports.open_window(layout, "")
+    layout = viewports.minimize_window(layout, "v1")
+    read = viewports.layout_of(layout.as_config({}), "windowed")
+    assert _window(read, "v1").state == "minimized"
+    assert _window(read, "v1").restore == (24, 24, 640, 420)
+    # a config from before any of this existed reads as normal windows, not as problems
+    old = {
+        "viewport": {"kind": "windowed", "windows": [{"node": "v1", "child": "", "x": 5, "y": 5}]}
+    }
+    plain = viewports.layout_of(old, "windowed")
+    assert _window(plain, "v1").state == "normal"
+    assert plain.problems == ()
+
+
+def test_a_windowed_viewports_opacity_is_clamped_on_read_and_refused_on_write() -> None:
+    """Silence is solid, a stored value is clamped, and a new one outside the range is refused.
+
+    The clamp is for something already written; the refusal is `BoxType.check`, which is the only
+    place a value can be turned away before it becomes a box's own words.
+    """
+    assert viewports.opacity_of(None) == 1.0
+    assert viewports.opacity_of({"windowed": {"opacity": "not a number"}}) == 1.0
+    assert viewports.opacity_of({"windowed": {"opacity": 0.01}}) == viewports.MIN_OPACITY
+    assert viewports.opacity_of({"windowed": {"opacity": 0.62}}) == 0.62
+    assert viewports.opacity_problem({}) == ""
+    assert viewports.opacity_problem({"windowed": {}}) == ""
+    assert "between" in viewports.opacity_problem({"windowed": {"opacity": 0.05}})
+    assert "a number" in viewports.opacity_problem({"windowed": {"opacity": "solid"}})
+    assert viewports.opacity_problem({"windowed": 3}) == "'windowed' must hold a settings block"
