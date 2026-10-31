@@ -54,3 +54,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0023   | A viewport lends its space: the layout is a tree the server owns, and a drop copies unless Shift says otherwise | accepted |
 | 0024   | boxganizer installs fully featured: an interface is a dependency, not an extra | accepted |
 | 0025   | A folder that filters itself refuses the hand that files into it, and a tag move re-cuts it | accepted |
+| 0026   | The tag window is a tree, and the rules stay on the server | accepted |

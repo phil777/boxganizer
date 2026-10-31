@@ -168,18 +168,44 @@
 
     <!-- A file selector over the server's filesystem, for the resource field. -->
     <dialog id="tags-modal" aria-label="Manage tags">
-      <h2>Manage tags</h2>
-      <p class="muted">
-        A tag inherited from the one above it is not on the box twice: it is what the box's own
-        tag means. So removing an inherited tag means moving it here, not editing the box.
+      <header class="tags-head">
+        <h2>Manage tags</h2>
+        <input
+          id="tags-search"
+          class="tags-search"
+          type="search"
+          placeholder="filter tags"
+          aria-label="filter tags"
+          autocomplete="off"
+        />
+        <button type="button" id="tags-close" class="tags-close" aria-label="Close">✕</button>
+      </header>
+      <p class="muted tags-note">
+        A tag inherited from the one above it is not on the box twice: it is what the box's own tag
+        means. So removing an inherited tag means moving it here, not editing the box. Drag a tag onto
+        another to move it under that one; drop it in the space below to make it top level.
       </p>
-      <ul id="tags-tree" class="tags-tree"></ul>
-      <form id="tag-new" class="tag-new">
-        <input id="tag-new-name" type="text" placeholder="new tag, or home/kitchen" aria-label="new tag name" />
-        <button type="submit">Add tag</button>
-      </form>
-      <footer>
-        <button type="button" id="tags-close">Close</button>
+      <div class="tags-body">
+        <div class="tags-column">
+          <ul id="tags-tree" class="tags-tree" role="tree" aria-label="Tags"></ul>
+          <p id="tags-empty" class="muted tags-empty" hidden></p>
+          <form id="tag-new" class="tag-new">
+            <input
+              id="tag-new-name"
+              type="text"
+              placeholder="new tag, or home/kitchen"
+              aria-label="new tag name"
+            />
+            <button type="submit">Add</button>
+          </form>
+        </div>
+        <section id="tag-detail" class="tag-detail" aria-label="Selected tag"></section>
+      </div>
+      <footer class="tags-foot">
+        <span class="muted"
+          >↑ ↓ choose · → open · ← close · Enter or F2 rename · Del go to Delete · Space jump to the
+          box list</span
+        >
       </footer>
     </dialog>
 

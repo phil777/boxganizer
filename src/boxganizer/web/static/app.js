@@ -1284,13 +1284,107 @@ async function ensureTagOptions() {
 
 /* -- the Manage tags window ---------------------------------------------------
  *
- * One row per tag, edited in place: the name, what is above it, and its colour. A window that
- * made every change through a separate dialog would be three clicks per edit and would hide
- * the one thing worth seeing here, which is that a move takes its whole branch with it.
+ * A tree, read as a tree. The first build put seven controls on every row — name, count, a
+ * parent picker, a colour well, "auto", Save, Delete — so a library of thirty tags was two hundred
+ * controls, and the one thing worth seeing, which is what is above what, was drawn as indentation on
+ * a form. Editing was a trip: change a field, find that row's Save, hope.
+ *
+ * Here a row is the tag: swatch, name, counts. Everything that is about *this* tag rather than about
+ * reading the tree — its colour, what is above it, whether it should exist, and which boxes to give
+ * it to — lives in the pane beside it, for the tag you have selected. Renaming and colouring happen
+ * in place and commit when you leave the field: there is no Save to lose, and no dialog between a
+ * thought and the library.
+ *
+ * The rules are the server's and unchanged: a tag's name is its identity (ADR 19), a move takes its
+ * branch with it, a cycle is refused there, and an inherited tag is what a box's own tag means rather
+ * than a second thing on it. Nothing here asks for a new endpoint: the tree is `GET /api/tags`, an
+ * edit is one `PATCH`, the delete is the two-step `DELETE`, and "give this tag to these boxes" is the
+ * same `POST /api/boxes/{ref}/tags` the chip field has always used, once per box — idempotent, so
+ * ticking a box that already carries the tag costs nothing.
  */
+const tagUi = {
+  selected: "",
+  query: "",
+  boxQuery: "",
+  collapsed: new Set(),
+  picked: new Set(),
+};
+
+const TAG_DRAG_TYPE = "application/x-boxganizer-tag";
+/* What is being dragged, kept here as well as in the drag payload. `getData` answers "" during
+ * dragover — the browser will not let a page read what is coming until the drop — and "may I drop
+ * here, and what would it mean" is exactly a dragover question. Without this the tree could not
+ * highlight a legal target while the tag was in the air. */
+let tagBeingDragged = "";
+const MAX_DETAIL_BOXES = 40;
+
 async function openTagsModal() {
   el("tags-modal").showModal();
+  const search = el("tags-search");
+  if (search) search.value = tagUi.query;
   await drawTagsTree();
+}
+
+/** Depth-first order, because the server returns the tree by level and a *list* by level is not a
+ *  tree: `home/kitchen` arriving after `work` meant the old window indented a child under a sibling.
+ *  Ordering is presentation, so it belongs here and not in the endpoint.
+ */
+function orderDepthFirst(all) {
+  const byParent = new Map();
+  all.forEach((tag) => {
+    const key = tag.parent || "";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(tag);
+  });
+  const out = [];
+  const walk = (parent) => {
+    (byParent.get(parent) || [])
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach((tag) => {
+        out.push(tag);
+        walk(tag.name);
+      });
+  };
+  walk("");
+  // anything the tree cannot reach (a parent the server did not send) still gets shown rather than
+  // silently dropped from a management window whose job is to show every tag
+  const seen = new Set(out.map((tag) => tag.name));
+  all.filter((tag) => !seen.has(tag.name)).forEach((tag) => out.push(tag));
+  return out;
+}
+
+/** The tags this window shows, in tree order, with the ones above a match kept. */
+function tagsToShow(raw) {
+  const all = orderDepthFirst(raw);
+  const term = tagUi.query.trim().toLowerCase();
+  if (!term) {
+    const out = [];
+    const open = [];
+    all.forEach((tag) => {
+      while (open.length > tag.depth) open.pop();
+      if (open.every((name) => !tagUi.collapsed.has(name))) out.push(tag);
+      open.push(tag.name);
+    });
+    return out;
+  }
+  // Keep a match *and every tag above it*: a filtered tree that shows `pots` without `home` is a
+  // list with indentation, and the one thing worth seeing is what it hangs off. `path` is the list of
+  // ancestor names, so this is a set of names, which is what a row is keyed by.
+  const keep = new Set();
+  all.forEach((tag) => {
+    if (!tag.path.join("/").toLowerCase().includes(term)) return;
+    tag.path.forEach((name) => keep.add(name));
+  });
+  return all.filter((tag) => keep.has(tag.name));
+}
+
+function tagIsBelow(candidate, name) {
+  // "is `candidate` inside the branch rooted at `name`", read off the paths the server already sent:
+  // the tree is stored as parents, never as descendants (ADR 19), so this is the cheap direction.
+  if (candidate === name) return false;
+  const tag = (state.tagTree || []).find((entry) => entry.name === candidate);
+  return Boolean(tag) && tag.path.includes(name);
 }
 
 async function drawTagsTree() {
@@ -1298,140 +1392,494 @@ async function drawTagsTree() {
   list.textContent = "";
   await ensureTagOptions();
   const all = state.tagTree || [];
+  const empty = el("tags-empty");
+
   if (!all.length) {
-    const none = document.createElement("li");
-    none.className = "muted";
-    none.textContent = "No tags yet. Add the first one below — a word, or a path like home/kitchen.";
-    list.append(none);
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = "No tags yet. Add the first one below — a word, or a path like home/kitchen.";
+    }
+    drawTagDetail();
     return;
   }
-  all.forEach((tag) => {
-    const row = document.createElement("li");
-    row.style.paddingLeft = `${0.2 + tag.depth * 1.1}rem`;
 
-    const swatch = document.createElement("span");
-    swatch.className = "tag-swatch";
-    swatch.style.background = tag.colour;
-    row.append(swatch);
+  const shown = tagsToShow(all);
+  if (!shown.length) {
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = `No tag matches “${tagUi.query.trim()}”.`;
+    }
+    drawTagDetail();
+    return;
+  }
+  if (empty) empty.hidden = true;
+  if (!shown.some((tag) => tag.name === tagUi.selected)) {
+    tagUi.selected = shown[0].name;
+  }
+  shown.forEach((tag) => list.append(tagRow(tag, all)));
+  wireTagKeys(list, shown);
+  wireTreeDropZone(list);
+  drawTagDetail();
+}
 
-    const name = document.createElement("input");
-    name.className = "tag-name";
-    name.value = tag.name;
-    name.setAttribute("aria-label", `the name of the tag ${tag.name}`);
-    row.append(name);
+function tagRow(tag, all) {
+  const row = document.createElement("li");
+  row.className = "tag-row";
+  row.setAttribute("role", "treeitem");
+  row.setAttribute("aria-level", String(tag.depth + 1));
+  row.setAttribute("aria-selected", String(tag.name === tagUi.selected));
+  row.dataset.tag = tag.name;
+  row.tabIndex = tag.name === tagUi.selected ? 0 : -1;
+  row.draggable = true;
+  row.style.setProperty("--tag-depth", String(tag.depth));
 
-    const count = document.createElement("span");
-    count.className = "tag-count";
-    count.textContent = tag.count
-      ? `${tag.count} on it`
-      : tag.includingBelow
-        ? `${tag.includingBelow} below`
-        : "nothing on it";
-    count.title = `${tag.count} box(es) were given this tag; ${tag.includingBelow} answer to it counting the tags below`;
-    row.append(count);
-
-    const parent = document.createElement("select");
-    parent.setAttribute("aria-label", `what is above ${tag.name}`);
-    const top = document.createElement("option");
-    top.value = "";
-    top.textContent = "— top level —";
-    parent.append(top);
-    all
-      .filter((other) => other.name !== tag.name)
-      .forEach((other) => {
-        const option = document.createElement("option");
-        option.value = other.name;
-        option.textContent = other.path.join(" / ");
-        parent.append(option);
-      });
-    parent.value = tag.parent || "";
-    row.append(parent);
-
-    const colour = document.createElement("input");
-    colour.type = "color";
-    colour.value = tag.explicit_colour || "#808080";
-    colour.title = tag.explicit_colour
-      ? "the colour you chose"
-      : "derived from the tag above it — pick one to fix it";
-    row.append(colour);
-
-    const auto = document.createElement("button");
-    auto.type = "button";
-    auto.textContent = "auto";
-    auto.title = "hand this colour back to the derived palette";
-    auto.disabled = !tag.explicit_colour;
-    row.append(auto);
-
-    const actions = document.createElement("span");
-    actions.className = "tag-actions";
-    const save = document.createElement("button");
-    save.type = "button";
-    save.textContent = "Save";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.textContent = "Delete";
-    remove.title = "the tags below it move up a level instead of going with it";
-    actions.append(save, remove);
-    row.append(actions);
-
-    const complain = (error) => {
-      // A refused edit must stay on the row it belongs to: this window holds a dozen
-      // inputs, and one status line at the bottom of the page says nothing about which.
-      status(error.message, true);
-      let note = row.querySelector(".tag-error");
-      if (!note) {
-        note = document.createElement("span");
-        note.className = "tag-error";
-        row.append(note);
-      }
-      note.textContent = error.message;
-    };
-
-    const commit = async (payload) => {
-      try {
-        await api.editTag(tag.name, payload);
-        await drawTagsTree();
-        await renderTagLine(state.current);
-        // A rename, a re-parent or a colour: the first two change who a filter reaches, and the
-        // store has already re-cut every folder that asks about tags.
-        relistFilteredFolders();
-        status(`saved ${payload.name || tag.name}`);
-      } catch (error) {
-        complain(error);
-      }
-    };
-    save.addEventListener("click", () =>
-      commit({
-        name: name.value.trim() === tag.name ? null : name.value.trim(),
-        parent: parent.value,
-        colour: colour.value,
-      })
-    );
-    auto.addEventListener("click", () => commit({ clear_colour: true }));
-    remove.addEventListener("click", () => {
-      if (!remove.dataset.sure) {
-        remove.dataset.sure = "1";
-        remove.textContent = "Sure?";
-        return;
-      }
-      api
-        .deleteTag(tag.name)
-        .then(async () => {
-          await drawTagsTree();
-          await renderTagLine(state.current);
-          relistFilteredFolders();
-          status(`deleted ${tag.name}`);
-        })
-        .catch(complain);
+  const hasKids = all.some((other) => other.parent === tag.name);
+  const caret = document.createElement("button");
+  caret.type = "button";
+  caret.className = "tag-caret";
+  caret.tabIndex = -1;
+  if (hasKids) {
+    const closed = tagUi.collapsed.has(tag.name);
+    caret.textContent = closed ? "▸" : "▾";
+    row.setAttribute("aria-expanded", String(!closed));
+    caret.title = closed ? `show the tags below ${tag.name}` : `hide the tags below ${tag.name}`;
+    caret.setAttribute("aria-label", caret.title);
+    caret.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (tagUi.collapsed.has(tag.name)) tagUi.collapsed.delete(tag.name);
+      else tagUi.collapsed.add(tag.name);
+      drawTagsTree();
     });
-    name.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        save.click();
-      }
-    });
-    list.append(row);
+  } else {
+    caret.classList.add("tag-caret-leaf");
+    caret.setAttribute("aria-hidden", "true");
+  }
+  row.append(caret);
+
+  const swatch = document.createElement("span");
+  swatch.className = "tag-swatch";
+  swatch.style.background = tag.colour;
+  swatch.title = tag.explicit_colour
+    ? `${tag.path.join("/")} — the colour you chose`
+    : `${tag.path.join("/")} — coloured by the tag above it`;
+  row.append(swatch);
+
+  const name = document.createElement("input");
+  name.className = "tag-name";
+  name.value = tag.name;
+  name.setAttribute("aria-label", `the name of the tag ${tag.name}`);
+  name.addEventListener("click", () => {
+    // The field is most of the row's width, so a click there is the person pointing at this tag.
+    // Choosing it must not steal the focus they just took, which is why this path does not focus.
+    selectTag(tag.name, { focus: false });
   });
+  name.addEventListener("change", () => renameTag(tag.name, name.value));
+  name.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      name.blur();
+    }
+    if (event.key === "Escape") {
+      // Back out to the row, not to nowhere: a name field that drops focus into the page loses the
+      // keyboard user's place in a tree they were moving through.
+      name.value = tag.name;
+      name.blur();
+      row.focus();
+    }
+  });
+  row.append(name);
+
+  const count = document.createElement("span");
+  count.className = "tag-count";
+  count.textContent = String(tag.count);
+  count.title = `${tag.count} box(es) were given this tag directly`;
+  row.append(count);
+  if (tag.includingBelow > tag.count) {
+    const below = document.createElement("span");
+    below.className = "tag-below";
+    below.textContent = `+${tag.includingBelow - tag.count}`;
+    below.title = `${tag.includingBelow} boxes answer to this tag counting the tags below it`;
+    row.append(below);
+  }
+
+  row.addEventListener("click", () => selectTag(tag.name));
+  row.addEventListener("dragstart", (event) => {
+    if (event.target !== row) return; // the name field is editable text; dragging it selects words
+    event.dataTransfer.setData(TAG_DRAG_TYPE, tag.name);
+    event.dataTransfer.effectAllowed = "move";
+    tagBeingDragged = tag.name;
+    row.classList.add("tag-dragging");
+  });
+  row.addEventListener("dragend", () => {
+    row.classList.remove("tag-dragging");
+    tagBeingDragged = "";
+    el("tags-tree").classList.remove("tag-target");
+  });
+  row.addEventListener("dragover", (event) => {
+    const moved = tagBeingDragged;
+    if (!moved || moved === tag.name || tagIsBelow(tag.name, moved)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    row.classList.add("tag-target");
+  });
+  row.addEventListener("dragleave", () => row.classList.remove("tag-target"));
+  row.addEventListener("drop", (event) => {
+    row.classList.remove("tag-target");
+    const moved = tagBeingDragged || (event.dataTransfer ? event.dataTransfer.getData(TAG_DRAG_TYPE) : "");
+    if (!moved) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (moved === tag.name) {
+      status("a tag cannot go inside itself", true);
+      return;
+    }
+    if (tagIsBelow(tag.name, moved)) {
+      status("that would put a tag inside one of its own tags", true);
+      return;
+    }
+    reparentTag(moved, tag.name);
+  });
+  return row;
+}
+
+function selectTag(name, { focus = true } = {}) {
+  if (name !== tagUi.selected) {
+    tagUi.picked.clear();
+    tagUi.boxQuery = "";
+  }
+  tagUi.selected = name;
+  const list = el("tags-tree");
+  list.querySelectorAll(".tag-row").forEach((row) => {
+    const on = row.dataset.tag === name;
+    row.setAttribute("aria-selected", String(on));
+    row.tabIndex = on ? 0 : -1;
+    if (on && focus) row.focus();
+  });
+  drawTagDetail();
+}
+
+/** One key model for the whole list, because a row that answers keys differently per control is
+ *  a keyboard user's guess, not an interface. */
+function wireTagKeys(list, shown) {
+  if (list.dataset.wired === "1") return;
+  list.dataset.wired = "1";
+  list.addEventListener("keydown", (event) => {
+    const rows = Array.from(list.querySelectorAll(".tag-row"));
+    const active = document.activeElement.closest(".tag-row");
+    const index = rows.indexOf(active);
+    const at = (next) => {
+      if (rows[next]) {
+        selectTag(rows[next].dataset.tag);
+        event.preventDefault();
+      }
+    };
+    if (event.target instanceof HTMLInputElement && event.key !== "Escape") return;
+    if (event.key === "ArrowDown") at(index + 1);
+    else if (event.key === "ArrowUp") at(index === 0 ? 0 : index - 1);
+    else if (event.key === "Home") at(0);
+    else if (event.key === "End") at(rows.length - 1);
+    else if (event.key === "ArrowRight" && active) {
+      const tag = (state.tagTree || []).find((entry) => entry.name === active.dataset.tag);
+      if (tag && tagUi.collapsed.has(tag.name)) {
+        tagUi.collapsed.delete(tag.name);
+        drawTagsTree();
+        event.preventDefault();
+      }
+    } else if (event.key === "ArrowLeft" && active) {
+      const tag = (state.tagTree || []).find((entry) => entry.name === active.dataset.tag);
+      if (tag && tagUi.collapsed.has(tag.name)) {
+        tagUi.collapsed.delete(tag.name);
+        drawTagsTree();
+      } else if (tag && tag.parent) {
+        selectTag(tag.parent);
+      }
+      event.preventDefault();
+    } else if ((event.key === "Enter" || event.key === "F2") && active) {
+      const field = active.querySelector(".tag-name");
+      if (field) {
+        field.focus();
+        field.select();
+      }
+      event.preventDefault();
+    } else if (event.key === "Delete" && active) {
+      // Move the person to the button that destroys something, and stop there. A key that deletes
+      // on the keystroke is a typo away from a branch of the library. The button is looked up after
+      // choosing the tag, because choosing one repaints the detail pane and the button held from
+      // before that is no longer in the page.
+      selectTag(active.dataset.tag, { focus: false });
+      el("tag-detail")?.querySelector(".tag-delete")?.focus();
+      event.preventDefault();
+    } else if (event.key === " " && active) {
+      event.preventDefault();
+      const box = el("tag-box-search");
+      if (box) box.focus();
+    }
+  });
+}
+
+/** The blank space under the last row: drop a tag there to pull it out to the top level.
+ *  Rows stop the event, so anything reaching the list itself landed on the space between and below. */
+function wireTreeDropZone(list) {
+  if (list.dataset.dropzone === "1") return;
+  list.dataset.dropzone = "1";
+  list.addEventListener("dragover", (event) => {
+    if (!tagBeingDragged) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    list.classList.add("tag-target");
+  });
+  list.addEventListener("dragleave", (event) => {
+    if (!list.contains(event.relatedTarget)) list.classList.remove("tag-target");
+  });
+  list.addEventListener("drop", (event) => {
+    list.classList.remove("tag-target");
+    const moved = tagBeingDragged;
+    if (!moved) return;
+    event.preventDefault();
+    const tag = (state.tagTree || []).find((entry) => entry.name === moved);
+    if (tag && !tag.parent) {
+      status(`${moved} is already a top-level tag`);
+      return;
+    }
+    reparentTag(moved, "");
+  });
+}
+
+async function tagMutation(sentence, work) {
+  try {
+    await work();
+    await drawTagsTree();
+    await renderTagLine(state.current);
+    relistFilteredFolders(); // the tree moved, so every folder that filters on tags re-cuts
+    if (sentence) status(sentence);
+    return true;
+  } catch (error) {
+    // The server's sentence, because the server is the one that knows why: "a tag cannot live
+    // below itself" is advice, "422" is not.
+    status(error.message, true);
+    await drawTagsTree();
+    return false;
+  }
+}
+
+function renameTag(from, to) {
+  const clean = to.trim();
+  if (!clean || clean === from) return Promise.resolve(false);
+  return tagMutation(`renamed ${from} → ${clean}`, () => api.editTag(from, { name: clean }));
+}
+
+function reparentTag(name, parent) {
+  return tagMutation(
+    parent ? `moved ${name} under ${parent}` : `made ${name} a top-level tag`,
+    () => api.editTag(name, { parent: parent || "" }),
+  );
+}
+
+function paintTagColour(name, colour) {
+  return tagMutation(`coloured ${name}`, () => api.editTag(name, { colour }));
+}
+
+function clearTagColour(name) {
+  return tagMutation(`${name} takes its colour from above again`, () =>
+    api.editTag(name, { clear_colour: true }),
+  );
+}
+
+async function drawTagDetail() {
+  const pane = el("tag-detail");
+  if (!pane) return;
+  pane.textContent = "";
+  const tag = (state.tagTree || []).find((entry) => entry.name === tagUi.selected);
+  if (!tag) {
+    const none = document.createElement("p");
+    none.className = "muted";
+    none.textContent = "Pick a tag to change its colour, move it, or give it to boxes.";
+    pane.append(none);
+    return;
+  }
+
+  const head = document.createElement("h3");
+  head.textContent = tag.path.join(" / ");
+  pane.append(head);
+
+  const tally = document.createElement("p");
+  tally.className = "tag-detail-tally muted";
+  tally.textContent =
+    tag.count === 0
+      ? `${tag.includingBelow} box(es) below it`
+      : `${tag.count} box(es) carry it · ${tag.includingBelow} counting the tags below`;
+  pane.append(tally);
+
+  const colourRow = document.createElement("div");
+  colourRow.className = "tag-detail-row";
+  const colour = document.createElement("label");
+  colour.className = "tag-detail-colour";
+  const well = document.createElement("input");
+  well.type = "color";
+  well.value = tag.explicit_colour || tag.colour;
+  well.setAttribute("aria-label", `the colour of ${tag.name}`);
+  well.addEventListener("change", () => paintTagColour(tag.name, well.value));
+  const swatch = document.createElement("span");
+  swatch.style.background = tag.colour;
+  colour.append(swatch, well, document.createTextNode("colour"));
+  colourRow.append(colour);
+  const auto = document.createElement("button");
+  auto.type = "button";
+  auto.textContent = "auto";
+  auto.disabled = !tag.explicit_colour;
+  auto.title = tag.explicit_colour
+    ? "hand this colour back to the tag above"
+    : "this tag already takes its colour from above";
+  auto.addEventListener("click", () => clearTagColour(tag.name));
+  colourRow.append(auto);
+  pane.append(colourRow);
+
+  const above = document.createElement("div");
+  above.className = "tag-detail-row";
+  const pick = document.createElement("select");
+  pick.setAttribute("aria-label", `what is above ${tag.name}`);
+  const top = document.createElement("option");
+  top.value = "";
+  top.textContent = "— top level —";
+  pick.append(top);
+  (state.tagTree || [])
+    .filter((other) => other.name !== tag.name && !tagIsBelow(other.name, tag.name))
+    .forEach((other) => {
+      const option = document.createElement("option");
+      option.value = other.name;
+      option.textContent = other.path.join(" / ");
+      pick.append(option);
+    });
+  pick.value = tag.parent || "";
+  pick.addEventListener("change", () => reparentTag(tag.name, pick.value));
+  above.append(document.createTextNode("above it "), pick);
+  pane.append(above);
+  const hint = document.createElement("p");
+  hint.className = "muted tag-detail-hint";
+  hint.textContent = "or drag the tag onto another one to move it under that one";
+  pane.append(hint);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "tag-delete";
+  remove.textContent = `Delete ${tag.name}`;
+  remove.title = "the tags below it move up a level instead of going with it";
+  remove.addEventListener("click", () => {
+    if (!remove.dataset.sure) {
+      remove.dataset.sure = "1";
+      remove.textContent = "Sure? Boxes keep existing, they just lose this tag";
+      return;
+    }
+    const gone = tag.name;
+    tagUi.selected = "";
+    tagMutation(`deleted ${gone}`, () => api.deleteTag(gone));
+  });
+  pane.append(remove);
+
+  pane.append(tagBoxPicker(tag.name));
+}
+
+/** Give this tag to several boxes at once, with the list the page already has.
+
+ *  No endpoint answers "which boxes carry this tag" — the counts come back from `GET /api/tags` and
+ *  that is all — so this is an *assign* pane, not a membership editor: the boxes listed here are every
+ *  box in the library, and the boxes already carrying the tag are not marked. Taking a tag off one box
+ *  is the chip's cross, and off many is the same call repeated.
+ */
+function tagBoxPicker(tagName) {
+  const wrap = document.createElement("div");
+  wrap.className = "tag-assign";
+  const title = document.createElement("h4");
+  title.textContent = `Give “${tagName}” to boxes`;
+  wrap.append(title);
+
+  const search = document.createElement("input");
+  search.type = "search";
+  search.id = "tag-box-search";
+  search.placeholder = "filter boxes";
+  search.setAttribute("aria-label", "filter the boxes below");
+  search.value = tagUi.boxQuery;
+  wrap.append(search);
+
+  const list = document.createElement("ul");
+  list.className = "tag-assign-list";
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "tag-assign-go";
+
+  const paint = () => {
+    const term = tagUi.boxQuery.trim().toLowerCase();
+    const boxes = (state.boxes || []).filter(
+      (box) => !term || box.name.toLowerCase().includes(term) || box.box_type.includes(term),
+    );
+    list.textContent = "";
+    boxes.slice(0, MAX_DETAIL_BOXES).forEach((box) => {
+      const item = document.createElement("li");
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = tagUi.picked.has(box.uuid);
+      check.addEventListener("change", () => {
+        if (check.checked) tagUi.picked.add(box.uuid);
+        else tagUi.picked.delete(box.uuid);
+        paintGo();
+      });
+      label.append(check, document.createTextNode(` ${box.icon || ""} ${box.name}`));
+      label.title = `${box.name} — ${box.box_type}`;
+      item.append(label);
+      list.append(item);
+    });
+    if (boxes.length > MAX_DETAIL_BOXES) {
+      const more = document.createElement("li");
+      more.className = "muted";
+      more.textContent = `…and ${boxes.length - MAX_DETAIL_BOXES} more — keep typing`;
+      list.append(more);
+    }
+    if (!boxes.length) {
+      const none = document.createElement("li");
+      none.className = "muted";
+      none.textContent = "no box matches that";
+      list.append(none);
+    }
+    paintGo();
+  };
+  const paintGo = () => {
+    go.textContent = `Tag ${tagUi.picked.size} box${tagUi.picked.size === 1 ? "" : "es"}`;
+    go.disabled = tagUi.picked.size === 0;
+  };
+
+  search.addEventListener("input", () => {
+    tagUi.boxQuery = search.value;
+    paint();
+  });
+  go.addEventListener("click", async () => {
+    const wanted = [...tagUi.picked];
+    go.disabled = true;
+    let done = 0;
+    let failure = "";
+    for (const uuid of wanted) {
+      try {
+        await api.giveTag(uuid, tagName);
+        done += 1;
+      } catch (error) {
+        failure = error.message;
+        break;
+      }
+    }
+    tagUi.picked.clear();
+    paint();
+    if (failure) {
+      status(`tagged ${done} of ${wanted.length} before: ${failure}`, true);
+      return;
+    }
+    await tagMutation(`tagged ${done} box${done === 1 ? "" : "es"} with ${tagName}`, () =>
+      Promise.resolve(),
+    );
+  });
+  wrap.append(list, go);
+  paint();
+  return wrap;
 }
 
 /* -- a box's settings, shown only when asked for -----------------------------
@@ -3192,6 +3640,20 @@ async function init() {
   el("side-menu").addEventListener("click", openSideMenu);
   el("about-close").addEventListener("click", () => el("about-modal").close());
   el("tags-close").addEventListener("click", () => el("tags-modal").close());
+  el("tags-search").addEventListener("input", (event) => {
+    tagUi.query = event.target.value;
+    drawTagsTree();
+  });
+  // "/" anywhere in the window goes to the filter, the way a reader expects to start typing.
+  el("tags-modal").addEventListener("keydown", (event) => {
+    if (event.key !== "/" || event.target instanceof HTMLInputElement) return;
+    event.preventDefault();
+    el("tags-search").focus();
+  });
+  el("tags-modal").addEventListener("close", () => {
+    tagUi.query = "";
+    tagUi.picked.clear();
+  });
   el("tag-new").addEventListener("submit", async (event) => {
     event.preventDefault();
     const field = el("tag-new-name");

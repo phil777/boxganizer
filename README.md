@@ -141,6 +141,18 @@ means moving the tag in ☰ **Manage tags…**, not editing the box. Colours are
 place in the hierarchy — one hue per branch, lighter as it goes down — so the tree is visible
 without reading it. ADR 19.
 
+☰ **Manage tags…** is a tree, read as a tree (ADR 26): one row per tag — caret, swatch, name, how many
+boxes carry it and how many answer to it counting the branches below — with the tags ordered
+depth-first and indented by their real depth. A filter at the top keeps a match **and everything above
+it**, so filtering does not flatten the tree. Rename and colour happen in place and commit when you
+leave the field; there is no Save button to lose. Drag a tag onto another to move it under that one, or
+into the space below the list to pull it out to the top level; a drop that would bury a tag inside its
+own descendant is refused where it is attempted. Everything else about the selected tag is in the pane
+beside it — its colour and "auto", what is above it, delete, and a list of boxes to give the tag to in
+one go. `↑ ↓ → ← Enter/F2 Del Space /` are the keys, and Delete moves you to the button rather than
+pressing it: a branch of the library is not one keystroke from gone. The rules are the server's and
+unchanged — no endpoint was added for any of this.
+
 ```bash
 box tag add home/kitchen/boiler        # a path creates the parents it names
 box tag give Rates boiler

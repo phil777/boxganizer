@@ -3105,6 +3105,117 @@ def test_the_window_controls_are_drawn_not_typed_and_the_chosen_window_is_on_top
     assert 'saveSettingFor(box, "windowed"' in toolbar
 
 
+def test_the_tag_window_is_a_tree_and_not_a_form_of_seven_controls(
+    client: TestClient,
+) -> None:
+    """A row is the tag; what is about *this* tag lives beside it.
+
+    The first window put a name field, a count, a parent picker, a colour well, "auto", Save and
+    Delete on every row: thirty tags was two hundred controls, and the hierarchy — the one thing
+    worth seeing — was drawn as indentation on a form that had to be re-read every time a row moved.
+    """
+    page = client.get("/").text
+    assert 'id="tags-search"' in page
+    assert 'role="tree"' in page
+    assert 'id="tag-detail"' in page
+    assert "filter tags" in page
+    # the keyboard model is written where the person will look for it
+    assert "Enter or F2 rename" in page
+    assert "Del go to Delete" in page
+
+    script = client.get("/static/app.js").text
+    # the server sends the tree by level; a list by level is not a tree
+    order = script[script.index("function orderDepthFirst(all)") :]
+    order = order[: order.index("function tagsToShow")]
+    assert "byParent" in order and "walk(tag.name)" in order
+    assert "the tree cannot reach" in order
+    assert "const all = orderDepthFirst(raw);" in script
+
+    # indentation is the server's own depth, in one variable
+    css = client.get("/static/app.css").text
+    assert "var(--tag-depth, 0)" in css
+    assert '.tags-tree li.tag-row[aria-selected="true"]' in css
+    assert ".tags-tree.tag-target" in css and "li.tag-target" in css
+
+    # a filter keeps the ancestors of a match, so the result still reads as a tree
+    shown = script[script.index("function tagsToShow(raw)") :]
+    shown = shown[: shown.index("function tagIsBelow")]
+    assert "tag.path.forEach((name) => keep.add(name));" in shown
+
+    # one row, one drag payload — `getData` answers "" during dragover, and "may I drop here" is a
+    # dragover question
+    assert "let tagBeingDragged = \"\";" in script
+    row = script[script.index("function tagRow(tag, all)") :]
+    row = row[: row.index("function selectTag")]
+    assert "const moved = tagBeingDragged;" in row
+    assert "if (!moved || moved === tag.name || tagIsBelow(tag.name, moved)) return;" in row
+    assert "that would put a tag inside one of its own tags" in row
+    # clicking the name chooses the tag without taking the focus the click just asked for
+    assert 'selectTag(tag.name, { focus: false });' in row
+    assert 'row.addEventListener("click", () => selectTag(tag.name));' in row
+    # Escape out of a name goes back to the row, not to the page
+    assert "name.blur();\n      row.focus();" in row
+
+
+def test_the_tag_window_deletes_nothing_on_a_keystroke(client: TestClient) -> None:
+    """Delete moves you to the button; it does not press it.
+
+    A branch of the library is not one keystroke away from gone — and the focus has to be looked for
+    *after* the detail pane is rebuilt, or the key lands on a button that is no longer in the page.
+    """
+    script = client.get("/static/app.js").text
+    keys = script[script.index("function wireTagKeys(list, shown)") :]
+    keys = keys[: keys.index("async function tagMutation")]
+    assert 'selectTag(active.dataset.tag, { focus: false });' in keys
+    assert 'el("tag-detail")?.querySelector(".tag-delete")?.focus();' in keys
+    detail = script[script.index("async function drawTagDetail()") :]
+    detail = detail[: detail.index("function tagBoxPicker")]
+    assert 'remove.dataset.sure = "1";' in detail
+    assert "Sure? Boxes keep existing" in detail
+    assert "the tags below it move up a level instead of going with it" in detail
+
+
+def test_the_tag_window_asks_for_no_endpoint_that_does_not_exist(
+    client: TestClient,
+) -> None:
+    """The redesign moved the interaction and left the server alone.
+
+    Every write the window makes is one the chip field has always made, and the routes that answer
+    for tags are named here so that adding one to make a screen easier is a decision someone has to
+    notice rather than a side effect of a redesign.
+    """
+    script = client.get("/static/app.js").text
+    window = script[script.index("const tagUi = {") :]
+    window = window[: window.index("/* -- a box's settings")]
+    calls = sorted(
+        {
+            call
+            for call in ("editTag", "deleteTag", "createTag", "giveTag", "setBoxTags", "boxTags")
+            if f"api.{call}" in window
+        }
+    )
+    assert calls == ["deleteTag", "editTag", "giveTag"]
+    assert "fetch(" not in window
+
+    served = client.get("/openapi.json").json()
+    routes = {
+        (str(method), path)
+        for path, methods in served["paths"].items()
+        for method in methods
+        if "tags" in path
+    }
+    assert routes == {
+        ("get", "/api/tags"),
+        ("post", "/api/tags"),
+        ("patch", "/api/tags/{name}"),
+        ("delete", "/api/tags/{name}"),
+        ("get", "/api/boxes/{ref}/tags"),
+        ("post", "/api/boxes/{ref}/tags"),
+        ("put", "/api/boxes/{ref}/tags"),
+        ("delete", "/api/boxes/{ref}/tags/{name}"),
+    }, routes
+
+
 def test_a_dialog_reports_its_own_refusal(client: TestClient) -> None:
     """A status bar behind an open modal is a message nobody receives.
 
