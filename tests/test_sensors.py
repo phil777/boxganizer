@@ -191,3 +191,207 @@ def test_the_three_templates_are_the_whole_public_surface() -> None:
     assert sensors.TEMPLATES == ("extract_template", "display_template", "style_template")
     assert "style" not in sensors.FORMAT_TAGS, "a <style> element reaches outside the pane"
     assert "script" in sensors.DROP_TAGS
+
+
+SCALE = {
+    "numeric": {
+        "min": 0,
+        "max": 10,
+        "representation": "gauge",
+        "intervals": [
+            {"upto": 3, "colour": "green"},
+            {"upto": 7, "colour": "orange"},
+            {"upto": 10, "colour": "#d0021b"},
+        ],
+    }
+}
+
+
+def scale_box(**over: object) -> Box:
+    config = {k: dict(v) if isinstance(v, dict) else v for k, v in SCALE.items()}
+    config.update(over)
+    return Box(
+        name="Boiler pressure", box_type="mqtt", resource_uri="mqtt://b:1883/t", config=config
+    )
+
+
+def scale(numeric: float | None):  # type: ignore[no-untyped-def]
+    return sensors.numeric(scale_box(), numeric)
+
+
+def test_a_value_between_two_stops_cannot_fall_through_to_no_colour() -> None:
+    """The intervals are required to cover the range, and this is what that buys.
+
+    Every point of [min, max] is asked about, at a resolution finer than the stops: a scale with a
+    hole in it looks fine until the one reading that lands in the hole arrives, and by then the
+    person watching has learned to trust the colour.
+    """
+    steps = 201
+    for index in range(steps + 1):
+        number = 10.0 * index / steps
+        found = scale(number)
+        assert found is not None, number
+        assert found["colour"], f"{number} arrived with no colour"
+        assert found["interval"] in (0, 1, 2)
+    assert scale(2.99)["colour"] == "green"
+    assert scale(3.0)["colour"] == "green"
+    assert scale(3.01)["colour"] == "orange"
+    assert scale(9.99)["colour"] == "#d0021b"
+
+
+def test_a_reading_outside_the_range_clamps_and_says_so() -> None:
+    low, high = scale(-4), scale(14)
+    assert low["position"] == 0.0 and low["clamped"] == "low" and low["clamp_text"] == "below 0"
+    assert (
+        high["position"] == 1.0 and high["clamped"] == "high" and high["clamp_text"] == "above 10"
+    )
+    # and inside the range it claims nothing it did not do
+    assert scale(5)["clamped"] == "" and scale(5)["clamp_text"] == ""
+
+
+def test_a_scale_with_a_hole_is_refused_and_the_hole_is_named() -> None:
+    gap = {
+        "numeric": {
+            "min": 0,
+            "max": 10,
+            "representation": "hbar",
+            "intervals": [{"upto": 4, "colour": "green"}, {"upto": 6, "colour": "red"}],
+        }
+    }
+    problem = sensors.check_numeric(gap)
+    assert "stop at 6" in problem and "runs to 10" in problem
+    assert "8" in problem, "the message names a reading that would fall through"
+
+    bottom = {
+        "numeric": {
+            "min": 0,
+            "max": 10,
+            "representation": "hbar",
+            "intervals": [{"upto": 0, "colour": "green"}, {"upto": 20, "colour": "red"}],
+        }
+    }
+    assert "bottom of the scale" in sensors.check_numeric(bottom)
+
+    backwards = {
+        "numeric": {
+            "min": 0,
+            "max": 10,
+            "representation": "hbar",
+            "intervals": [{"upto": 8, "colour": "green"}, {"upto": 4, "colour": "red"}],
+        }
+    }
+    assert "must end above" in sensors.check_numeric(backwards)
+
+    for bad in (
+        {
+            "numeric": {
+                "min": 0,
+                "max": 0,
+                "representation": "hbar",
+                "intervals": [{"upto": 1, "colour": "red"}],
+            }
+        },
+        {
+            "numeric": {
+                "min": 0,
+                "max": 10,
+                "representation": "spiral",
+                "intervals": [{"upto": 12, "colour": "red"}],
+            }
+        },
+        {"numeric": {"min": 0, "max": 10, "representation": "hbar", "intervals": []}},
+        {
+            "numeric": {
+                "min": 0,
+                "max": 10,
+                "representation": "hbar",
+                "intervals": [{"upto": 12, "colour": "red; x"}],
+            }
+        },
+        {"numeric": "not a scale"},
+    ):
+        assert sensors.check_numeric(bad), bad
+    assert sensors.check_numeric(SCALE) == ""
+    assert sensors.check_numeric({}) == "", "a sensor with no scale is not a broken sensor"
+
+
+def test_the_sixteen_palette_colours_are_the_ones_the_picker_offers() -> None:
+    presets = sensors.palette()
+    assert len(presets) == 16
+    assert {entry["name"] for entry in presets} >= {"green", "red", "yellow", "grey"}
+    for entry in presets:
+        assert sensors._is_colour(entry["colour"]), entry
+        assert sensors.style_for_colour(entry["colour"]).startswith("color: #")
+
+
+def test_the_number_on_the_scale_travels_with_the_reading() -> None:
+    box = scale_box(extract_template="{{ data.pressure }}")
+    reading = sensors.present(box, '{"pressure": 8.4}')
+    assert reading.numeric is not None
+    assert reading.numeric["value"] == 8.4
+    assert reading.numeric["colour"] == "#d0021b"
+    assert reading.numeric["representation"] == "gauge"
+    assert reading.numeric["position"] == 0.84
+    assert reading.dressed_by == "none"
+
+    not_a_number = sensors.present(box, "the door is open")
+    assert not_a_number.numeric is None, "a scale is a question about numbers, not about words"
+
+
+def test_a_textual_value_may_be_coloured_by_a_list_of_patterns_instead_of_a_template() -> None:
+    """First rule that matches wins; the default is what is left, and neither is a colour guess."""
+    textual = Box(
+        name="Door",
+        box_type="mqtt",
+        resource_uri="mqtt://b:1883/t",
+        config={
+            "text_colours": {
+                "rules": [
+                    {"pattern": "^open", "colour": "#d0021b", "background": "#ffffff"},
+                    {"pattern": "closed", "colour": "green"},
+                ],
+                "default": {"colour": "grey"},
+            }
+        },
+    )
+    opened = sensors.present(textual, "open")
+    assert opened.dressed_by == "colours"
+    assert opened.styled == '<span style="color: #d0021b; background-color: #ffffff">open</span>'
+    assert sensors.present(textual, "the door is closed").styled.startswith(
+        '<span style="color: green"'
+    )
+    assert sensors.present(textual, "anything else").styled.startswith('<span style="color: grey"')
+
+    both = Box(
+        name="Door",
+        box_type="mqtt",
+        resource_uri="mqtt://b:1883/t",
+        config={**textual.config, "style_template": "<b>{{ display }}</b>"},
+    )
+    dressed = sensors.present(both, "open")
+    assert dressed.dressed_by == "template"
+    assert dressed.styled == "<b>open</b>", (
+        "the more explicit instruction wins, and says which it was"
+    )
+
+
+def test_a_colour_rule_with_a_pattern_that_cannot_compile_is_refused_at_the_box() -> None:
+    assert "not a regular expression" in sensors.check_text_colours(
+        {"text_colours": {"rules": [{"pattern": "([", "colour": "red"}]}}
+    )
+    assert "no valid colour" in sensors.check_text_colours(
+        {"text_colours": {"rules": [{"pattern": "x", "colour": "red; position: fixed"}]}}
+    )
+    assert (
+        sensors.check_text_colours({"text_colours": {"rules": [{"pattern": "x", "colour": "red"}]}})
+        == ""
+    )
+    assert sensors.check_text_colours({}) == ""
+
+
+def test_check_config_refuses_the_first_thing_that_is_wrong() -> None:
+    assert sensors.check_config({"extract_template": "{{ data.x }}"}) == ""
+    assert "extract_template" in sensors.check_config({"extract_template": "{{ data.x", **SCALE})
+    assert "numeric" in sensors.check_config(
+        {"numeric": {"min": 0, "max": 10, "representation": "hbar"}}
+    )

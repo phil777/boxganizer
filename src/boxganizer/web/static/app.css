@@ -148,7 +148,12 @@ body {
    several of these rows pop a list downward (the note's box picker, a folder's suggestions),
    and clipping those would be a worse bug than the one being animated. */
 .box-config {
-  max-height: 14rem;
+  /* A stand-in for "as tall as it needs to be", because `max-height` cannot animate to `none`.
+     14rem was the original: a settings row taller than that — a sensor's scale with its colour
+     stops, say — was clipped, and its overflowing buttons landed under whatever came next, which
+     reads as a control that does not work. Nothing in a box's own settings fits in 14rem by
+     right, so the sentinel is generous and the closed state below is the one that matters. */
+  max-height: 80rem;
   opacity: 1;
   visibility: visible;
   transition:
@@ -637,6 +642,195 @@ pre.text {
   font-style: italic;
 }
 
+/* The picture a numeric sensor is drawn as: the server says where the value sits, this paints it. */
+.sensor-slot:not(:empty) {
+  margin: 0.25rem 0;
+}
+
+.sensor-picture {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.sensor-track {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--line) 65%, transparent);
+  border-radius: 999px;
+  height: 0.6rem;
+  flex: 1 1 8rem;
+  min-width: 4rem;
+}
+
+.sensor-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+}
+
+.sensor-vbar .sensor-track {
+  height: 5.5rem;
+  width: 1.4rem;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+}
+
+.sensor-vbar .sensor-fill {
+  inset: auto 0 0 0;
+  width: 100%;
+}
+
+.sensor-progress .sensor-track {
+  height: 0.35rem;
+}
+
+.sensor-gauge-svg {
+  width: 7rem;
+  height: 3.9rem;
+}
+
+.sensor-gauge-back {
+  fill: none;
+  stroke: color-mix(in srgb, var(--line) 70%, transparent);
+  stroke-width: 7;
+}
+
+.sensor-gauge-arc {
+  fill: none;
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+
+.sensor-gauge-needle {
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+
+.sensor-gauge-pivot {
+  fill: var(--ink);
+}
+
+.sensor-clamp {
+  font-size: 0.7rem;
+  font-style: italic;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* A cell is small: the picture has to stay a picture and not push the name out. */
+.sensor-cell .sensor-gauge-svg {
+  width: 3.4rem;
+  height: 1.9rem;
+}
+
+.sensor-cell .sensor-track {
+  height: 0.35rem;
+  flex-basis: 3rem;
+  min-width: 2rem;
+}
+
+.sensor-cell .sensor-vbar .sensor-track,
+.sensor-cell.sensor-vbar .sensor-track {
+  height: 2.2rem;
+  width: 0.7rem;
+}
+
+.sensor-clamp,
+.sensor-cell .sensor-clamp {
+  font-size: 0.62rem;
+}
+
+/* Where the owner splits the range and picks the colours. */
+.sensor-scale {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.sensor-section {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.sensor-scale-row,
+.sensor-interval,
+.sensor-text-rule {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.sensor-number {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.72rem;
+}
+
+.sensor-number input {
+  width: 4.5rem;
+  font-size: 0.74rem;
+  padding: 0.1rem 0.25rem;
+}
+
+.sensor-intervals,
+.sensor-text-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.sensor-interval input[type="text"],
+.sensor-text-rule input[type="text"] {
+  font-size: 0.74rem;
+  padding: 0.1rem 0.25rem;
+}
+
+.sensor-text-rule input[type="text"] {
+  flex: 0 1 9rem;
+}
+
+.sensor-colour {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex-wrap: wrap;
+}
+
+.sensor-swatches {
+  display: inline-flex;
+  gap: 1px;
+}
+
+.sensor-swatch {
+  width: 0.85rem;
+  height: 0.85rem;
+  padding: 0;
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.sensor-picker {
+  width: 1.4rem;
+  height: 0.95rem;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: none;
+}
+
+.sensor-colour-name {
+  width: 6.5rem;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.7rem;
+}
+
 /* A sensor's own classes: the names a styling template may use, and nothing else. The page owns
    the colours; a template picks one, which is why they are not inline styles it invents. */
 .sensor-good {
@@ -1001,7 +1195,17 @@ pre.text {
 
 /* ---------- mqtt view ---------- */
 
-.mqtt-view { display: flex; flex-direction: column; gap: 0.5rem; min-height: 0; }
+.mqtt-view {
+  /* One document that flows, and the pane scrolls it. As a shrinking flex column this fought the
+     message list for height: the drawer was given less than its own rows need, the rows overflowed
+     it, and the list — later in the paint order — sat on top of the Save button. A settings row a
+     click cannot reach is the same bug as one that does not exist. */
+  display: block;
+}
+
+.mqtt-view > * + * {
+  margin-top: 0.5rem;
+}
 .mqtt-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; flex: none; }
 
 .mqtt-state {
@@ -1037,6 +1241,15 @@ pre.text {
   overflow-wrap: anywhere;
 }
 
+/* A box's settings rows are content, not slack. When a pane is shorter than what it holds, a
+   shrinkable row is squashed until its buttons overflow their own box and the list below paints
+   over them — which reads as a control that cannot be clicked. Marked by convention (every
+   control row carries `box-config`) rather than by a list of view names, so a view added next
+   month is right without anyone remembering it here. */
+#canvas .box-config {
+  flex: 0 0 auto;
+}
+
 /* A payload that is not text is long and means nothing to the eye: keep it small. */
 .mqtt-value[data-encoding="base64"] { font-size: 0.9rem; font-weight: 400; }
 
@@ -1060,7 +1273,9 @@ pre.text {
   flex-direction: column;
   gap: 0.15rem;
   overflow: auto;
-  min-height: 0;
+  /* A window on the recent messages, not a second page: it scrolls inside its own height so the
+     drawer below it stays where the eye left it. */
+  max-height: 9rem;
 }
 
 .mqtt-log li {

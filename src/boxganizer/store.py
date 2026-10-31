@@ -444,6 +444,7 @@ class BoxStore:
         content: dict[str, frozenset[str]] = {}
         for query in needs.content:
             found: set[str] = set()
+
             def probe(word: str) -> Sequence[str]:
                 # a def, not a lambda: the planner wants a word and answers with the words in
                 # the index that start with it, which is what makes a fuzzy or thesaurus form

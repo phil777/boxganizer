@@ -204,6 +204,12 @@ class Presentation:
     styled: str
     #: Why a template could not be used, shown on the box beside the value. "" when all three ran.
     problem: str
+    #: Where the dressing came from: a styling template, the colour rules, or neither. Recorded
+    #: rather than guessed at by the page, because the two textual choices are alternatives and a
+    #: person looking at a red number is entitled to know which of them made it red.
+    dressed_by: str = "none"
+    #: The value on its owner's scale, when the box has one and the reading is a number.
+    numeric: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -212,6 +218,8 @@ class Presentation:
             "display": self.display,
             "styled": self.styled,
             "problem": self.problem,
+            "dressed_by": self.dressed_by,
+            "numeric": self.numeric,
         }
 
 
@@ -266,6 +274,18 @@ def render_template(source: str, context: Mapping[str, Any]) -> str:
         )
     template = environment().from_string(source)
     return str(template.render(dict(context)))
+
+
+def check_config(config: Mapping[str, Any]) -> str:
+    """Every rule a sensor box's config has to satisfy, in one sentence or none.
+
+    One function so a box cannot be saved with half its sensor rules checked: templates that
+    compile, a scale that covers its range, colour rules whose patterns run.
+    """
+    for problem in (check_templates(config), check_numeric(config), check_text_colours(config)):
+        if problem:
+            return problem
+    return ""
 
 
 def check_templates(config: Mapping[str, Any]) -> str:
@@ -351,12 +371,26 @@ def present(box: Box, raw: object, *, extra: Mapping[str, Any] | None = None) ->
     else:
         styled = escape(display)
 
+    # Two ways to colour a textual value, and the owner picks one; a styling template is the more
+    # explicit instruction, so it wins and the colour rules stay unused rather than being painted
+    # underneath it.
+    dressed_by = "none"
+    if style:
+        dressed_by = "template"
+    else:
+        colours = text_style(box, display)
+        if colours:
+            styled = f'<span style="{escape(colours)}">{escape(display)}</span>'
+            dressed_by = "colours"
+
     return Presentation(
         raw=text,
         extracted=extracted,
         display=display,
         styled=styled,
         problem="; ".join(problems),
+        dressed_by=dressed_by,
+        numeric=numeric(box, as_number(extracted)),
     )
 
 
@@ -556,3 +590,227 @@ def style_for_colour(colour: str) -> str:
     ):
         return f"color: {value}"
     return ""
+
+
+# --------------------------------------------------------------------------- the owner's scale
+
+#: Sixteen colours, in the order a scale reads: cool through hot, then the neutrals a sensor also
+#: wants (a grey "unknown" and a black "off"). Gauges, bars and level indicators have converged on
+#: roughly this set, so a person picking from it is picking something they have seen before — and
+#: the picker is still there for the colour that is not on the list.
+PALETTE: tuple[tuple[str, str], ...] = (
+    ("green", "#2e8b57"),
+    ("lime", "#7fbf3f"),
+    ("yellow", "#f2c200"),
+    ("orange", "#f08a24"),
+    ("red", "#d0021b"),
+    ("maroon", "#8b1a1a"),
+    ("purple", "#7d3c98"),
+    ("magenta", "#c0397b"),
+    ("pink", "#e58fb1"),
+    ("blue", "#1f5fbf"),
+    ("navy", "#1b3a6b"),
+    ("cyan", "#2aa8b8"),
+    ("teal", "#0f7a72"),
+    ("brown", "#8b5a2b"),
+    ("grey", "#7f8c8d"),
+    ("black", "#111111"),
+)
+
+#: The four pictures a numeric sensor may be drawn as. Named for what they look like, because they
+#: are what the settings call them.
+REPRESENTATIONS = ("gauge", "hbar", "vbar", "progress")
+
+_COLOUR = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$|^[a-zA-Z]{3,20}$|^inherit$")
+
+NUMERIC_KEY = "numeric"
+TEXT_COLOURS_KEY = "text_colours"
+
+
+def palette() -> list[dict[str, str]]:
+    """The picker's presets, as data, so the page draws what this module says rather than a
+    second list that can disagree about what `green` is."""
+    return [{"name": name, "colour": colour} for name, colour in PALETTE]
+
+
+def _is_colour(value: object) -> bool:
+    return isinstance(value, str) and bool(_COLOUR.match(value.strip()))
+
+
+def check_numeric(config: Mapping[str, Any]) -> str:
+    """Does this scale hold every value it claims to? "" when it does, else the reason.
+
+    The coverage rule is the whole point of the check: the intervals must **fully cover** the
+    range, so a reading between two stops cannot fall through to no colour at all. A gap is not a
+    cosmetic mistake — half of a gauge silently never changes colour, and the person watching it
+    has no way to know which half.
+    """
+    raw = config.get(NUMERIC_KEY)
+    if raw is None:
+        return ""
+    if not isinstance(raw, dict):
+        return "numeric must be an object with min, max, representation and intervals"
+    scale = raw
+    low, high = scale.get("min"), scale.get("max")
+    if not _is_number(low) or not _is_number(high):
+        return "numeric needs min and max as numbers"
+    low_f, high_f = _as_float(low), _as_float(high)
+    if low_f >= high_f:
+        return "numeric: min must be below max"
+    representation = scale.get("representation", "hbar")
+    if representation not in REPRESENTATIONS:
+        return f"numeric: representation must be one of {', '.join(REPRESENTATIONS)}"
+    intervals = scale.get("intervals")
+    if not isinstance(intervals, list) or not intervals:
+        return "numeric needs at least one interval, or the range has no colour at all"
+    stops: list[float] = []
+    for position, item in enumerate(intervals, start=1):
+        if not isinstance(item, dict):
+            return f"numeric: interval {position} must be an object with upto and colour"
+        if not _is_number(item.get("upto")):
+            return f"numeric: interval {position} needs a number for upto"
+        if not _is_colour(item.get("colour", "")):
+            return f"numeric: interval {position} needs a colour (a name or #rrggbb)"
+        stops.append(_as_float(item["upto"]))
+    for index in range(1, len(stops)):
+        if stops[index] <= stops[index - 1]:
+            return f"numeric: interval {index + 1} must end above interval {index}"
+    if stops[0] <= float(low):  # type: ignore[arg-type]
+        return (
+            f"numeric: the first colour must reach above {low}, or the bottom of the scale has none"
+        )
+    if stops[-1] < float(high):  # type: ignore[arg-type]
+        return (
+            f"numeric: the colours stop at {stops[-1]:g} but the range runs to {high:g} — "
+            f"a reading of {(stops[-1] + float(high)) / 2:g} would have no colour"  # type: ignore[arg-type]
+        )
+    return ""
+
+
+def check_text_colours(config: Mapping[str, Any]) -> str:
+    """Are the textual colour rules usable? A pattern that does not compile is refused here."""
+    raw = config.get(TEXT_COLOURS_KEY)
+    if raw is None:
+        return ""
+    if not isinstance(raw, dict):
+        return f"{TEXT_COLOURS_KEY} must be an object with rules and a default"
+    rules = raw.get("rules", [])
+    if not isinstance(rules, list):
+        return f"{TEXT_COLOURS_KEY}: rules must be a list"
+    for position, rule in enumerate(rules, start=1):
+        if not isinstance(rule, dict):
+            return f"{TEXT_COLOURS_KEY}: rule {position} must be an object with pattern and colours"
+        pattern = rule.get("pattern")
+        if not isinstance(pattern, str) or not pattern:
+            return f"{TEXT_COLOURS_KEY}: rule {position} needs a pattern to look for"
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            return f"{TEXT_COLOURS_KEY}: rule {position} is not a regular expression: {exc}"
+        for key in ("colour", "background"):
+            if key in rule and not _is_colour(rule[key]):
+                return f"{TEXT_COLOURS_KEY}: rule {position} has no valid {key}"
+    default = raw.get("default", {})
+    if not isinstance(default, dict):
+        return f"{TEXT_COLOURS_KEY}: default must be an object with colours"
+    for key in ("colour", "background"):
+        if key in default and not _is_colour(default[key]):
+            return f"{TEXT_COLOURS_KEY}: default has no valid {key}"
+    return ""
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _as_float(value: object) -> float:
+    """A number that has already been checked by `_is_number`.
+
+    The config came out of JSON and mypy cannot see the check that ran two lines earlier, so the
+    one unchecked cast in this module lives here instead of being sprinkled over every use.
+    """
+    return float(value)  # type: ignore[arg-type]
+
+
+def numeric(box: Box, number: float | None) -> dict[str, object] | None:
+    """Where this number sits on the box's own scale, and what colour that is.
+
+    A reading outside the range is **clamped, and says so**: the bar goes to its end (a gauge that
+    drew 140% would be a bar that left the pane) and the box adds `above 10`. A value that quietly
+    drew as full-scale is a sensor told people the wrong thing about a boiler.
+    """
+    scale = box.config.get(NUMERIC_KEY)
+    if not isinstance(scale, dict) or number is None:
+        return None
+    low, high = scale.get("min"), scale.get("max")
+    if not _is_number(low) or not _is_number(high):
+        return None
+    low_f, high_f = _as_float(low), _as_float(high)
+    if low_f >= high_f:
+        return None
+    intervals = [item for item in scale.get("intervals", []) if isinstance(item, dict)]
+    if not intervals:
+        return None
+    span = high_f - low_f
+    clamped = "low" if number < low_f else "high" if number > high_f else None
+    inside = min(max(number, low_f), high_f)
+    position = (inside - low_f) / span
+    chosen = intervals[-1]
+    index = len(intervals) - 1
+    for place, item in enumerate(intervals):
+        upto = item.get("upto")
+        if _is_number(upto) and number <= _as_float(upto):
+            chosen, index = item, place
+            break
+    colour = str(chosen.get("colour", ""))
+    return {
+        "min": low,
+        "max": high,
+        "value": number,
+        "position": round(position, 4),
+        "colour": colour if _is_colour(colour) else "",
+        "interval": index,
+        "representation": str(scale.get("representation", "hbar")),
+        "clamped": clamped or "",
+        "clamp_text": ""
+        if clamped is None
+        else (f"below {low_f:g}" if clamped == "low" else f"above {high_f:g}"),
+        "label": str(chosen.get("label", "") or ""),
+    }
+
+
+def text_style(box: Box, display: str) -> str:
+    """The colours for a textual value: the first rule whose pattern matches, else the default.
+
+    First match wins, and that is the rule the page has to say out loud — two patterns can both
+    match `2.4 bar`, and a list whose order did not matter would let a person reorder rules and
+    change nothing, which is not how they will read it.
+    """
+    raw = box.config.get(TEXT_COLOURS_KEY)
+    if not isinstance(raw, dict):
+        return ""
+    rules = raw.get("rules", [])
+    for rule in (
+        [item for item in rules if isinstance(item, dict)] if isinstance(rules, list) else []
+    ):
+        pattern = rule.get("pattern")
+        if not isinstance(pattern, str):
+            continue
+        try:
+            if re.search(pattern, display):
+                return _style_pair(rule)
+        except re.error:
+            continue
+    default = raw.get("default")
+    return _style_pair(default) if isinstance(default, dict) else ""
+
+
+def _style_pair(rule: Mapping[str, Any]) -> str:
+    parts = []
+    colour = rule.get("colour")
+    background = rule.get("background")
+    if _is_colour(colour):
+        parts.append(f"color: {str(colour).strip()}")
+    if _is_colour(background):
+        parts.append(f"background-color: {str(background).strip()}")
+    return "; ".join(parts)

@@ -3190,7 +3190,7 @@ def test_the_page_shows_the_worded_value_and_the_editor_for_it(client: TestClien
     """
     script = client.get("/static/app.js").text
     for needle in (
-        "function sensorTemplateEditor(box, ctx, preview)",
+        "function sensorTemplateEditor(box, ctx)",
         "value.innerHTML = shown.styled;",
         "problem.hidden = !(shown && shown.problem);",
         "`the broker sent: ${reading.value}`",
@@ -3212,6 +3212,99 @@ def test_the_page_shows_the_worded_value_and_the_editor_for_it(client: TestClien
         ".sensor-bad",
     ):
         assert rule in css, rule
+
+
+def test_the_page_draws_the_owners_scale_and_offers_the_controls_for_it(client: TestClient) -> None:
+    """Four pictures, sixteen presets and a picker — and the server, not the page, decides where
+    the value sits on the scale.
+
+    The split is the point of the test: `numeric.position`, `colour` and `clamped` come from
+    `sensors.numeric`, so an opened pane, a grid cell and `box value` cannot disagree about what
+    8.4 on a 0-10 scale looks like. The page only paints, and refuses a scale the server refused.
+    """
+    script = client.get("/static/app.js").text
+    for needle in (
+        "function sensorPicture(info, { cell = false } = {}) {",
+        "function gaugeMarkup(info)",
+        "wrap.className = `sensor-picture sensor-${info.representation}`;",
+        'wrap.dataset.clamped = info.clamped || "";',
+        "const presets = (state.sensorPalette && state.sensorPalette.palette) || [];",
+        'function colourChooser(value, onPick, role = "colour") {',
+        'picked.type = "color";',
+        # one function owns the colour, so a pick cannot be undone by a redraw of the control
+        "const choose = (next) => {",
+        "function sensorScaleEditor(box, ctx) {",
+        "function textColourEditor(box, host) {",
+        "scale refused:",
+        '["hbar", "Horizontal bar"]',
+        '["vbar", "Vertical bar"]',
+        '["gauge", "Gauge"]',
+        '["progress", "Progression bar"]',
+        "state.sensorPalette = await api.sensorPalette();",
+        "async function loadSensorPalette()",
+        'add.dataset.action = "add-interval";',
+        'remove.dataset.action = "remove-interval";',
+        'add.dataset.action = "add-text-rule";',
+    ):
+        assert needle in script, needle
+
+    palette = client.get("/api/sensors/palette").json()
+    assert len(palette["palette"]) == 16
+    assert palette["representations"] == ["gauge", "hbar", "vbar", "progress"]
+    assert {entry["name"] for entry in palette["palette"]} >= {"green", "red", "grey"}
+
+    css = client.get("/static/app.css").text
+    for rule in (
+        ".sensor-picture",
+        ".sensor-track",
+        ".sensor-vbar",
+        ".sensor-gauge-svg",
+        ".sensor-clamp",
+        ".sensor-swatch",
+        ".sensor-interval",
+    ):
+        assert rule in css, rule
+
+
+def test_a_scale_that_does_not_cover_its_range_is_refused_by_the_api(client: TestClient) -> None:
+    """The refusal travels to the form unchanged, because the sentence names the hole."""
+    created = client.post(
+        "/api/boxes",
+        json={"name": "Scaled sensor", "box_type": "mqtt", "resource_uri": "mqtt://b:1883/t"},
+    )
+    refused = client.put(
+        f"/api/boxes/{created.json()['uuid']}",
+        json={
+            "config": {
+                "numeric": {
+                    "min": 0,
+                    "max": 10,
+                    "representation": "hbar",
+                    "intervals": [{"upto": 6, "colour": "green"}],
+                }
+            }
+        },
+    )
+    assert refused.status_code == 422
+    assert "would have no colour" in refused.text
+
+    accepted = client.put(
+        f"/api/boxes/{created.json()['uuid']}",
+        json={
+            "config": {
+                "numeric": {
+                    "min": 0,
+                    "max": 10,
+                    "representation": "hbar",
+                    "intervals": [
+                        {"upto": 6, "colour": "green"},
+                        {"upto": 10, "colour": "#d0021b"},
+                    ],
+                }
+            }
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
 
 
 def test_a_live_reading_arrives_worded_by_the_box_itself(populated: BoxStore, sensor: Box) -> None:

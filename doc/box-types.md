@@ -46,7 +46,10 @@ other boxes. Rules in brackets are enforced by the store.
         optional metadata: `password_file`
       - `sensor` 📡 Sensor — a reading is turned into a value by three templates in `config`
         (`extract_template`, `display_template`, `style_template`); the styling output is filtered
-        against an allow-list before the page sees it (ADR 21)
+        against an allow-list before the page sees it (ADR 21). `numeric` gives the value a range,
+        colour intervals that must cover it, and one of four pictures (gauge, horizontal bar,
+        vertical bar, progression bar); `text_colours` colours a text value by pattern instead
+        (ADR 22)
         - `mqtt` 📶 MQTT Sensor — schemes: mqtt mqtts; the topic is the path
         of the address (`metadata["topic"]` remains as an override)
         needs the `live` extra (`aiomqtt`): the type, the dialog and `box types` all say so

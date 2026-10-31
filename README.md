@@ -247,6 +247,17 @@ against an allow-list of formatting tags, page classes and CSS properties before
 page: `<script>`, `<img onerror>`, `href="javascript:"`, `onclick` and `position: fixed` do not
 survive it. A template that fails says so beside the reading, which stays on screen. ADR 21.
 
+When the value is a number, the box can also be given a **scale**: `min`, `max`, the range split
+into colour intervals that must **fully cover it** — a stop short of `max` is refused, with the
+reading that would fall through named — and one of four pictures: a gauge, a horizontal bar, a
+vertical bar or a progression bar. Colours come from 16 presets served by the API, or from the
+colour picker. A value outside the range is clamped to the end of the bar **and says so** (`above
+10`), because a sensor pinned at the top of its scale otherwise looks exactly like a sensor at the
+top of its range. For a value that stays text, the alternative to a styling template is a list of
+regular expressions, each with a text and a background colour, first match wins, plus a default.
+The server decides where the value sits; the page only paints it, so an opened box, a grid cell and
+`box value` cannot disagree. ADR 22.
+
 An MQTT box is the one kind that talks to something outside the machine: while
 its page is open the server subscribes to `mqtt://` or `mqtts://host[:port]/topic`
 and pushes every message to the page. That needs the `live` extra. Without it, the box type

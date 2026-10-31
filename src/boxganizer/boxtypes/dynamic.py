@@ -184,7 +184,7 @@ class SensorResource(DynamicResource):
         box (the page, `box edit`, a raw config write) arrives through this same hook.
         """
         super().check(box)
-        problem = sensors.check_templates(box.config)
+        problem = sensors.check_config(box.config)
         if problem:
             cls._reject(box, problem)
 

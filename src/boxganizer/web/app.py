@@ -35,6 +35,7 @@ from boxganizer import (
     mqtt,
     paths,
     resources,
+    sensors,
     ssh,
     tags,
     thumbs,
@@ -2074,6 +2075,15 @@ def create_app(
             broken=asked.broken,
             members=[_brief(child) for child in store.children(box.uuid)],
         )
+
+    @app.get("/api/sensors/palette")
+    def sensor_palette() -> dict[str, object]:
+        """The colours and pictures a sensor scale may use.
+
+        Served rather than hard-coded in the page: the same list is what `check_numeric` accepts,
+        and a picker offering a colour the store would refuse is a form that lies.
+        """
+        return {"palette": sensors.palette(), "representations": list(sensors.REPRESENTATIONS)}
 
     @app.post("/api/filters/parse", response_model=FilterParsed)
     def parse_filter_expression(payload: FilterParse) -> FilterParsed:

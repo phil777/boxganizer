@@ -22,6 +22,7 @@ const state = {
   editing: null, // uuid of the box the edit modal is open on
   editingBox: null, // that box as the view held it, for filling its metadata fields
   tagTree: [], // /api/tags as last read, shared by the chip field and the manage window
+  sensorPalette: null, // /api/sensors/palette, read once: the picker draws what the server accepts
 };
 
 /* ------------------------------------------------------------------ api ---- */
@@ -79,6 +80,7 @@ const api = {
   thumbnailUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/thumbnail`,
   root: () => request("/api/root"),
   filter: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/filter`),
+  sensorPalette: () => request("/api/sensors/palette"),
   parseFilter: (expression) =>
     request("/api/filters/parse", {
       method: "POST",
@@ -2276,6 +2278,24 @@ function wirePaneDrops() {
   });
 }
 
+/**
+ * The sixteen colours the scale picker offers, read once from the server.
+ *
+ * They are the server's list because the server is what refuses a colour it does not recognise;
+ * a swatch that the store would reject is a control that lies about what it saves.
+ */
+async function loadSensorPalette() {
+  if (state.sensorPalette) return state.sensorPalette;
+  try {
+    state.sensorPalette = await api.sensorPalette();
+  } catch {
+    // A missing palette costs a swatch, not the box: the value still shows, and a hex value can
+    // still be typed. Nothing here is worth failing the whole page over.
+    state.sensorPalette = { palette: [], representations: ["hbar"] };
+  }
+  return state.sensorPalette;
+}
+
 async function init() {
   try {
     const types = await api.types();
@@ -2284,6 +2304,8 @@ async function init() {
     status(`cannot reach the server: ${error.message}`, true);
     return;
   }
+
+  loadSensorPalette(); // not awaited: a missing palette costs a swatch, not the page
 
   fillTypeChoices();
   wireTypeFilters();
@@ -4730,6 +4752,74 @@ const MQTT_HISTORY = 8;
  * A grid cell shows the last value alone. One subscription per cell would be one
  * per box on the wall, and the opened box is where the listening belongs.
  */
+
+/**
+ * The four pictures a numeric sensor may be drawn as, at the size the box is shown at.
+ *
+ * The server decides *where the value sits* (`numeric.position`, `numeric.colour`, and whether it
+ * was clamped); this only paints that. Splitting it that way means the CLI, a grid cell and an
+ * opened pane cannot each invent their own idea of what 8.4 on a 0-10 scale looks like — and the
+ * clamping rule in particular has to be one rule: a bar drawn at 140% is a bar that left the pane.
+ */
+function sensorPicture(info, { cell = false } = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = `sensor-picture sensor-${info.representation}`;
+  wrap.dataset.position = String(info.position);
+  wrap.dataset.colour = info.colour || "";
+  wrap.dataset.clamped = info.clamped || "";
+  if (cell) wrap.classList.add("sensor-cell");
+
+  const fill = (style, cls) => {
+    const bar = document.createElement("div");
+    bar.className = `sensor-fill ${cls || ""}`.trim();
+    Object.assign(bar.style, style);
+    return bar;
+  };
+
+  const track = document.createElement("div");
+  track.className = "sensor-track";
+
+  if (info.representation === "gauge") {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 100 56");
+    svg.setAttribute("class", "sensor-gauge-svg");
+    svg.innerHTML = gaugeMarkup(info);
+    wrap.append(svg);
+  } else if (info.representation === "vbar") {
+    track.append(fill({ height: `${info.position * 100}%`, background: info.colour || "currentColor" }));
+    wrap.append(track);
+  } else {
+    track.append(fill({ width: `${info.position * 100}%`, background: info.colour || "currentColor" }));
+    wrap.append(track);
+  }
+
+  if (info.clamp_text) {
+    const clamp = document.createElement("span");
+    clamp.className = "sensor-clamp";
+    clamp.dataset.clamped = info.clamped;
+    clamp.textContent = info.clamp_text;
+    clamp.title = `${info.value} is outside ${info.min} to ${info.max}; the bar stops at the end of the scale`;
+    wrap.append(clamp);
+  }
+  return wrap;
+}
+
+/** A half-ring, the arc drawn in proportion, and a needle that points at the value. */
+function gaugeMarkup(info) {
+  const radius = 40;
+  const circumference = Math.PI * radius;
+  const drawn = circumference * info.position;
+  const angle = 180 * info.position;
+  return (
+    `<path d="M 10 50 A ${radius} ${radius} 0 0 1 90 50" class="sensor-gauge-back"></path>` +
+    `<path d="M 10 50 A ${radius} ${radius} 0 0 1 90 50" class="sensor-gauge-arc" ` +
+    `stroke="${info.colour || "currentColor"}" stroke-dasharray="${drawn} ${circumference}"></path>` +
+    `<line x1="50" y1="50" x2="50" y2="14" class="sensor-gauge-needle" ` +
+    `transform="rotate(${-90 + angle} 50 50)"></line>` +
+    `<circle cx="50" cy="50" r="3.5" class="sensor-gauge-pivot"></circle>`
+  );
+}
+
 /**
  * The three templates a sensor box runs over a reading, where the owner writes them.
  *
@@ -4738,7 +4828,7 @@ const MQTT_HISTORY = 8;
  * a form that could save a display template against a half-typed extraction template would let a
  * person leave a box in a state it cannot render.
  */
-function sensorTemplateEditor(box, ctx, preview) {
+function sensorTemplateEditor(box, ctx) {
   const editor = document.createElement("div");
   editor.className = "sensor-templates box-config";
 
@@ -4797,6 +4887,298 @@ function sensorTemplateEditor(box, ctx, preview) {
   return editor;
 }
 
+
+/**
+ * The scale: min, max, one of four pictures, and the colours the range is split into.
+ *
+ * The colour stops are saved with the range they cover, and the server refuses the pair when they
+ * do not meet: intervals that stop short of `max` leave a reading with no colour at all, and the
+ * half of a gauge that never changes colour is not something a person watching it can see.
+ * The refusal comes back as the sentence the check produced — naming the value that would fall
+ * through — which is why there is no duplicate validation here.
+ */
+function sensorScaleEditor(box, ctx) {
+  const editor = document.createElement("div");
+  editor.className = "sensor-scale box-config";
+  const numeric = { ...((box.config && box.config.numeric) || {}) };
+  const rows = Array.isArray(numeric.intervals) ? numeric.intervals.map((row) => ({ ...row })) : [];
+
+  const title = document.createElement("p");
+  title.className = "sensor-section";
+  title.textContent = "Numeric scale";
+  editor.append(title);
+
+  const min = numberField("Minimum", numeric.min, "0");
+  const max = numberField("Maximum", numeric.max, "10");
+  const shape = document.createElement("select");
+  shape.setAttribute("aria-label", "Visual representation");
+  [
+    ["hbar", "Horizontal bar"],
+    ["vbar", "Vertical bar"],
+    ["gauge", "Gauge"],
+    ["progress", "Progression bar"],
+  ].forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    shape.append(option);
+  });
+  shape.value = numeric.representation || "hbar";
+
+  const scaleRow = document.createElement("div");
+  scaleRow.className = "sensor-scale-row";
+  scaleRow.append(min.wrap, max.wrap, shape);
+  editor.append(scaleRow);
+
+  const intervals = document.createElement("div");
+  intervals.className = "sensor-intervals";
+
+  const drawIntervals = () => {
+    intervals.replaceChildren();
+    rows.forEach((row, index) => {
+      const line = document.createElement("div");
+      line.className = "sensor-interval";
+      const upto = numberField(`Colour ${index + 1} ends at`, row.upto, "5");
+      upto.input.addEventListener("change", () => {
+        row.upto = upto.input.value === "" ? "" : Number(upto.input.value);
+      });
+      const colour = colourChooser(row.colour || "#7f8c8d", (picked) => {
+        row.colour = picked;
+      });
+      const label = document.createElement("input");
+      label.type = "text";
+      label.className = "sensor-interval-label";
+      label.placeholder = "label (optional)";
+      label.setAttribute("aria-label", `Label for colour ${index + 1}`);
+      label.value = row.label || "";
+      label.addEventListener("change", () => {
+        row.label = label.value.trim();
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.action = "remove-interval";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Remove colour ${index + 1}`);
+      remove.addEventListener("click", () => {
+        rows.splice(index, 1);
+        drawIntervals();
+      });
+      line.append(upto.wrap, colour, label, remove);
+      intervals.append(line);
+    });
+    const add = document.createElement("button");
+    add.type = "button";
+    add.dataset.action = "add-interval";
+    add.textContent = "Add colour";
+    add.addEventListener("click", () => {
+      rows.push({ upto: "", colour: "#7f8c8d" });
+      drawIntervals();
+    });
+    intervals.append(add);
+  };
+  drawIntervals();
+  editor.append(intervals);
+
+  const colours = textColourEditor(box, editor);
+
+  const save = document.createElement("button");
+  save.type = "button";
+  save.dataset.action = "save-sensor-scale";
+  save.textContent = "Save scale and colours";
+  save.addEventListener("click", async () => {
+    const config = { ...(box.config || {}) };
+    const scale = {
+      min: min.input.value === "" ? 0 : Number(min.input.value),
+      max: max.input.value === "" ? 0 : Number(max.input.value),
+      representation: shape.value,
+      intervals: rows
+        .filter((row) => row.upto !== "" && row.upto !== null && row.upto !== undefined)
+        .map((row) => ({ upto: Number(row.upto), colour: row.colour, ...(row.label ? { label: row.label } : {}) })),
+    };
+    if (min.input.value === "" && max.input.value === "" && rows.length === 0) delete config.numeric;
+    else config.numeric = scale;
+    const text = colours.read();
+    if (text) config.text_colours = text;
+    else delete config.text_colours;
+    try {
+      await api.updateBox(box.uuid, { config });
+      ctx.status("scale saved");
+      ctx.reload();
+    } catch (error) {
+      // The server owns the coverage rule, so its sentence — "the colours stop at 6 but the range
+      // runs to 10 — a reading of 8 would have no colour" — is what appears, unchanged.
+      ctx.status(`scale refused: ${error.message}`, true);
+    }
+  });
+  editor.append(save);
+  return editor;
+}
+
+/** The textual alternative: patterns, each with a text colour and a background. */
+function textColourEditor(box, host) {
+  const stored = { ...((box.config && box.config.text_colours) || {}) };
+  const rules = Array.isArray(stored.rules) ? stored.rules.map((rule) => ({ ...rule })) : [];
+  const fallback = { colour: (stored.default && stored.default.colour) || "", background: (stored.default && stored.default.background) || "" };
+
+  const title = document.createElement("p");
+  title.className = "sensor-section";
+  title.textContent = "Text colours (first match wins)";
+  host.append(title);
+
+  const list = document.createElement("div");
+  list.className = "sensor-text-rules";
+
+  const draw = () => {
+    list.replaceChildren();
+    rules.forEach((rule, index) => {
+      const line = document.createElement("div");
+      line.className = "sensor-text-rule";
+      const pattern = document.createElement("input");
+      pattern.type = "text";
+      pattern.placeholder = "regex, e.g. ^open";
+      pattern.setAttribute("aria-label", `Pattern ${index + 1}`);
+      pattern.value = rule.pattern || "";
+      pattern.addEventListener("change", () => {
+        rule.pattern = pattern.value.trim();
+      });
+      line.append(
+        pattern,
+        colourChooser(rule.colour || "#111111", (picked) => {
+          rule.colour = picked;
+        }, "text"),
+        colourChooser(rule.background || "#ffffff", (picked) => {
+          rule.background = picked;
+        }, "background"),
+      );
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.action = "remove-text-rule";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Remove pattern ${index + 1}`);
+      remove.addEventListener("click", () => {
+        rules.splice(index, 1);
+        draw();
+      });
+      line.append(remove);
+      list.append(line);
+    });
+    const add = document.createElement("button");
+    add.type = "button";
+    add.dataset.action = "add-text-rule";
+    add.textContent = "Add pattern";
+    add.addEventListener("click", () => {
+      rules.push({ pattern: "", colour: "#111111" });
+      draw();
+    });
+    list.append(add);
+  };
+  draw();
+  host.append(list);
+
+  const defaultLine = document.createElement("div");
+  defaultLine.className = "sensor-text-rule sensor-text-default";
+  const word = document.createElement("span");
+  word.textContent = "otherwise";
+  defaultLine.append(
+    word,
+    colourChooser(fallback.colour || "#111111", (picked) => {
+      fallback.colour = picked;
+    }, "text"),
+    colourChooser(fallback.background || "#ffffff", (picked) => {
+      fallback.background = picked;
+    }, "background"),
+  );
+  host.append(defaultLine);
+
+  return {
+    read: () => {
+      const kept = rules.filter((rule) => rule.pattern);
+      const hasDefault = fallback.colour || fallback.background;
+      if (!kept.length && !hasDefault) return null;
+      return {
+        ...(kept.length ? { rules: kept } : {}),
+        ...(hasDefault ? { default: { ...fallback } } : {}),
+      };
+    },
+  };
+}
+
+/**
+ * A colour: the sixteen presets, and the picker for the one that is not among them.
+ *
+ * The presets come from the server (`/api/sensors/palette`), because the list is also what
+ * `check_numeric` will accept — a swatch the store would refuse is a control that lies.
+ */
+function colourChooser(value, onPick, role = "colour") {
+  const holder = document.createElement("span");
+  holder.className = "sensor-colour";
+  holder.setAttribute("role", "group");
+  holder.setAttribute("aria-label", `${role} colour`);
+
+  const presets = (state.sensorPalette && state.sensorPalette.palette) || [];
+  let current = value || "";
+
+  const swatches = document.createElement("span");
+  swatches.className = "sensor-swatches";
+
+  const picked = document.createElement("input");
+  picked.type = "color";
+  picked.className = "sensor-picker";
+  picked.setAttribute("aria-label", `${role} picker`);
+
+  const named = document.createElement("input");
+  named.type = "text";
+  named.className = "sensor-colour-name";
+  named.setAttribute("aria-label", `${role} as a name or hex value`);
+  named.placeholder = "#rrggbb or name";
+
+  // One function is the whole state of this control: the swatch row, the picker, the text field
+  // and the saved value are the same colour or they are not one control. A draft of this kept a
+  // `sync()` that wrote the *original* value back, so every pick was undone the moment it was
+  // made — the scale saved grey for all three stops and looked, until it was measured, fine.
+  const choose = (next) => {
+    current = (next || "").trim();
+    named.value = current;
+    if (/^#[0-9a-fA-F]{6}$/.test(current)) picked.value = current;
+    onPick(current);
+  };
+
+  presets.forEach((entry) => {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "sensor-swatch";
+    swatch.dataset.action = "pick-colour";
+    swatch.style.background = entry.colour;
+    swatch.title = `${entry.name} ${entry.colour}`;
+    swatch.setAttribute("aria-label", `${entry.name} ${entry.colour}`);
+    swatch.addEventListener("click", () => choose(entry.colour));
+    swatches.append(swatch);
+  });
+
+  picked.addEventListener("input", () => choose(picked.value));
+  named.addEventListener("change", () => choose(named.value));
+
+  if (/^#[0-9a-fA-F]{6}$/.test(current)) picked.value = current;
+  named.value = current;
+
+  holder.append(swatches, picked, named);
+  return holder;
+}
+function numberField(label, value, placeholder) {
+  const wrap = document.createElement("label");
+  wrap.className = "sensor-number";
+  const text = document.createElement("span");
+  text.textContent = label;
+  const input = document.createElement("input");
+  input.type = "number";
+  input.step = "any";
+  input.placeholder = placeholder;
+  input.setAttribute("aria-label", label);
+  if (value !== undefined && value !== null) input.value = String(value);
+  wrap.append(text, input);
+  return { wrap, input };
+}
+
 const mqttView = {
   async render(canvas, box, ctx, mode, opts = {}) {
 
@@ -4824,6 +5206,9 @@ const mqttView = {
     // A template that fails is answered beside the reading, not instead of it: a sensor whose
     // number vanished looks like a sensor that heard nothing, and the two are very different
     // problems to be sitting in front of.
+    const picture = document.createElement("div");
+    picture.className = "sensor-slot";
+    picture.hidden = true;
     const problem = document.createElement("div");
     problem.className = "sensor-problem";
     problem.hidden = true;
@@ -4843,7 +5228,16 @@ const mqttView = {
     const log = document.createElement("ul");
     log.className = "mqtt-log";
 
-    wrap.append(head, readout, problem, detail, sensorTemplateEditor(box, ctx, value), log);
+    wrap.append(
+      head,
+      readout,
+      picture,
+      problem,
+      detail,
+      sensorTemplateEditor(box, ctx),
+      sensorScaleEditor(box, ctx),
+      log,
+    );
     canvas.append(wrap);
 
     let info;
@@ -4884,6 +5278,12 @@ const mqttView = {
       value.title = notes.join(" — ");
       problem.hidden = !(shown && shown.problem);
       if (shown && shown.problem) problem.textContent = shown.problem;
+      // The picture sits beside the words, not instead of them: `8.4 bar` has to stay readable,
+      // and the bar is what makes it obvious at a glance that 8.4 on a 0-10 scale is nearly full.
+      picture.replaceChildren(
+        shown && shown.numeric ? sensorPicture(shown.numeric, { cell: !!opts.cell }) : null,
+      );
+      picture.hidden = !(shown && shown.numeric);
       badge.hidden = !reading.retained;
       badge.textContent = "retained";
       badge.title = "the broker kept this message for a subscription that started later";
@@ -4917,6 +5317,7 @@ const mqttView = {
       // what the server last heard — and says so — or admits it has nothing yet.
       chip.dataset.state = info.reading ? "cached" : "idle";
       chip.textContent = info.reading ? "last value" : "no value yet";
+      if (info.reading) show(info.reading, { shown: info.shown });
       detail.textContent = info.reading ? "" : `open the box to listen for ${target.topic}`;
       return;
     }
