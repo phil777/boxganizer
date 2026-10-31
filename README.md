@@ -129,6 +129,21 @@ Browse and the index tick disappear when the resource is not a file on this mach
 asking. A refusal is written **inside the dialog**, in its own line, because the status bar
 behind an open modal is a message nobody receives.
 
+A box is also **about** things, and that is what tags are for. Type a word into the tag field
+under the top line — or a path like `home/kitchen/boiler`, which creates the branch — and the box
+gets a coloured chip. A tag inherits the ones above it, so a box tagged `boiler` answers to
+`kitchen` and `home` too; those chips are drawn dashed and without a cross, because removing one
+means moving the tag in ☰ **Manage tags…**, not editing the box. Colours are derived from a tag's
+place in the hierarchy — one hue per branch, lighter as it goes down — so the tree is visible
+without reading it. ADR 19.
+
+```bash
+box tag add home/kitchen/boiler        # a path creates the parents it names
+box tag give Rates boiler
+box ls --tag home                      # the branch too, not only the word
+box tag ls                             # the tree, with what each tag holds
+```
+
 Every box's own controls — a folder's search, a desktop's grid size, a note's format bar, a
 sensor's address — live in a row that is **hidden until you ask**. A ⚙ at the right end of the
 top line opens it, and the box's content gives up the room: the drawer pushes the pane down

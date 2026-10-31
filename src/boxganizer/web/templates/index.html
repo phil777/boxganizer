@@ -66,6 +66,9 @@
             &#9881;
           </button>
         </header>
+        <!-- The box's tags, and the field to add one. Outside the canvas on purpose: every
+             view draws its own content and none of them should have to know tags exist. -->
+        <div id="tagline" class="tagline" hidden></div>
         <section id="canvas" tabindex="-1"></section>
       </main>
     </div>
@@ -164,6 +167,22 @@
     </dialog>
 
     <!-- A file selector over the server's filesystem, for the resource field. -->
+    <dialog id="tags-modal" aria-label="Manage tags">
+      <h2>Manage tags</h2>
+      <p class="muted">
+        A tag inherited from the one above it is not on the box twice: it is what the box's own
+        tag means. So removing an inherited tag means moving it here, not editing the box.
+      </p>
+      <ul id="tags-tree" class="tags-tree"></ul>
+      <form id="tag-new" class="tag-new">
+        <input id="tag-new-name" type="text" placeholder="new tag, or home/kitchen" aria-label="new tag name" />
+        <button type="submit">Add tag</button>
+      </form>
+      <footer>
+        <button type="button" id="tags-close">Close</button>
+      </footer>
+    </dialog>
+
     <dialog id="index-modal" aria-label="What the index is waiting for">
       <h2>Waiting for the index</h2>
       <p id="index-pending-summary" class="muted"></p>

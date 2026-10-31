@@ -1950,3 +1950,159 @@ pre.text {
   overflow: hidden;
   padding: 4px;
 }
+
+/* -- tags ------------------------------------------------------------------
+   The colour comes from the server, because it is derived from the tag's place in the
+   hierarchy and a second implementation in the page would drift from the first. The text
+   colour comes with it for the same reason: a chip is only worth its label if the label can
+   be read on it. */
+.tagline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.3rem var(--gap);
+  border-bottom: 1px solid var(--line);
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.08rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.tag-chip .tag-path {
+  /* the branch the word belongs to, quieter than the word itself */
+  opacity: 0.7;
+  font-size: 0.7rem;
+}
+
+.tag-chip button {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  padding: 0 0.1rem;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.tag-chip button:hover {
+  opacity: 1;
+}
+
+.tag-chip.inherited {
+  /* dashed and uncrossable: it is not on the box, it is what the box's tag means, and a cross
+     here would be a control that cannot do the thing it looks like it does */
+  background: transparent !important;
+  border-style: dashed;
+}
+
+.tagline .tag-add {
+  flex: 0 1 11rem;
+  min-width: 6rem;
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.12rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+}
+
+.tagline .tag-hint {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+.tags-tree {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.tags-tree li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.tags-tree .tag-swatch {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: none;
+  border-radius: 3px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+}
+
+.tags-tree .tag-name {
+  font: inherit;
+  font-weight: 600;
+  min-width: 6rem;
+  flex: 0 1 auto;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+}
+
+.tags-tree .tag-name:focus {
+  border-color: var(--accent);
+  background: var(--panel);
+}
+
+.tags-tree .tag-count {
+  font-size: 0.75rem;
+  opacity: 0.75;
+  flex: none;
+}
+
+.tags-tree select,
+.tags-tree input[type="color"] {
+  font: inherit;
+  font-size: 0.8rem;
+  flex: none;
+}
+
+.tags-tree .tag-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.3rem;
+  flex: none;
+}
+
+.tags-tree .tag-actions button {
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.1rem 0.4rem;
+  cursor: pointer;
+}
+
+.tags-tree .tag-error {
+  color: var(--accent);
+  font-size: 0.78rem;
+}
+
+.tag-new {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+
+.tag-new input {
+  flex: 1 1 auto;
+  font: inherit;
+  padding: 0.25rem 0.4rem;
+}

@@ -2973,3 +2973,36 @@ def test_a_folder_list_takes_the_room_left_and_scrolls_in_itself(client: TestCli
     view = view[: view.index("}")]
     assert "display: flex;" in view and "flex-direction: column;" in view
     assert "min-height: 3.5rem;" in view, "an empty folder must still be a drop target"
+
+
+def test_tags_are_painted_outside_the_canvas_and_carry_no_view_logic(client: TestClient) -> None:
+    """One chip line for thirteen views.
+
+    Every view drawing its own chips is thirteen chances to colour them differently, and the
+    colour here is derived from the tag's place in a hierarchy the page does not walk.
+    """
+    page = client.get("/").text
+    assert 'id="tagline"' in page
+    assert page.index('id="tagline"') < page.index('id="canvas"')
+    assert 'id="tags-modal"' in page and 'id="tags-tree"' in page and 'id="tag-new"' in page
+    css = client.get("/static/app.css").text
+    assert ".tag-chip.inherited" in css
+    assert ".tag-chip.inherited {" in css and "dashed" in css[css.index(".tag-chip.inherited {") :]
+    script = client.get("/static/app.js").text
+    # the chip line asks for one tag at a time, never rewriting the set it last saw
+    assert ".takeTag(box.uuid, chip.name)" in script
+    assert "await api.giveTag(box.uuid, word)" in script
+    assert "held.explicit.filter" not in script
+    # suggestions come from the library, and a new word is taken at face value
+    assert 'entry.setAttribute("list", "tag-options")' in script
+    assert "ensureTagOptions" in script
+    # it is in the menu of things that are about the library, not the box on screen
+    assert '{ label: "Manage tags…", run: openTagsModal }' in script
+    # and an inherited chip is drawn without a control that could not work
+    chips = script[
+        script.index("async function renderTagLine") : script.index(
+            "async function ensureTagOptions"
+        )
+    ]
+    assert 'chip.explicit ? "" : " inherited"' in chips
+    assert "if (chip.explicit) {" in chips

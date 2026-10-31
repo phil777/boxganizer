@@ -21,6 +21,7 @@ const state = {
   searchExpanded: "", // what the last search widened the typed words into
   editing: null, // uuid of the box the edit modal is open on
   editingBox: null, // that box as the view held it, for filling its metadata fields
+  tagTree: [], // /api/tags as last read, shared by the chip field and the manage window
 };
 
 /* ------------------------------------------------------------------ api ---- */
@@ -86,6 +87,31 @@ const api = {
   resolveFolder: (ref) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/resolve`, { method: "POST" }),
   indexStatus: (check) => request(`/api/index/status${check ? "?check=1" : ""}`),
+  tags: () => request("/api/tags"),
+  createTag: (payload) =>
+    request("/api/tags", { method: "POST", body: JSON.stringify(payload) }),
+  editTag: (name, payload) =>
+    request(`/api/tags/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteTag: (name) =>
+    request(`/api/tags/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  boxTags: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/tags`),
+  giveTag: (ref, name) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/tags`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  takeTag: (ref, name) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/tags/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  setBoxTags: (ref, tags) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/tags`, {
+      method: "PUT",
+      body: JSON.stringify({ tags }),
+    }),
   indexPending: () => request("/api/index/pending"),
   // "Look at the files again" without reading any of them: the status endpoint is the one
   // that stats, and `check=1` is what turns "to reindex" from old news into a fresh answer.
@@ -381,6 +407,289 @@ const context = {
   edit: openEditBoxModal,
 };
 
+/* -- tags: chips under the top line ------------------------------------------
+ *
+ * One place for them, outside the canvas: every view draws its own content, and thirteen
+ * views each learning to paint a chip is thirteen chances to paint it differently. The chips
+ * come from the server already coloured, and split into what the box was given and what that
+ * means — the second kind is dashed and has no cross, because removing it means moving the tag
+ * in the hierarchy rather than editing the box.
+ *
+ * The field offers the tags that exist and takes a new one at face value: typing a word you
+ * mean is how tags get invented, and sending someone to a manage window first is a rule about
+ * the schema rather than about their filing.
+ */
+async function renderTagLine(box) {
+  const token = paneGeneration; // a reply for the box before this one must not paint this one
+  const line = el("tagline");
+  line.textContent = "";
+  line.hidden = !box;
+  if (!box) return;
+  let held;
+  try {
+    held = await api.boxTags(box.uuid);
+  } catch (error) {
+    line.hidden = true;
+    return;
+  }
+  if (!stillOnScreen(token)) return;
+
+  held.chips.forEach((chip) => {
+    const node = document.createElement("span");
+    node.className = "tag-chip" + (chip.explicit ? "" : " inherited");
+    if (chip.explicit) {
+      node.style.background = chip.colour;
+      node.style.color = chip.text;
+    } else {
+      node.style.borderColor = chip.colour;
+      node.style.color = chip.colour;
+    }
+    const path = chip.path.slice(0, -1).join("/");
+    if (path && !chip.explicit) {
+      const from = document.createElement("span");
+      from.className = "tag-path";
+      from.textContent = `${path}/`;
+      node.append(from);
+    }
+    const label = document.createElement("span");
+    label.textContent = chip.name;
+    node.append(label);
+    node.title = chip.explicit
+      ? `${chip.path.join("/")} — on this box`
+      : `${chip.path.join("/")} — inherited, because this box carries something below it`;
+    if (chip.explicit) {
+      const cross = document.createElement("button");
+      cross.type = "button";
+      cross.textContent = "×";
+      cross.setAttribute("aria-label", `take ${chip.name} off this box`);
+      cross.addEventListener("click", () => {
+        // one name, asked of the server — not the set this page drew, which may predate a tag
+        // added in another window a second ago
+        api
+          .takeTag(box.uuid, chip.name)
+          .then(() => renderTagLine(state.current))
+          .catch((error) => status(error.message, true));
+      });
+      node.append(cross);
+    }
+    line.append(node);
+  });
+
+  const entry = document.createElement("input");
+  entry.className = "tag-add";
+  entry.type = "text";
+  entry.placeholder = held.explicit.length ? "+ tag" : "tag this box";
+  entry.setAttribute("list", "tag-options");
+  entry.setAttribute("aria-label", "add a tag to this box");
+  line.append(entry);
+
+  await ensureTagOptions();
+
+  const commit = async () => {
+    const words = entry.value.trim();
+    if (!words) return;
+    entry.value = "";
+    // commas are how a list is typed; treating one as part of a name is how "cooking, baking"
+    // arrives as a single chip
+    const wanted = words
+      .split(",")
+      .map((word) => word.trim())
+      .filter(Boolean);
+    try {
+      for (const word of wanted) await api.giveTag(box.uuid, word);
+      await renderTagLine(state.current);
+      status(wanted.length === 1 ? `tagged ${wanted[0]}` : `tagged ${wanted.length} tags`);
+    } catch (error) {
+      status(error.message, true);
+      await renderTagLine(state.current);
+    }
+  };
+  entry.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === ",") {
+      event.preventDefault();
+      commit();
+    }
+  });
+  entry.addEventListener("blur", () => {
+    if (entry.value.trim()) commit();
+  });
+}
+
+/* One <datalist> for every tag field in the page, filled from the server once and
+   refreshed whenever a tag is created or renamed: the suggestions are the library's
+   vocabulary, and a field that offers nothing encourages the same thing to be filed
+   under three words. */
+async function ensureTagOptions() {
+  let list = el("tag-options");
+  if (!list) {
+    list = document.createElement("datalist");
+    list.id = "tag-options";
+    document.body.append(list);
+  }
+  let all;
+  try {
+    all = await api.tags();
+  } catch (error) {
+    return;
+  }
+  list.replaceChildren();
+  all.tags.forEach((tag) => {
+    const option = document.createElement("option");
+    option.value = tag.name;
+    option.label = tag.path.join("/");
+    list.append(option);
+  });
+  state.tagTree = all.tags;
+}
+
+/* -- the Manage tags window ---------------------------------------------------
+ *
+ * One row per tag, edited in place: the name, what is above it, and its colour. A window that
+ * made every change through a separate dialog would be three clicks per edit and would hide
+ * the one thing worth seeing here, which is that a move takes its whole branch with it.
+ */
+async function openTagsModal() {
+  el("tags-modal").showModal();
+  await drawTagsTree();
+}
+
+async function drawTagsTree() {
+  const list = el("tags-tree");
+  list.textContent = "";
+  await ensureTagOptions();
+  const all = state.tagTree || [];
+  if (!all.length) {
+    const none = document.createElement("li");
+    none.className = "muted";
+    none.textContent = "No tags yet. Add the first one below — a word, or a path like home/kitchen.";
+    list.append(none);
+    return;
+  }
+  all.forEach((tag) => {
+    const row = document.createElement("li");
+    row.style.paddingLeft = `${0.2 + tag.depth * 1.1}rem`;
+
+    const swatch = document.createElement("span");
+    swatch.className = "tag-swatch";
+    swatch.style.background = tag.colour;
+    row.append(swatch);
+
+    const name = document.createElement("input");
+    name.className = "tag-name";
+    name.value = tag.name;
+    name.setAttribute("aria-label", `the name of the tag ${tag.name}`);
+    row.append(name);
+
+    const count = document.createElement("span");
+    count.className = "tag-count";
+    count.textContent = tag.count
+      ? `${tag.count} on it`
+      : tag.includingBelow
+        ? `${tag.includingBelow} below`
+        : "nothing on it";
+    count.title = `${tag.count} box(es) were given this tag; ${tag.includingBelow} answer to it counting the tags below`;
+    row.append(count);
+
+    const parent = document.createElement("select");
+    parent.setAttribute("aria-label", `what is above ${tag.name}`);
+    const top = document.createElement("option");
+    top.value = "";
+    top.textContent = "— top level —";
+    parent.append(top);
+    all
+      .filter((other) => other.name !== tag.name)
+      .forEach((other) => {
+        const option = document.createElement("option");
+        option.value = other.name;
+        option.textContent = other.path.join(" / ");
+        parent.append(option);
+      });
+    parent.value = tag.parent || "";
+    row.append(parent);
+
+    const colour = document.createElement("input");
+    colour.type = "color";
+    colour.value = tag.explicit_colour || "#808080";
+    colour.title = tag.explicit_colour
+      ? "the colour you chose"
+      : "derived from the tag above it — pick one to fix it";
+    row.append(colour);
+
+    const auto = document.createElement("button");
+    auto.type = "button";
+    auto.textContent = "auto";
+    auto.title = "hand this colour back to the derived palette";
+    auto.disabled = !tag.explicit_colour;
+    row.append(auto);
+
+    const actions = document.createElement("span");
+    actions.className = "tag-actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.textContent = "Save";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Delete";
+    remove.title = "the tags below it move up a level instead of going with it";
+    actions.append(save, remove);
+    row.append(actions);
+
+    const complain = (error) => {
+      // A refused edit must stay on the row it belongs to: this window holds a dozen
+      // inputs, and one status line at the bottom of the page says nothing about which.
+      status(error.message, true);
+      let note = row.querySelector(".tag-error");
+      if (!note) {
+        note = document.createElement("span");
+        note.className = "tag-error";
+        row.append(note);
+      }
+      note.textContent = error.message;
+    };
+
+    const commit = async (payload) => {
+      try {
+        await api.editTag(tag.name, payload);
+        await drawTagsTree();
+        await renderTagLine(state.current);
+        status(`saved ${payload.name || tag.name}`);
+      } catch (error) {
+        complain(error);
+      }
+    };
+    save.addEventListener("click", () =>
+      commit({
+        name: name.value.trim() === tag.name ? null : name.value.trim(),
+        parent: parent.value,
+        colour: colour.value,
+      })
+    );
+    auto.addEventListener("click", () => commit({ clear_colour: true }));
+    remove.addEventListener("click", () => {
+      if (!remove.dataset.sure) {
+        remove.dataset.sure = "1";
+        remove.textContent = "Sure?";
+        return;
+      }
+      api
+        .deleteTag(tag.name)
+        .then(async () => {
+          await drawTagsTree();
+          await renderTagLine(state.current);
+          status(`deleted ${tag.name}`);
+        })
+        .catch(complain);
+    });
+    name.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        save.click();
+      }
+    });
+    list.append(row);
+  });
+}
+
 /* -- a box's settings, shown only when asked for -----------------------------
  *
  * Almost every view carries a row of controls: a folder's search, a desktop's grid size, a
@@ -437,6 +746,7 @@ function renderMain() {
     return;
   }
   view.render(canvas, box, context, "content", { embedded: false, depth: 0 });
+  renderTagLine(box);
   applyConfigHeader();
   // Views fill themselves in after their own awaits — a folder's children, a sensor's probe —
   // so the gear is re-checked when the canvas settles rather than only when it was cleared.
@@ -1835,6 +2145,7 @@ function openSideMenu(event) {
   const where = button.getBoundingClientRect();
   showMenu(where.left, where.bottom + 4, [
     { label: "About", run: showAbout },
+    { label: "Manage tags…", run: openTagsModal },
     { label: "Check the library", run: openCheckModal },
     { separator: true },
     { label: "Index what changed", run: () => runIndexation("outstanding") },
@@ -1995,6 +2306,22 @@ async function init() {
   wirePaneDrops();
   el("side-menu").addEventListener("click", openSideMenu);
   el("about-close").addEventListener("click", () => el("about-modal").close());
+  el("tags-close").addEventListener("click", () => el("tags-modal").close());
+  el("tag-new").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const field = el("tag-new-name");
+    const words = field.value.trim();
+    if (!words) return;
+    try {
+      await api.createTag({ name: words });
+      field.value = "";
+      await drawTagsTree();
+      await renderTagLine(state.current);
+      status(`created ${words}`);
+    } catch (error) {
+      status(error.message, true);
+    }
+  });
   el("check-close").addEventListener("click", () => el("check-modal").close());
   el("check-again").addEventListener("click", () => drawCheck());
   el("about-modal").addEventListener("click", (event) => {

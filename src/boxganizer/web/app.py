@@ -347,6 +347,12 @@ class TagEdit(BaseModel):
     clear_colour: bool = False
 
 
+class BoxTagOne(BaseModel):
+    """One tag, given to one box."""
+
+    name: str
+
+
 class BoxTags(BaseModel):
     """The whole tag set for one box. Empty clears it."""
 
@@ -1981,6 +1987,31 @@ def create_app(
                 status_code=422, detail={"error": "bad_tag", "reason": str(exc)}
             ) from exc
         return read_box_tags(ref, store)
+
+    @app.post("/api/boxes/{ref}/tags")
+    def add_box_tag(ref: str, store: StoreDep, body: BoxTagOne) -> dict[str, Any]:
+        """Give a box one tag, leaving the rest of its tags alone.
+
+        The chip line needs this rather than the whole-set write below: a cross removes one
+        name, and rebuilding the set from what the page fetched a minute ago silently drops
+        anything added since — including by the same page in another click. A delta cannot be
+        stale in that way, which is the only reason it exists.
+        """
+        box = store.resolve(ref)
+        try:
+            store.assign_tag(box, body.name)
+        except tags.TagError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_tag", "reason": str(exc)}
+            ) from exc
+        return read_box_tags(ref, store)
+
+    @app.delete("/api/boxes/{ref}/tags/{name}")
+    def remove_box_tag(ref: str, store: StoreDep, name: str) -> dict[str, Any]:
+        """Take one tag off a box. An inherited tag has no row here to take off."""
+        box = store.resolve(ref)
+        store.unassign_tag(box, name)
+        return read_box_tags(box.uuid, store)
 
     @app.get("/api/boxes/{ref}/filter", response_model=FilterBody)
     def read_filter(ref: str, store: StoreDep) -> FilterBody:

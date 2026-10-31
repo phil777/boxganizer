@@ -388,3 +388,31 @@ def test_a_boxs_tags_are_written_whole(client: TestClient, store: BoxStore) -> N
     assert written.status_code == 200
     assert sorted(written.json()["explicit"]) == ["Home", "new-thing"]
     assert client.put(f"/api/boxes/{box.uuid}/tags", json={"tags": []}).json()["explicit"] == []
+
+
+def test_a_tag_can_be_given_and_taken_one_at_a_time(client: TestClient, store: BoxStore) -> None:
+    """The chip line needs a delta, not a whole-set write.
+
+    Rebuilding the set from a snapshot is how a cross on one chip silently deletes a tag that
+    was added in another window a second earlier — which is what the first version did, and what
+    a page with three ways to edit the same box will keep doing.
+    """
+    store.add_tag("Home")
+    box = store.add(Box(name="Any", box_type="note"))
+    assert client.post(f"/api/boxes/{box.uuid}/tags", json={"name": "Home"}).json()["explicit"] == [
+        "Home"
+    ]
+    assert client.post(f"/api/boxes/{box.uuid}/tags", json={"name": "urgent"}).json()[
+        "explicit"
+    ] == [
+        "Home",
+        "urgent",
+    ]
+    gone = client.delete(f"/api/boxes/{box.uuid}/tags/home").json()
+    assert gone["explicit"] == ["urgent"]
+    # an inherited tag has no row of its own to remove, and asking removes nothing
+    store.assign_tag(box, "Home")
+    assert client.delete(f"/api/boxes/{box.uuid}/tags/Home").json()["explicit"] == ["urgent"]
+    refused = client.post(f"/api/boxes/{box.uuid}/tags", json={"name": "a/b/c/d/e/f/g"})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["error"] == "bad_tag"
