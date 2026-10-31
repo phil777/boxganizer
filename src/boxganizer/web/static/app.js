@@ -7433,7 +7433,7 @@ async function noteView(canvas, box, ctx, opts = {}) {
       // A blank sheet next to a blank note reads like a failure to load. Say what it is.
       const empty = document.createElement("p");
       empty.className = "note-empty muted";
-      empty.textContent = "Nothing written yet. Press Write and start.";
+      empty.textContent = "Nothing written yet. Switch edit on and start.";
       surface.append(empty);
       say("empty");
       return;
