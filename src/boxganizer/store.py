@@ -25,6 +25,7 @@ from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
     DuplicateBoxName,
+    HandFilingRefused,
     InvalidBoxContent,
     RootCannotBeFiled,
     StoreError,
@@ -691,6 +692,10 @@ class BoxStore:
         if not parent_kind.allows_children:
             raise ChildrenNotAllowed(parent_box.name, parent_kind.key, child)
         child_box = self.resolve(child)
+        if not parent_kind.accepts_filing:
+            # The resolver writes its own links with plain SQL, so this door is only the hand filing
+            # it was drawn for: `box file`, POST /children, a drag and drop.
+            raise HandFilingRefused(parent_box.name, child_box.name, parent_kind.filing_refusal)
         if boxtypes.get(child_box.box_type).is_root:
             raise RootCannotBeFiled(child_box.name, parent_box.name)
         parent_id = parent_box.id or 0
@@ -1290,6 +1295,19 @@ class BoxStore:
         )
         return tags.Tag(name=clean, parent=parent, id=self.tag_id(clean), colour=wanted)
 
+    def _relist_dynamic_folders(self) -> None:
+        """Re-cut every folder that resolves itself from a filter.
+
+        A tag is not a box, so nothing here calls :meth:`_sync_membership` when one changes — yet a
+        filter that says `tag:home` is a question about the tag tree, and the tree just moved. A
+        rename, a reparent or an assignment has to re-cut membership for the folders that mention
+        it, or the folder keeps a box it no longer matches (and drops the one that now does) until
+        something else edits a box by accident.
+        """
+        for folder in self.resolving_folders():
+            if folder.id is not None:
+                self.resolve_folder(folder.uuid)
+
     def add_tag_path(self, path: str) -> tags.Tag:
         """Create a tag and any parents its path names, and return the leaf.
 
@@ -1321,8 +1339,8 @@ class BoxStore:
                 )
             parent = made.name
         assert made is not None
+        self._relist_dynamic_folders()
         return made
-
     def rename_tag(self, name: str, new_name: str) -> tags.Tag:
         """Rename a tag in place. Boxes keep holding it, and the path shows the new name."""
         row = self._tag_row(name)
@@ -1333,13 +1351,13 @@ class BoxStore:
         if clash is not None and clash != int(row["id"]):
             raise tags.TagError(f"there is already a tag called {clean!r}")
         self._execute("UPDATE tags SET name = ? WHERE id = ?", (clean, int(row["id"])))
+        self._relist_dynamic_folders()
         return tags.Tag(
             name=clean,
             parent=self._tag_name(int(row["parent_id"])) if row["parent_id"] else None,
             id=int(row["id"]),
             colour=None if row["colour"] is None else str(row["colour"]),
         )
-
     def move_tag(self, name: str, parent: str | None) -> tags.Tag:
         """Re-parent a tag — the one edit that can make a hierarchy stop being one."""
         row = self._tag_row(name)
@@ -1372,8 +1390,8 @@ class BoxStore:
         else:
             parent_id = None
         self._execute("UPDATE tags SET parent_id = ? WHERE id = ?", (parent_id, int(row["id"])))
+        self._relist_dynamic_folders()
         return tags.Tag(name=held, parent=wanted, id=int(row["id"]))
-
     def set_tag_colour(self, name: str, colour: str | None) -> tags.Tag:
         """Choose a colour for a tag, or None to hand it back to the derived palette."""
         row = self._tag_row(name)
@@ -1408,12 +1426,12 @@ class BoxStore:
         boxes = self._rows("SELECT box_id FROM box_tags WHERE tag_id = ?", (held_id,))
         self._execute("DELETE FROM box_tags WHERE tag_id = ?", (held_id,))
         self._execute("DELETE FROM tags WHERE id = ?", (held_id,))
+        self._relist_dynamic_folders()
         return {
             "tag": held,
             "reparented": children,
             "boxes": len(boxes),
         }
-
     def assign_tag(self, box: Box | str, name: str) -> tuple[str, ...]:
         """Give a box a tag, creating the tag when the name is new.
 
@@ -1430,8 +1448,8 @@ class BoxStore:
             "INSERT OR IGNORE INTO box_tags (box_id, tag_id) VALUES (?, ?)",
             (self._box_id_for(box), tag_id),
         )
+        self._relist_dynamic_folders()
         return self.box_tags(box)
-
     def unassign_tag(self, box: Box | str, name: str) -> tuple[str, ...]:
         """Take one tag off a box. An inherited tag is not a thing to take off here."""
         tag_id = self.tag_id(name)
@@ -1439,8 +1457,8 @@ class BoxStore:
             return self.box_tags(box)
         box_id = self._box_id_for(box)
         self._execute("DELETE FROM box_tags WHERE box_id = ? AND tag_id = ?", (box_id, tag_id))
+        self._relist_dynamic_folders()
         return self.box_tags(box)
-
     def set_box_tags(self, box: Box | str, names: Iterable[str]) -> tuple[str, ...]:
         """The whole explicit set, replacing what was there. Empty clears it."""
         box_id = self._box_id_for(box)
@@ -1456,8 +1474,8 @@ class BoxStore:
             self._execute(
                 "INSERT OR IGNORE INTO box_tags (box_id, tag_id) VALUES (?, ?)", (box_id, tag_id)
             )
+        self._relist_dynamic_folders()
         return self.box_tags(box)
-
     def box_tags(self, box: Box | str) -> tuple[str, ...]:
         """The tags this box was given, in the order they were added."""
         rows = self._rows(

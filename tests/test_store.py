@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from boxganizer import search as indexing
-from boxganizer.errors import BoxNotFound, DuplicateBoxName
+from boxganizer.errors import BoxNotFound, DuplicateBoxName, HandFilingRefused
 from boxganizer.models import Box
 from boxganizer.store import SCHEMA_VERSION, BoxStore
 
@@ -753,27 +754,62 @@ def test_resolve_folder_reports_the_member_count_it_settled_on(store: BoxStore) 
         store.resolve_folder("no-such-box")
 
 
-def test_a_hand_made_link_into_a_dynamic_folder_last_till_that_folder_is_resolved(
-    store: BoxStore,
-) -> None:
-    """Creating a box updates that box's place; it does not re-cut every folder.
+def test_a_dynamic_folder_refuses_a_box_filed_into_it_by_hand(store: BoxStore) -> None:
+    """A filtered folder decides its own members; a drop is not a vote.
 
-    A box filed into a dynamic folder by hand sits there until the folder is next
-    resolved — its filter edited, or `resolve_folder` called — because re-resolving
-    every folder on every creation would cost the whole library each time. This is
-    the seam to know about, not a mystery: the filter wins, eventually, and the
-    page can ask for it now.
+    Hand-filing used to be allowed and lasted until the next re-list took the box back out. The
+    person saw the box arrive and then vanish, with nothing saying which of their actions did it.
+    Refusing the drop is worse news delivered sooner, and the sentence names the way out.
     """
     store.add(Box(name="square", box_type="box"))
     store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
-    store.link("PDFs", "square")
-    assert "square" in names(store, "PDFs")
+
+    with pytest.raises(HandFilingRefused) as raised:
+        store.link("PDFs", "square")
+
+    assert "dynamic folder" in str(raised.value)
+    assert "ordinary folder" in str(raised.value)  # the sentence offers somewhere to put it
+    assert names(store, "PDFs") == []
+    # The refusal is about being filed there, not about the box existing anywhere: filing it in an
+    # ordinary folder is untouched by any of this.
+    store.add(Box(name="Papers", box_type="folder"))
+    store.link("Papers", "square")
+    assert names(store, "Papers") == ["square"]
+
+
+def test_a_cabinet_still_takes_a_box_filed_into_it_by_hand(store: BoxStore) -> None:
+    """The exception is drawn where refusing would protect nobody.
+
+    A cabinet's filter selects every box, so nothing filed there is ever taken back out: the
+    hazard the refusal exists for cannot happen, and refusing would break "New box in Cabinet".
+    """
+    store.add(Box(name="loose", box_type="box"))
+    store.add(Box(name="Everything", box_type="cabinet"))
+    store.link("Everything", "loose")
+    assert "loose" in names(store, "Everything")
+
+
+def test_a_new_box_that_matches_a_folder_lands_in_it_without_being_asked(store: BoxStore) -> None:
+    """Creating a box checks it against every folder's filter; it does not re-cut them.
+
+    Membership is written rather than computed on read, so a dynamic folder shows up in `box show`,
+    in the tree and in every box's `in` list like any other container. The cheap direction is the
+    new box: one box against every filter. The other direction — every box against one filter —
+    happens when that folder is opened or its filter edited, because doing it on every creation
+    would cost the whole library each time. Tag changes go the other way and re-list the folders
+    that ask about tags; see `test_a_tag_change_re_lists_the_dynamic_folders_that_ask_about_tags`.
+    """
+    store.add(Box(name="PDFs", box_type="dynamic-folder", config={"filter": {"type": "pdf"}}))
+    store.add(Box(name="square", box_type="box"))
+    assert names(store, "PDFs") == []
 
     store.add(Box(name="anything", box_type="pdf", resource_uri="/tmp/a.pdf"))
-    assert "square" in names(store, "PDFs")  # nothing has re-cut PDFs yet
-
-    store.resolve_folder("PDFs")
     assert names(store, "PDFs") == ["anything"]
+
+    # A box that stops matching leaves the same instant it changes.
+    pdf = store.get("anything")
+    store.update(replace(pdf, box_type="box"))
+    assert names(store, "PDFs") == []
 
 
 def test_upgrading_an_older_library_fills_the_cabinet(db_path: Path) -> None:

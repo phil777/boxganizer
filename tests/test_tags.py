@@ -416,3 +416,54 @@ def test_a_tag_can_be_given_and_taken_one_at_a_time(client: TestClient, store: B
     refused = client.post(f"/api/boxes/{box.uuid}/tags", json={"name": "a/b/c/d/e/f/g"})
     assert refused.status_code == 422
     assert refused.json()["detail"]["error"] == "bad_tag"
+
+
+def test_a_tag_change_re_lists_the_dynamic_folders_that_ask_about_tags(tmp_path: Path) -> None:
+    """A folder that filters on a tag has to hear about the tag tree moving.
+
+    Nothing here calls the box-sync path when a tag changes — a tag is not a box — so without an
+    explicit re-list the folder keeps a box it no longer matches and misses the one it now does,
+    until some unrelated edit happens to stumble past and fix it. That is a folder whose contents
+    depend on luck.
+    """
+    from boxganizer import search as indexing  # noqa: F401  (kept out of this test on purpose)
+
+    store = BoxStore(tmp_path / "tags-folder.db", content_root=tmp_path)
+    try:
+        store.add_tag_path("home/kitchen")
+        folder = store.add(
+            Box(
+                name="Kitchen things",
+                box_type="dynamic-folder",
+                config={"filter": {"expression": "tag:home"}},
+            )
+        )
+        pot = store.add(Box(name="Pot", box_type="note"))
+        pan = store.add(Box(name="Pan", box_type="note"))
+
+        def members() -> list[str]:
+            return sorted(child.name for child in store.children(folder.uuid))
+
+        assert members() == []
+
+        store.assign_tag(pot, "kitchen")  # under home, so the folder must want it
+        assert members() == ["Pot"]
+
+        store.assign_tag(pan, "home")
+        assert members() == ["Pan", "Pot"]
+
+        store.rename_tag("kitchen", "bathroom")  # still below home: nothing leaves
+        assert members() == ["Pan", "Pot"]
+
+        store.move_tag("bathroom", None)  # now a root tag, out of the home branch
+        assert members() == ["Pan"]
+
+        store.set_box_tags(pan, [])  # unassigning takes it out the same instant
+        assert members() == []
+
+        store.assign_tag(pan, "home")
+        assert members() == ["Pan"]
+        store.delete_tag("home")
+        assert members() == []
+    finally:
+        store.close()

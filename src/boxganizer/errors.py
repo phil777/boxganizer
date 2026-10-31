@@ -78,6 +78,22 @@ class EditError(BoxganizerError):
         self.reason = reason
 
 
+class HandFilingRefused(BoxganizerError):
+    """A box whose members come from a rule was asked to hold one by hand.
+
+    Not the same complaint as :class:`ChildrenNotAllowed`: that type cannot contain boxes at all.
+    This one contains plenty of them and chooses them itself, which is why the reason matters more
+    than the refusal — the box on the clipboard is not in the wrong place, the destination is a
+    question rather than a shelf.
+    """
+
+    def __init__(self, parent: str, child: str, reason: str) -> None:
+        super().__init__(f"cannot file {child!r} in {parent!r}: {reason}")
+        self.parent = parent
+        self.child = child
+        self.reason = reason
+
+
 class RootCannotBeFiled(BoxganizerError):
     """Something tried to put the root box inside another box."""
 

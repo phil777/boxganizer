@@ -51,6 +51,7 @@ from boxganizer.errors import (
     ChildrenNotAllowed,
     DuplicateBoxName,
     GridError,
+    HandFilingRefused,
     InvalidBoxContent,
     InvalidBoxName,
     MqttError,
@@ -601,6 +602,13 @@ def create_app(
         return JSONResponse(
             status_code=409,
             content={"detail": {"error": "children_not_allowed", "parent_type": exc.parent_type}},
+        )
+
+    @app.exception_handler(HandFilingRefused)
+    async def _no_hand_filing(request: Request, exc: HandFilingRefused) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"error": "hand_filing_refused", "reason": exc.reason}},
         )
 
     @app.exception_handler(RootCannotBeFiled)

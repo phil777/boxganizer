@@ -220,7 +220,7 @@ whole pane takes it. What a box shows depends on what it is:
 | desktop            | icons anywhere on the surface: drag them with the pointer, drag a corner to size them, arrow-key them about, and let a magnetic grid of the size you chose pull them onto its lines. The resource, when it is a picture, is the wallpaper — right-click the bare surface to choose one or take it away. Double-click opens a box in place of the desktop. Shown in a smaller pane it is the whole desktop drawn smaller, not a corner of it: canvas, wallpaper and icons scale by one factor, so an icon stays on the same feature of the picture |
 | tiling-viewport    | its space split into panes, each showing one box with its own path line and three buttons — close, split horizontally, split vertically — and a bar between any two panes you can drag; the split, the ratio and what is open where are saved on the box |
 | windowed-viewport  | floating windows over the same space, each with its own path line; drag the title to move a window, the corner to resize it, click it to raise it, and they come back where you left them |
-| dynamic-folder     | the folder list; above it the filter as one expression, a row per clause to add, remove, reorder or negate, what the filter asks for in words, and a button to re-apply it |
+| dynamic-folder     | the folder list; above it the filter as one expression, a row per clause to add, remove, reorder or negate, what the filter asks for in words, and a button to re-apply it. It shows its members and refuses to receive one: a drop says "not here" in amber and explains itself (ADR 25) |
 | mindmap            | the box in a rounded node at the centre, its children as branches growing left and right, each branch curved to its parent in its own colour. Click into it and the keys drive it: **Insert** a node under the one in hand, **Enter** beside it, **arrows** to walk the map, **Ctrl+↑↓** to shuffle a node among its siblings, **Ctrl+←→** to push it deeper into the map or pull it out towards the centre — read off the side the branch grows on, so Ctrl always means away from the middle or towards it, and a branch of the centre changes side instead of rising above it. Double-click, or **F2**, writes the node's name where it stands. A box dragged onto a node that nothing has been written into takes that node's place; onto any other node it is filed inside |
 | browser, web       | the page, framed; the address bar saves back to the box |
 | mqtt               | the last message on its topic, and every one after it, as the broker sends them — worded and dressed by the box's own templates, with the raw payload in the tooltip. The address is shown with its password hidden, which the box keeps for itself. In a grid cell it is the last value alone: the cell does not listen, the opened box does |
@@ -370,7 +370,15 @@ list see a dynamic container exactly as they see one filled by hand. The store
 keeps it true: a box created joins the folders that want it, a box renamed or
 retyped leaves the ones it no longer fits, and editing the filter re-cuts the whole
 membership — through the page, `box edit` or a raw config write, since all three go
-through the same door. A filter that cannot be read selects **nothing** and says
+through the same door. **A tag moving re-cuts the folders that ask about tags**: renaming
+`home` to `house`, hanging `tools` underneath it or deleting a tag re-lists every folder whose
+filter reads the tag tree, in the same breath, so a folder open on screen stops showing a box it
+stopped holding. A dynamic folder will not accept a box filed into it by hand (ADR 25): the
+re-list would take it back out, so `box link`, the API and a drag and drop all refuse, and the
+sentence says what to do instead — change the box, or use an ordinary folder. Its "＋ New box
+here" button is disabled for the same reason. The cabinet is the exception that proves the rule:
+its filter selects everything, so a hand-filed box never leaves, and it keeps the button.
+A filter that cannot be read selects **nothing** and says
 why; reading it as "empty" would mean the whole library.
 
 The **cabinet** is the dynamic folder that filters nothing: it holds every box, and

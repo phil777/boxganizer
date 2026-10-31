@@ -1149,6 +1149,15 @@ pre.text {
   outline-offset: 1px;
 }
 
+/* A drop this sheet will not take. Not the absence of a highlight — that is too easy to read as
+   "missed" — but a line in the colour of a mistake, so the pointer over the folder is legible as a
+   decision while the hand is still holding the box. */
+.children-view.drop-refused,
+.children-view .drop-refused {
+  outline: 2px dashed var(--warn, #b45309);
+  outline-offset: -2px;
+}
+
 /* What a dynamic folder asks for, and the controls to change it. */
 .filter-bar {
   display: flex;

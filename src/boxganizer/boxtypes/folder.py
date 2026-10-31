@@ -26,10 +26,12 @@ class DynamicFolder(FolderBox):
     every box's `in` list like any other container: the filter says who belongs and
     the links say who belongs *now*.
 
-    What belongs is therefore not chosen by hand. Linking a box in by hand is
-    allowed and lasts until the next time the folder is resolved — which happens
-    whenever the filter is edited or any box changes — and a box the filter does not
-    select is taken back out.
+    What belongs is therefore not chosen by hand, and hand-filing is refused rather
+    than tolerated: it used to be allowed, and it lasted until the next re-list took
+    the box back out. A box that arrives and then leaves on its own is worse than a
+    drop that never happened, because the person saw it arrive. So `box file`,
+    POST /children and a drag and drop are all refused here, with the sentence saying
+    what to do instead: change the box (its tags, its name) or use an ordinary folder.
     """
 
     key: ClassVar[str] = "dynamic-folder"
@@ -43,6 +45,12 @@ class DynamicFolder(FolderBox):
     summary: ClassVar[str] = "Members are every box matching a saved filter."
     #: The store keeps the links of this type in step with its filter.
     resolves_membership: ClassVar[bool] = True
+    accepts_filing: ClassVar[bool] = False
+    filing_refusal: ClassVar[str] = (
+        "it is a dynamic folder: its members are whatever its filter matches, so a box filed by "
+        "hand would be taken back out at the next re-list. Tag or rename the box so the filter "
+        "reaches it, or file it in an ordinary folder"
+    )
 
 
 class Cabinet(DynamicFolder):
@@ -55,9 +63,15 @@ class Cabinet(DynamicFolder):
 
     A cabinet carries no filter of its own: whatever is left in its config is
     ignored, so an edited cabinet cannot quietly stop being the whole library.
+
+    It is the one dynamic folder that still accepts hand-filing, and it is honest about it: its
+    filter selects everything, so a box filed here by hand is never taken back out. Refusing it
+    would break "New box in Cabinet" to protect nobody.
     """
 
     key: ClassVar[str] = "cabinet"
+    accepts_filing: ClassVar[bool] = True
+    filing_refusal: ClassVar[str] = ""
     label: ClassVar[str] = "Cabinet"
     icon: ClassVar[str] = "\U0001f5c4️"  # 🗄️
     summary: ClassVar[str] = "Every box in the library, and itself."

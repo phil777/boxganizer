@@ -45,6 +45,14 @@ class BoxType:
     #: to subclasses: a subclass is selectable unless it declares itself too.
     abstract: ClassVar[bool] = False
     allows_children: ClassVar[bool] = True
+    #: False where the members come from a rule instead of a decision. Such a box still holds
+    #: children — that is what its list shows — but it refuses to have one filed into it by hand,
+    #: because the next re-list would take it back out and leave the person wondering where the box
+    #: went. `allows_children` answers "can this contain boxes at all"; this answers "may I choose
+    #: one", and the two are different questions with different answers for a filtered folder.
+    accepts_filing: ClassVar[bool] = True
+    #: The sentence the user gets when this type refuses a filing. Empty when it does not refuse.
+    filing_refusal: ClassVar[str] = ""
     resource_uri_required: ClassVar[bool] = False
     #: Schemes the resource may use; ``None`` means any, "file" also allows plain paths.
     resource_uri_schemes: ClassVar[frozenset[str] | None] = None
@@ -176,6 +184,8 @@ class BoxType:
             "summary": cls.summary,
             "abstract": registry.is_abstract(cls),
             "allows_children": cls.allows_children,
+            "accepts_filing": cls.accepts_filing,
+            "filing_refusal": cls.filing_refusal,
             "thumbnail_kind": cls.thumbnail_kind,
             "is_root": cls.is_root,
             "live_source": cls.live_source,

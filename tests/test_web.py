@@ -1969,12 +1969,31 @@ def test_resolving_on_demand_says_what_it_holds(client: TestClient) -> None:
         "/api/boxes",
         json={"name": "PDFs", "box_type": "dynamic-folder", "config": {"filter": {"type": "pdf"}}},
     )
-    client.post("/api/boxes/PDFs/children", json={"child": "square"})  # filed by hand
-    assert "square" in [child["name"] for child in client.get("/api/boxes/PDFs").json()["children"]]
+    refused = client.post("/api/boxes/PDFs/children", json={"child": "square"})
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"] == "hand_filing_refused"
+    assert client.get("/api/boxes/PDFs").json()["children"] == []
+    client.post(
+        "/api/boxes", json={"name": "spec", "box_type": "pdf", "resource_uri": "/tmp/s.pdf"}
+    )
     resolved = client.post("/api/boxes/PDFs/resolve")
     assert resolved.status_code == 200
-    assert resolved.json()["members"] == 0
-    assert client.get("/api/boxes/PDFs").json()["children"] == []
+    assert resolved.json()["members"] == 1
+    assert [c["name"] for c in client.get("/api/boxes/PDFs").json()["children"]] == ["spec"]
+
+
+def test_a_cabinet_is_the_one_filtered_folder_that_takes_a_box_by_hand(client: TestClient) -> None:
+    """The refusal exists because a re-list takes the box back out; a cabinet never does.
+
+    Its filter selects everything, so a hand-filed box stays, and refusing here would only break
+    "New box in Cabinet" — a rule with no hazard behind it is the kind that gets quietly worked
+    around, so the exception is written down where the rule is.
+    """
+    client.post("/api/boxes", json={"name": "loose", "box_type": "box"})
+    client.post("/api/boxes", json={"name": "Everything", "box_type": "cabinet"})
+    filed = client.post("/api/boxes/Everything/children", json={"child": "loose"})
+    assert filed.status_code == 201
+    assert "loose" in [c["name"] for c in client.get("/api/boxes/Everything").json()["children"]]
 
 
 def test_a_dynamic_folder_says_so_in_the_type_list(client: TestClient) -> None:
@@ -2871,7 +2890,57 @@ def test_a_box_that_holds_no_boxes_offers_no_drop_zone(client: TestClient) -> No
     from_here = script.index("function paneAcceptsDrops()")
     guard = script[from_here : script.index("function wirePaneDrops()", from_here)]
     assert "if (!box) return null;" in guard
-    assert "kind && kind.allows_children ? box : null" in guard
+    assert "if (!kind || !kind.allows_children) return null;" in guard
+    assert "kind.accepts_filing === false ? null : box;" in guard
+    # and the second no is the one that speaks: a folder that filters itself says why it will not
+    # take the drop, in the type's sentence rather than one invented at the drop site
+    from_here2 = script.index("function filingTarget(box)")
+    says = script[from_here2 : script.index("function filingTarget(box)") + 900]
+    assert "kind.accepts_filing === false" in says
+    assert "kind.filing_refusal" in says
+    sheet = script[script.index("const canFile = filingTarget(box);") :]
+    sheet = sheet[: sheet.index("let children = []")]
+    assert 'wrap.classList.add("drop-refused");' in sheet
+    assert "if (canFile.reason) ctx.status(canFile.reason, true);" in sheet
+    assert 'if (!canFile.ok) return; // the server would say the same thing' in sheet
+    css = client.get("/static/app.css").text
+    assert ".drop-refused" in css
+
+
+def test_a_folder_that_refuses_filing_does_not_offer_to_make_a_box_there(
+    client: TestClient,
+) -> None:
+    """A button that will be refused on save is a lie with an extra step.
+
+    The folder's "New box here" button and the context menu's "New box in …" both file the new box
+    into that folder, which a filtered folder now refuses. Both ask the type the same question the
+    drop asks, and the menu stops offering what the type answers no to.
+    """
+    script = client.get("/static/app.js").text
+    kinds = client.get("/api/types").json()
+    by_key = {entry["key"]: entry for entry in kinds}
+    assert by_key["dynamic-folder"]["accepts_filing"] is False
+    assert by_key["dynamic-folder"]["filing_refusal"]  # the sentence comes from the type
+    assert by_key["cabinet"]["accepts_filing"] is True  # the exception is in the API too
+    assert by_key["folder"]["accepts_filing"] is True
+
+    sheet = script[script.index("const folderView = {") :]
+    sheet = sheet[: sheet.index("const folderView = {") + 9000]
+    assert "const canFile = filingTarget(box);" in sheet
+    assert 'add.title = canFile.reason || "this folder chooses its own members";' in sheet
+    assert "add.disabled = true;" in sheet
+
+    menu = script[script.index("const takesChildren = kind.allows_children !== false") :]
+    assert "kind.accepts_filing !== false" in menu[:200]
+
+    # and a tag mutation tells the folders on screen to ask again
+    assert 'const RELIST_EVENT = "boxganizer:relist-folders";' in script
+    assert "relistFilteredFolders();" in script
+    assert script.count("relistFilteredFolders();") >= 4
+    relist = script[script.index("const asksForItself =") :]
+    relist = relist[: relist.index("document.addEventListener(RELIST_EVENT, relist);")]
+    assert "resolves_membership === true" in relist
+    assert "children = next;" in relist and "draw();" in relist
 
 
 def test_a_dialog_reports_its_own_refusal(client: TestClient) -> None:

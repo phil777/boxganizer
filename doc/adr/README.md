@@ -53,3 +53,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0022   | A numeric sensor's scale belongs to its owner, is checked to cover itself, and clamps out loud | accepted |
 | 0023   | A viewport lends its space: the layout is a tree the server owns, and a drop copies unless Shift says otherwise | accepted |
 | 0024   | boxganizer installs fully featured: an interface is a dependency, not an extra | accepted |
+| 0025   | A folder that filters itself refuses the hand that files into it, and a tag move re-cuts it | accepted |

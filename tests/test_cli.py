@@ -297,6 +297,26 @@ def test_the_shell_refuses_to_put_a_box_inside_an_image(db_path: Path) -> None:
     assert isinstance(result.exception, ChildrenNotAllowed)
 
 
+def test_the_shell_refuses_to_file_a_box_into_a_dynamic_folder(db_path: Path) -> None:
+    """The refusal is the store's, so every door says the same thing — the shell included.
+
+    Not `ChildrenNotAllowed`: the folder could hold the box quite happily. It is the choosing that
+    is refused, and the sentence names what to do instead, because "no" from a folder full of
+    boxes is a strange answer to receive without one.
+    """
+    from boxganizer.errors import HandFilingRefused
+
+    invoke(db_path, "add", "Kitchen things", "-t", "dynamic-folder")
+    invoke(db_path, "add", "Hammer", "-t", "note")
+    result = invoke(db_path, "link", "Hammer", "Kitchen things")
+    assert isinstance(result.exception, HandFilingRefused)
+    assert "ordinary folder" in str(result.exception)
+
+    # an ordinary folder is untouched by any of this
+    invoke(db_path, "add", "Papers", "-t", "folder")
+    assert invoke(db_path, "link", "Hammer", "Papers").exit_code == 0
+
+
 def test_a_box_from_a_newer_version_is_still_readable(db_path: Path) -> None:
     """Reading must not need every type to be known; writing must."""
     import sqlite3

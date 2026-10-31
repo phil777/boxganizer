@@ -440,6 +440,15 @@ function dragBox(event, uuid, fromUuid) {
  * `after` is for views that place as well as file (a grid cell, a desktop, a map node): the link
  * runs first so a move is finished before the placement, which then finds the box already a child.
  */
+/* A tag moved. Which folders that matters for is a question about their filters, not about the code
+ * that moved the tag, so the tag UI shouts into the page and the folders that resolve their own
+ * membership answer by re-reading themselves. */
+const RELIST_EVENT = "boxganizer:relist-folders";
+
+function relistFilteredFolders() {
+  document.dispatchEvent(new CustomEvent(RELIST_EVENT));
+}
+
 async function dropBox(event, ctx, targetUuid, { after = null, label = null } = {}) {
   const dragged = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
   if (!dragged || dragged === targetUuid) return false;
@@ -1049,7 +1058,10 @@ async function renderTagLine(box) {
         // added in another window a second ago
         api
           .takeTag(box.uuid, chip.name)
-          .then(() => renderTagLine(state.current))
+          .then(async () => {
+            await renderTagLine(state.current);
+            relistFilteredFolders(); // this box may have just left (or entered) a filter
+          })
           .catch((error) => status(error.message, true));
       });
       node.append(cross);
@@ -1080,6 +1092,7 @@ async function renderTagLine(box) {
     try {
       for (const word of wanted) await api.giveTag(box.uuid, word);
       await renderTagLine(state.current);
+      relistFilteredFolders();
       status(wanted.length === 1 ? `tagged ${wanted[0]}` : `tagged ${wanted.length} tags`);
     } catch (error) {
       status(error.message, true);
@@ -1234,6 +1247,9 @@ async function drawTagsTree() {
         await api.editTag(tag.name, payload);
         await drawTagsTree();
         await renderTagLine(state.current);
+        // A rename, a re-parent or a colour: the first two change who a filter reaches, and the
+        // store has already re-cut every folder that asks about tags.
+        relistFilteredFolders();
         status(`saved ${payload.name || tag.name}`);
       } catch (error) {
         complain(error);
@@ -1258,6 +1274,7 @@ async function drawTagsTree() {
         .then(async () => {
           await drawTagsTree();
           await renderTagLine(state.current);
+          relistFilteredFolders();
           status(`deleted ${tag.name}`);
         })
         .catch(complain);
@@ -2768,7 +2785,8 @@ function wirePaneMenu() {
     // and the box menu would replace the copy they came for.
     if (String(window.getSelection() || "").length) return;
     event.preventDefault();
-    const takesChildren = (typeOf(box) || {}).allows_children !== false;
+    const kind = typeOf(box) || {};
+    const takesChildren = kind.allows_children !== false && kind.accepts_filing !== false;
     const extra = takesChildren
       ? [
           { separator: true },
@@ -2802,7 +2820,24 @@ function paneAcceptsDrops() {
   const box = state.current;
   if (!box) return null;
   const kind = state.types.get(box.box_type);
-  return kind && kind.allows_children ? box : null;
+  if (!kind || !kind.allows_children) return null;
+  return kind.accepts_filing === false ? null : box;
+}
+
+/* May a box be filed here by hand? Two different noes, and only one of them needs a sentence.
+ *
+ * A note or an image does not hold boxes at all, so nothing about it invites a drop and the page is
+ * right to be quiet. A dynamic folder is the opposite: it is drawn as a folder, lists boxes, and
+ * then refuses the drop — the one no a person would not predict. So the refusal says why, in the
+ * type's own words, and the pointer says "not here" while it is over the sheet.
+ */
+function filingTarget(box) {
+  const kind = box ? state.types.get(box.box_type) : null;
+  if (!kind || kind.allows_children === false) return { ok: false, reason: null };
+  if (kind.accepts_filing === false) {
+    return { ok: false, reason: kind.filing_refusal || "that folder chooses its own members" };
+  }
+  return { ok: true, reason: null };
 }
 
 function wirePaneDrops() {
@@ -2831,7 +2866,8 @@ function wirePaneDrops() {
     const draggedFile = readDraggedFile(event);
     if (draggedFile) {
       try {
-        const takesChildren = (typeOf(box) || {}).allows_children !== false;
+        const kind = typeOf(box) || {};
+        const takesChildren = kind.allows_children !== false && kind.accepts_filing !== false;
         await createBoxFromDraggedFile(draggedFile, takesChildren ? box.uuid : null);
         openBox(box.uuid); // land back where the drop happened, now showing what arrived
       } catch (error) {
@@ -3018,6 +3054,7 @@ async function init() {
     if (!words) return;
     try {
       await api.createTag({ name: words });
+      relistFilteredFolders();
       field.value = "";
       await drawTagsTree();
       await renderTagLine(state.current);
@@ -4170,6 +4207,7 @@ const folderView = {
     const kind = typeOf(box);
     const dynamic = !!kind.resolves_membership;
     const fixed = !!kind.filter_is_fixed;
+    const canFile = filingTarget(box);
 
     const wrap = document.createElement("div");
     wrap.className = "children-view";
@@ -4206,6 +4244,13 @@ const folderView = {
     add.type = "button";
     add.textContent = "＋ New box here";
     add.addEventListener("click", () => ctx.newBox({ parent: box.uuid }));
+    // A box made here would have to be filed here, and a filtered folder refuses that — the same
+    // refusal the drop gets. Offering the button and then refusing the save would be a lie with an
+    // extra step, so the button stays home. The cabinet is not affected: it takes hand-filing.
+    if (!canFile.ok) {
+      add.title = canFile.reason || "this folder chooses its own members";
+      add.disabled = true;
+    }
     // Inside a cell or a root block there is no room, and no reason, to change
     // what the contained folder is showing. The search box is shown everywhere:
     // finding one child among many is exactly what a small pane needs.
@@ -4219,14 +4264,26 @@ const folderView = {
     // also what claims the drop: without it the root, whose holder wraps this
     // view, would take the box as its own child instead.
     wrap.addEventListener("dragover", (event) => {
+      if (!canFile.ok) {
+        // Say it once per pass over the sheet, not once per pixel: the pointer sends a hundred
+        // dragover events a second and the sentence is the same the whole time it is hovering.
+        if (!wrap.classList.contains("drop-refused") && event.dataTransfer) {
+          event.dataTransfer.dropEffect = "none";
+        }
+        wrap.classList.remove("drop-target");
+        wrap.classList.add("drop-refused");
+        if (canFile.reason) ctx.status(canFile.reason, true);
+        return; // not claimed: the pane behind it refuses too, so the drop goes nowhere
+      }
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
       wrap.classList.add("drop-target");
     });
-    wrap.addEventListener("dragleave", () => wrap.classList.remove("drop-target"));
+    wrap.addEventListener("dragleave", () => wrap.classList.remove("drop-target", "drop-refused"));
     wrap.addEventListener("drop", async (event) => {
+      wrap.classList.remove("drop-target", "drop-refused");
+      if (!canFile.ok) return; // the server would say the same thing; say it before the round trip
       event.preventDefault();
-      wrap.classList.remove("drop-target");
       const landed = await dropBox(event, ctx, box.uuid, { label: `filed in ${box.name}` });
       if (landed) ctx.reload();
     });
@@ -4267,6 +4324,27 @@ const folderView = {
       }
       shown.forEach((child) => holder.append(childTile(child, box, ctx)));
     }
+
+    // The members of a filtered folder are decided by tags, and a tag can move while this folder is
+    // on screen: renamed in the tag dialog, or given to a box three panes away. The store re-cuts
+    // the membership the moment the tag moves, so the only stale thing left is this list — and a
+    // folder that goes on showing a box it stopped holding is the same confusion the drop refusal
+    // above exists to prevent, arriving from the other direction. Ask again, quietly, in place.
+    const asksForItself = (state.types.get(box.box_type) || {}).resolves_membership === true;
+    const relist = () => {
+      if (!asksForItself || !document.contains(wrap)) return; // replaced by a newer view
+      api
+        .children(box.uuid)
+        .then((next) => {
+          if (!document.contains(wrap)) return;
+          children = next;
+          draw();
+        })
+        .catch(() => {
+          /* the next click will ask again; a folder that cannot be read says so when it is opened */
+        });
+    };
+    document.addEventListener(RELIST_EVENT, relist);
 
     function paintHistory() {
       datalist.replaceChildren();

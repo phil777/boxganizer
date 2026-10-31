@@ -100,6 +100,8 @@ linking a box into the root takes the slot from whoever held it.
 | `summary`               | One line about what the type is for.                        |
 | `abstract`              | `True` on grouping levels only. Not inherited.              |
 | `allows_children`       | May this box contain other boxes?                           |
+| `accepts_filing`        | May a box be filed into it by hand? ADR 25.                 |
+| `filing_refusal`        | The sentence the user gets when it answers "no".            |
 | `resource_uri_required` | Must the box point at something?                            |
 | `resource_uri_schemes`  | Allowed URI schemes; `"file"` also accepts plain paths.     |
 | `extensions`            | Allowed filename suffixes, or `None` for any.               |
@@ -119,6 +121,9 @@ linking a box into the root takes the slot from whoever held it.
    `InvalidBoxContent`; editing the one that exists is fine.
 4. **Leaves stay leaves** — linking a box into one whose type has
    `allows_children = False` raises `ChildrenNotAllowed`.
+4b. **A folder that filters itself picks its own members** — linking a box into one whose type has
+   `accepts_filing = False` raises `HandFilingRefused`, with `filing_refusal` as the reason. This is
+   a different no from rule 4: the box could sit there, and is not allowed to (ADR 25).
 5. **The type lends the box its icon** — a box created without an explicit
    `--icon` takes the icon of its type, so a picture looks like a picture. An
    icon chosen by hand always wins (`boxtypes.adopt_type_icon`).
@@ -205,8 +210,19 @@ Five fields are available:
 means `and`. A value with spaces is quoted: `name:"boiler fix"`. A regular expression is written
 `/like this/`.
 
-Three rules keep a folder honest:
+Filing is one-directional. A dynamic folder refuses to have a box filed into it by hand — `box
+link`, `POST /children`, a drag and drop, all of them (`HandFilingRefused`, ADR 25) — because the
+re-list below would take the box back out, and a box that arrives and then leaves on its own is worse
+than a drop that never happened. Tag or rename the box until the filter reaches it, or use an
+ordinary folder. The cabinet is the exception it can prove: its filter selects everything, so a box
+filed there by hand is never taken back out, and refusing would only break "New box in Cabinet".
 
+Four rules keep a folder honest:
+
+* **A tag change re-cuts the folders that ask about tags.** Membership follows the box it is written
+  on, and the tag tree is the other half of a `tag:` clause — so a rename, a re-parent or a deletion
+  re-lists every folder that resolves itself. Without that the folder keeps a box it no longer
+  matches, and misses one it now does, until some unrelated edit happens to stumble past.
 * **An expression that cannot be read holds nothing, and says why.** A half-read filter would
   easily end up with no conditions, and no conditions means the whole library in the folder.
 * **The filter bar shows one row per clause** — field, plain or regex, value, and whether to
