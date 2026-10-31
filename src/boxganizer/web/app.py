@@ -2485,7 +2485,12 @@ def _viewport_body(store: BoxStore, box: Box) -> dict[str, object]:
     paints late, and a viewport is exactly the place where several boxes appear at once.
     """
     layout = viewports.layout_of(box.config, _viewport_kind(box))
-    briefs = {child.uuid: _brief(child) for child in store.children(box.uuid)}
+    # The whole box, not a brief. A pane renders a *view*, and a view reads its settings from
+    # `config` — a grid's columns and placements, a desktop's icon positions, a checklist's file.
+    # Sending `{uuid, name, icon, box_type}` made every box in a viewport open with default
+    # settings and its children unplaced, which is the difference between a window on a box and a
+    # picture of one. It also carries `parents`, which is what the pane's path line walks.
+    briefs = {child.uuid: _full(store, child) for child in store.children(box.uuid)}
     panes: list[dict[str, object]] = []
     if layout.kind == "windowed":
         for window in layout.windows:

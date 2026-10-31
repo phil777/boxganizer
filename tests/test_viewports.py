@@ -362,6 +362,39 @@ def test_a_raw_config_write_cannot_point_a_pane_at_somebody_elses_box(client: Te
     assert "not a child of this box" in refused.text
 
 
+def test_a_box_opened_in_a_pane_arrives_with_its_own_settings(client: TestClient) -> None:
+    """A pane shows the box, not a photograph of it.
+
+    The layout answer used to carry a brief per pane — uuid, name, icon, type — and every view
+    reads its settings out of `config`, so a grid in a pane opened as the default 4x3 with none of
+    its children placed, and a desktop lost its icons. The fix is one line; the test is the reason
+    it stays.
+    """
+    grid = client.post("/api/boxes", json={"name": "Panned grid", "box_type": "grid"}).json()
+    child = client.post("/api/boxes", json={"name": "Placed", "box_type": "note"}).json()
+    client.post(f"/api/boxes/{grid['uuid']}/children", json={"child": child["uuid"]})
+    client.post(
+        f"/api/boxes/{grid['uuid']}/grid/place",
+        json={"child": child["uuid"], "cell": [1, 2]},
+    )
+
+    box = client.post(
+        "/api/boxes", json={"name": "Grid holder", "box_type": "tiling-viewport"}
+    ).json()
+    opened = client.post(
+        f"/api/boxes/{box['uuid']}/viewports/open",
+        json={"node": "v1", "child": grid["uuid"]},
+    )
+    assert opened.status_code == 200, opened.text
+
+    pane = opened.json()["panes"][0]
+    # what a view reads: the box's own settings, and the boxes on either side of it
+    assert pane["box"]["config"]["grid"]["cells"], "the grid keeps its placements"
+    assert "resource" in pane["box"] and "metadata" in pane["box"]
+    assert pane["box"]["parents"], "and the path line has something to walk"
+    assert pane["box"]["children"], "the pane does not have to ask again to draw them"
+
+
 def test_an_ordinary_box_is_not_a_viewport_and_says_so(client: TestClient) -> None:
     folder = client.post("/api/boxes", json={"name": "Folder", "box_type": "folder"}).json()
     answer = client.get(f"/api/boxes/{folder['uuid']}/viewports")
