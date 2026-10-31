@@ -2160,6 +2160,45 @@ function openSideMenu(event) {
   ]);
 }
 
+/* -- the pane answers a right-click no view claimed --------------------------
+ *
+ * Every view that means something by a right-click has its own handler and calls
+ * `preventDefault`: a folder row, a grid cell, a desktop tile, a file in the explorer. What
+ * had no handler was the *space around* them — right-click the empty part of a folder with no
+ * children, or the strip below a short list, and nothing came up, which reads as the box
+ * having no menu rather than the click having missed.
+ *
+ * So the pane answers whenever no view did, and it acts on the box the pane is showing: that
+ * is the only subject a click on the box's own empty space can have. It is the same shape as
+ * the pane's drop handling — a view claims a drop or a click, and the pane is the fallback,
+ * never the first claim.
+ */
+function wirePaneMenu() {
+  const pane = el("canvas");
+  pane.addEventListener("contextmenu", (event) => {
+    if (event.defaultPrevented) return; // a view means something specific by this one
+    const box = state.current;
+    if (!box) return;
+    // Inside a field the browser's own menu is the useful one: copy, paste, spellcheck. A
+    // box menu that replaced it would cost the person the reason they right-clicked.
+    if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable]")) {
+      return;
+    }
+    // Words the person has highlighted are the one thing a right-click is definitely about,
+    // and the box menu would replace the copy they came for.
+    if (String(window.getSelection() || "").length) return;
+    event.preventDefault();
+    const takesChildren = (typeOf(box) || {}).allows_children !== false;
+    const extra = takesChildren
+      ? [
+          { separator: true },
+          { label: `New box in ${box.name}`, run: () => openNewBoxModal({ parent: box.uuid }) },
+        ]
+      : [];
+    showMenu(event.clientX, event.clientY, boxMenuItems(box, extra));
+  });
+}
+
 /* -- the pane files what is dropped on it -----------------------------------
  *
  * A view that means something particular by a drop claims it first: a grid cell takes
@@ -2325,6 +2364,7 @@ async function init() {
   });
 
   wirePaneDrops();
+  wirePaneMenu();
   // Dropping on the library list means "into the library", not "into this box": the box is made
   // and left unfiled, which is where a box belongs when nobody chose a home for it.
   const sideList = el("side");

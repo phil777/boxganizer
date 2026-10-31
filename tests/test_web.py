@@ -3060,3 +3060,24 @@ def test_a_dragged_file_becomes_a_box_of_the_inferred_type(tmp_path: Path) -> No
             assert detail["resource_uri"] == str(note)
     finally:
         store.close()
+
+
+def test_the_pane_answers_a_right_click_no_view_claimed(client: TestClient) -> None:
+    """The box's menu belongs to the box, not only to the pixels it happens to paint.
+
+    A folder with no children has no row to right-click, and a short list leaves a strip of
+    empty pane below it; both used to answer with nothing, which reads as the box having no
+    menu rather than as the click having missed. The pane is the fallback, exactly as it is for
+    drops: a view claims the click or the pane answers, never both.
+    """
+    script = client.get("/static/app.js").text
+    assert "function wirePaneMenu()" in script
+    assert "wirePaneMenu();" in script
+    start = script.index("function wirePaneMenu")
+    end = script.index("/* -- the pane files what is dropped on it")
+    body = script[start:end]
+    assert "if (event.defaultPrevented) return;" in body
+    assert "boxMenuItems(box, extra)" in body
+    assert 'closest("input, textarea, [contenteditable]")' in body
+    assert "String(window.getSelection() || \"\").length" in body
+    assert "openNewBoxModal({ parent: box.uuid })" in body

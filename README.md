@@ -144,6 +144,11 @@ box ls --tag home                      # the branch too, not only the word
 box tag ls                             # the tree, with what each tag holds
 ```
 
+Right-clicking anywhere in a box's pane brings up that box's menu — including the empty part of
+a folder, the strip below a short list, or a background. A view that means something particular
+by the right-click keeps its own; highlighted text keeps the browser's menu, because that click
+was for copy.
+
 Every box's own controls — a folder's search, a desktop's grid size, a note's format bar, a
 sensor's address — live in a row that is **hidden until you ask**. A ⚙ at the right end of the
 top line opens it, and the box's content gives up the room: the drawer pushes the pane down
