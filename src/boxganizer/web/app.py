@@ -39,6 +39,7 @@ from boxganizer import (
     ssh,
     tags,
     thumbs,
+    viewports,
     vnc,
 )
 
@@ -159,6 +160,25 @@ class GridPlace(BaseModel):
 
     child: str = Field(description="Name or uuid of the child box.")
     cell: list[int] = Field(description="[row, column], both counted from 0.")
+
+
+class ViewportNode(BaseModel):
+    """Do something to one viewport: split it, close it, or say what it shows."""
+
+    node: str = Field(default="", description="The pane's id, like v2.")
+    direction: str = Field(
+        default="horizontal", description="horizontal (side by side) or vertical (stacked)."
+    )
+    ratio: float | None = Field(
+        default=None, description="Share of the space given to the first pane, 0.05 to 0.95."
+    )
+    child: str | None = Field(
+        default=None, description="Name or uuid of the box to show in this viewport."
+    )
+    x: int | None = None
+    y: int | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 class GridUnplace(BaseModel):
@@ -2057,6 +2077,8 @@ def create_app(
         store.unassign_tag(box, name)
         return read_box_tags(box.uuid, store)
 
+    _register_viewport_routes(app)
+
     @app.get("/api/boxes/{ref}/filter", response_model=FilterBody)
     def read_filter(ref: str, store: StoreDep) -> FilterBody:
         """What a dynamic folder asks for, in words, and who it currently holds.
@@ -2182,6 +2204,14 @@ def create_app(
         if payload.icon is None:
             boxtypes.adopt_type_icon(box)
             thumbs.icon_from_resource(box)
+        if getattr(boxtypes.get(box.box_type), "viewport_layout", None) is not None:
+            # A box that does not exist yet holds nothing, so a viewport created with a pane
+            # already pointing at a box is asking for a view of the graph that is not true.
+            problem = viewports.check(box.config, set(), _viewport_kind(box))
+            if problem:
+                raise HTTPException(
+                    status_code=422, detail={"error": "bad_viewport", "reason": problem}
+                )
         saved = store.add(box, index_it=payload.index_resource)
         # A text or PDF box goes into the full-text index the moment it exists, so it
         # is findable by what it says without anyone remembering to rebuild anything.
@@ -2233,6 +2263,7 @@ def create_app(
             box.metadata = dict(data["metadata"])
         if "config" in data and data["config"] is not None:
             box.config = dict(data["config"])
+        _check_viewport_children(store, box)
         saved = store.update(box, index_it=payload.index_resource)
         # The same rule as on creation, in both directions: a box retyped away from
         # text, or pointed at another file, has its indexed text replaced or removed.
@@ -2369,6 +2400,243 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _viewport_box(store: BoxStore, ref: str) -> Box:
+    """A box whose type lends out its space. Asked of the type, like every layout endpoint."""
+    box = store.resolve(ref)
+    kind = boxtypes.get(box.box_type)
+    if getattr(kind, "viewport_layout", None) is None:
+        raise HTTPException(
+            status_code=415,
+            detail={"error": "not_a_viewport", "type": kind.key},
+        )
+    return box
+
+
+def _check_viewport_children(store: BoxStore, box: Box) -> None:
+    """Refuse a layout that shows a box this viewport does not hold.
+
+    The type's own check only sees the box, so it can judge the shape and nothing else. This is the
+    half that needs the graph: a pane pointing at somebody else's child would put a box on screen
+    that `box tree` says lives elsewhere, and the page and the library would disagree about where a
+    box is filed — which is the one disagreement a user can never resolve from the outside.
+    """
+    if getattr(boxtypes.get(box.box_type), "viewport_layout", None) is None:
+        return
+    children = {child.uuid for child in store.children(box.uuid)}
+    problem = viewports.check(box.config, children, _viewport_kind(box))
+    if problem:
+        raise HTTPException(status_code=422, detail={"error": "bad_viewport", "reason": problem})
+
+
+def _viewport_kind(box: Box) -> str | None:
+    """Which layout this box's type draws — the type decides, not the config."""
+    kind = boxtypes.get(box.box_type)
+    layout_kind: str | None = getattr(kind, "viewport_layout", None)
+    return layout_kind
+
+
+def _viewport_body(store: BoxStore, box: Box) -> dict[str, object]:
+    """The whole layout, plus each pane's box, so the page draws a viewport in one request.
+
+    The briefs travel with the tree because a pane that has to fetch its own box is a pane that
+    paints late, and a viewport is exactly the place where several boxes appear at once.
+    """
+    layout = viewports.layout_of(box.config, _viewport_kind(box))
+    briefs = {child.uuid: _brief(child) for child in store.children(box.uuid)}
+    panes: list[dict[str, object]] = []
+    if layout.kind == "windowed":
+        for window in layout.windows:
+            panes.append(
+                {
+                    "node": window.node,
+                    "child": window.child,
+                    "box": briefs.get(window.child),
+                    "x": window.x,
+                    "y": window.y,
+                    "width": window.width,
+                    "height": window.height,
+                }
+            )
+    else:
+        tree = layout.tree
+        panes = [
+            {"node": leaf.node, "child": leaf.child, "box": briefs.get(leaf.child)}
+            for leaf in viewports.leaves(tree)
+        ]
+    return {
+        "box": _brief(box),
+        "kind": layout.kind,
+        "tree": layout.tree.as_dict() if layout.tree is not None else None,
+        "windows": [window.as_dict() for window in layout.windows],
+        "order": list(layout.order),
+        "panes": panes,
+        "problems": list(layout.problems),
+        # The page disables the button rather than explaining afterwards why nothing happened.
+        "closable": len(layout.panes()) > 1,
+    }
+
+
+def _save_viewport(store: BoxStore, box: Box, layout: viewports.Layout) -> dict[str, object]:
+    """Write a layout after checking it against the boxes the viewport actually holds."""
+    children = {child.uuid for child in store.children(box.uuid)}
+    problem = viewports.check(layout.as_config(box.config), children, _viewport_kind(box))
+    if problem:
+        raise HTTPException(status_code=422, detail={"error": "bad_viewport", "reason": problem})
+    box.config = layout.as_config(box.config)
+    store.update(box)
+    return _viewport_body(store, store.resolve(box.uuid))
+
+
+def _viewport_child(store: BoxStore, box: Box, ref: str | None) -> str:
+    """The uuid of a box to show, filed under the viewport if it is not filed anywhere yet.
+
+    Opening a box in a viewport *is* filing it there: the link is what `box tree` and the side pane
+    read, so a pane that showed an unfiled box would be a view of the library that the library
+    disagrees with.
+    """
+    if not ref:
+        return ""
+    return store.resolve(ref).uuid
+
+
+def _register_viewport_routes(app: FastAPI) -> None:
+    """The viewport routes, kept together: they all read a layout, change it, and answer with it.
+
+    The page sends *intent* — split this pane, move that divider, close that one — and the server
+    answers with the whole new layout. It does not send a tree back, because then two pages open on
+    the same box would each be deciding what the other's click means, and the model would live in
+    two languages with the same name.
+    """
+
+    @app.get("/api/boxes/{ref}/viewports")
+    def read_viewports(ref: str, store: StoreDep) -> dict[str, object]:
+        return _viewport_body(store, _viewport_box(store, ref))
+
+    @app.post("/api/boxes/{ref}/viewports/split")
+    def split_viewport(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        box = _viewport_box(store, ref)
+        try:
+            layout, _fresh = viewports.split(
+                viewports.layout_of(box.config, _viewport_kind(box)),
+                payload.node,
+                payload.direction,
+            )
+        except viewports.ViewportError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+            ) from exc
+        return _save_viewport(store, box, layout)
+
+    @app.post("/api/boxes/{ref}/viewports/close")
+    def close_viewport(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        """Close a pane: its sibling takes the space, and its box is unfiled, not deleted."""
+        box = _viewport_box(store, ref)
+        try:
+            layout, closed = viewports.close(
+                viewports.layout_of(box.config, _viewport_kind(box)), payload.node
+            )
+        except viewports.ViewportError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+            ) from exc
+        _save_viewport(store, box, layout)
+        if closed:
+            # Unfiled, not deleted: the box goes back to being a box, and whoever filed it in the
+            # viewport can open it again somewhere else.
+            store.unlink(box.uuid, closed)
+        return _viewport_body(store, store.resolve(box.uuid))
+
+    @app.post("/api/boxes/{ref}/viewports/ratio")
+    def set_viewport_ratio(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        box = _viewport_box(store, ref)
+        try:
+            layout = viewports.set_ratio(
+                viewports.layout_of(box.config, _viewport_kind(box)), payload.node, payload.ratio
+            )
+        except viewports.ViewportError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+            ) from exc
+        return _save_viewport(store, box, layout)
+
+    @app.post("/api/boxes/{ref}/viewports/open")
+    def open_in_viewport(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        """Show a box in one pane, filing it under the viewport box on the way."""
+        box = _viewport_box(store, ref)
+        child = _viewport_child(store, box, payload.child)
+        layout = viewports.layout_of(box.config, _viewport_kind(box))
+        if child and child not in {item.uuid for item in store.children(box.uuid)}:
+            store.link(box.uuid, child)
+        try:
+            layout = viewports.assign(layout, payload.node, child)
+        except viewports.ViewportError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+            ) from exc
+        return _save_viewport(store, box, layout)
+
+    @app.post("/api/boxes/{ref}/viewports/window")
+    def add_window(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        """Open a box in a window — an empty one if there is one, a new one otherwise."""
+        box = _viewport_box(store, ref)
+        child = _viewport_child(store, box, payload.child)
+        layout = viewports.layout_of(box.config, _viewport_kind(box))
+        if child and child not in {item.uuid for item in store.children(box.uuid)}:
+            store.link(box.uuid, child)
+        try:
+            layout, _fresh = viewports.show_in_window(layout, child)
+        except viewports.ViewportError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+            ) from exc
+        return _save_viewport(store, box, layout)
+
+    @app.post("/api/boxes/{ref}/viewports/move")
+    def move_window(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        box = _viewport_box(store, ref)
+        try:
+            layout = viewports.move_window(
+                viewports.layout_of(box.config, _viewport_kind(box)),
+                payload.node,
+                payload.x or 0,
+                payload.y or 0,
+            )
+        except viewports.ViewportError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+            ) from exc
+        return _save_viewport(store, box, layout)
+
+    @app.post("/api/boxes/{ref}/viewports/resize")
+    def resize_window(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        box = _viewport_box(store, ref)
+        try:
+            layout = viewports.resize_window(
+                viewports.layout_of(box.config, _viewport_kind(box)),
+                payload.node,
+                payload.width or 0,
+                payload.height or 0,
+            )
+        except viewports.ViewportError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+            ) from exc
+        return _save_viewport(store, box, layout)
+
+    @app.post("/api/boxes/{ref}/viewports/raise")
+    def raise_window(ref: str, payload: ViewportNode, store: StoreDep) -> dict[str, object]:
+        box = _viewport_box(store, ref)
+        try:
+            layout = viewports.raise_window(
+                viewports.layout_of(box.config, _viewport_kind(box)), payload.node
+            )
+        except viewports.ViewportError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "bad_viewport", "reason": str(exc)}
+            ) from exc
+        return _save_viewport(store, box, layout)
 
 
 def _mindmap_box(store: BoxStore, ref: str) -> Box:
