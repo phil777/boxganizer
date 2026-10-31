@@ -590,8 +590,14 @@ const viewportView = {
             ctx.status(error.message, true);
             return;
           }
+          // Read the incoming path *before* the pane's own is emptied: a view opening its child hands
+          // over `ctx.trail()`, which is this very array, so clearing first erased the parents the
+          // call was asking to keep. The pane then showed one crumb — the box it had just opened —
+          // and there was nothing left in the title to click back to. The main screen never saw this
+          // because it builds a new array on every open instead of emptying the old one.
+          const before = options.trail ? [...options.trail] : [];
           trail.length = 0;
-          trail.push(...(options.trail || []), target);
+          trail.push(...before, target);
           await self.draw(target);
         },
         async draw(target) {
@@ -4858,7 +4864,12 @@ function childTile(child, parent, ctx) {
       boxMenuItems(
         { ...child, uuid: child.uuid },
         [
-          { label: "New box in " + parent.name, run: () => ctx.newBox({ parent: parent.uuid }) },
+          // The same question the toolbar's button asks: a box made here would be filed in `parent`,
+          // and a folder that filters itself refuses that (ADR 25). Offering the item would be a
+          // refusal one dialog late.
+          ...(filingTarget(parent).ok
+            ? [{ label: "New box in " + parent.name, run: () => ctx.newBox({ parent: parent.uuid }) }]
+            : []),
           { separator: true },
           // work_to_do.md § FolderResource: drop the parent/child link, keep the box.
           { label: `Remove from ${parent.name}`, run: () => ctx.removeFrom(parent, child) },

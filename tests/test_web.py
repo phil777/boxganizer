@@ -2943,6 +2943,42 @@ def test_a_folder_that_refuses_filing_does_not_offer_to_make_a_box_there(
     assert "children = next;" in relist and "draw();" in relist
 
 
+def test_a_pane_keeps_the_path_it_was_handed_when_it_opens_a_child(
+    client: TestClient,
+) -> None:
+    """A view hands the pane its own trail; emptying it first erases the parents.
+
+    Every view that opens a child passes `{ trail: ctx.trail() }`, and in a pane `ctx.trail()` is
+    the pane's live array — the very one `open()` used to clear before spreading it. The pane then
+    showed a single crumb: the box it had just opened, with nothing in the title to click back to.
+    The main screen never had this, because it builds a new array per open instead of emptying the
+    old one, which is the shape that makes the aliasing invisible.
+    """
+    script = client.get("/static/app.js").text
+    pane = script[script.index("function paneShell(node, shown)") :]
+    opener = pane[: pane.index("async draw(target)")]
+    assert "const before = options.trail ? [...options.trail] : [];" in opener
+    assert opener.index("const before =") < opener.index("trail.length = 0;")
+    assert "trail.push(...before, target);" in opener
+    # and every view that walks down into a child still says so, or the path would stop growing
+    assert script.count("{ trail: ctx.trail() }") >= 5
+
+
+def test_the_child_menu_does_not_offer_to_file_into_a_folder_that_refuses_it(
+    client: TestClient,
+) -> None:
+    """The folder's own row asks the type; so must the row of each box inside it.
+
+    ADR 25 refused hand-filing and the toolbar's button was updated; the per-child context menu
+    still offered "New box in …", which is the refusal arriving one dialog later.
+    """
+    script = client.get("/static/app.js").text
+    tile = script[script.index("function childTile(child, parent, ctx)") :]
+    tile = tile[: tile.index("registerView(\"folder\", folderView);")]
+    assert "...(filingTarget(parent).ok" in tile
+    assert '{ label: "New box in " + parent.name' in tile
+
+
 def test_a_dialog_reports_its_own_refusal(client: TestClient) -> None:
     """A status bar behind an open modal is a message nobody receives.
 
