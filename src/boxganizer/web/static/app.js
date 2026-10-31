@@ -5747,6 +5747,31 @@ async function noteView(canvas, box, ctx, opts = {}) {
     paintBar();
     if (writing) paintEditor();
     else paintRendered();
+    paintCue();
+  }
+
+  /**
+   * Whether this note can be typed into, said where it can be seen.
+   *
+   * The control that decides it lives in the settings drawer, and the drawer is closed by
+   * default — so a person returning to a note could not tell whether clicking it would change
+   * it, and found out by changing it. The cue therefore sits on the note itself, not beside the
+   * control, and it names the way out in the same breath.
+   */
+  function paintCue() {
+    // replaced, not appended: the cue lives outside the surface that `paint` clears, and a
+    // second one per repaint is a stale label sitting on top of the true one
+    wrap.querySelectorAll(".note-cue").forEach((old) => old.remove());
+    if (format !== "markdown") return; // plain text is always the editor: nothing to declare
+    const cue = document.createElement("span");
+    cue.className = writing ? "note-cue editing" : "note-cue readonly";
+    cue.textContent = writing ? "editing" : "read-only";
+    cue.title = writing
+      ? "typing changes this note — press Read when you are done"
+      : "this note is being read, not edited — press the gear for Write";
+    cue.setAttribute("aria-live", "polite");
+    wrap.append(cue);
+    wrap.dataset.mode = writing ? "write" : "read";
   }
 
   function toggle(button, key, label, on, onClick) {
@@ -5768,10 +5793,23 @@ async function noteView(canvas, box, ctx, opts = {}) {
     bar.append(group);
 
     if (format === "markdown") {
+      // One button, two states, because "Read" and "Write" side by side are one control that
+      // has been drawn as two: exactly one of them can ever be the next thing you press, and a
+      // pair of buttons where one is always already-pressed invites a click that does nothing.
+      // The label is what the click will get you, which is the only reading that makes sense of
+      // a button, and `aria-pressed` carries the state for anyone not reading the label.
       const shape = document.createElement("div");
       shape.className = "note-group";
-      toggle(shape, "mode", "Read", !writing, () => setWriting(false));
-      toggle(shape, "mode", "Write", writing, () => setWriting(true));
+      const mode = document.createElement("button");
+      mode.type = "button";
+      mode.dataset.toggle = "mode";
+      mode.textContent = writing ? "Read" : "Write";
+      mode.title = writing
+        ? "stop editing and read the note as it will be read"
+        : "edit the note's own text";
+      mode.setAttribute("aria-pressed", String(writing));
+      mode.addEventListener("click", () => setWriting(!writing));
+      shape.append(mode);
       bar.append(shape);
     }
 

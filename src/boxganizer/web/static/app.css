@@ -1754,6 +1754,8 @@ pre.text {
   padding: 10px 12px 12px;
   min-height: 100%;
   overflow: auto;
+  /* the read-only / editing cue is placed against the sheet */
+  position: relative;
 }
 .note-bar {
   display: flex;
@@ -2105,4 +2107,29 @@ pre.text {
   flex: 1 1 auto;
   font: inherit;
   padding: 0.25rem 0.4rem;
+}
+
+/* Whether a note can be typed into, said on the note rather than next to the control that
+   decides it: that control lives in the settings drawer, which spends its life closed. */
+.note-cue {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.5rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.08rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  pointer-events: none;
+}
+
+.note-cue.readonly {
+  color: #b26a00;
+  background: color-mix(in srgb, #b26a00 10%, transparent);
+}
+
+.note-cue.editing {
+  color: #1a7f37;
+  background: color-mix(in srgb, #1a7f37 12%, transparent);
 }

@@ -3079,5 +3079,35 @@ def test_the_pane_answers_a_right_click_no_view_claimed(client: TestClient) -> N
     assert "if (event.defaultPrevented) return;" in body
     assert "boxMenuItems(box, extra)" in body
     assert 'closest("input, textarea, [contenteditable]")' in body
-    assert "String(window.getSelection() || \"\").length" in body
+    assert 'String(window.getSelection() || "").length' in body
     assert "openNewBoxModal({ parent: box.uuid })" in body
+
+
+def test_the_note_says_whether_it_can_be_typed_into_without_opening_the_drawer(
+    client: TestClient,
+) -> None:
+    """Read and Write were two buttons, and their state was hidden behind a gear.
+
+    One control with two states is what the pair always was: only one of them could ever be the
+    next thing pressed. And because that control lives in the settings drawer, which is closed by
+    default, the note itself now carries the answer — a person returning to a note could not tell
+    whether clicking it would change it, and learned by changing it.
+    """
+    script = client.get("/static/app.js").text
+    note = script[script.index("function paintBar()") :]
+    note = note[: note.index("function paintEditor") if "function paintEditor" in note else 3000]
+    assert 'mode.dataset.toggle = "mode";' in script
+    assert 'writing ? "Read" : "Write"' in script
+    assert 'mode.setAttribute("aria-pressed", String(writing))' in script
+    assert 'toggle(shape, "mode", "Read"' not in script
+    assert 'toggle(shape, "mode", "Write"' not in script
+    # the cue is on the note, replaced rather than accumulated, and styled as a warning/ok pair
+    assert 'wrap.querySelectorAll(".note-cue").forEach((old) => old.remove());' in script
+    assert 'className = writing ? "note-cue editing" : "note-cue readonly"' in script
+    css = client.get("/static/app.css").text
+    assert ".note-cue.readonly" in css and ".note-cue.editing" in css
+    assert (
+        ".note-view {" in css
+        and "position: relative"
+        in css[css.index(".note-view {") : css.index("}", css.index(".note-view {"))]
+    )
