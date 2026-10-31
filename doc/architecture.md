@@ -29,7 +29,8 @@ Three rules hold this together:
    renders the result. If a frontend needs an `if` that decides something about
    boxes, that decision belongs in the core.
 3. **Frontends do not import each other.** The web app never imports the CLI and
-   vice versa. This keeps each optional extra truly optional.
+   vice versa. This kept each optional extra optional (ADR 24 removed the extras) and still keeps
+   `box --help` and the filing commands working when an interface's library is missing.
 
 ## Modules
 
@@ -171,7 +172,8 @@ The core raises `BoxganizerError` subclasses. Each frontend maps them once:
 | `MissingDependency`| install hint, exit 1 | n/a         | n/a                |
 
 `box serve` and `box tui` import their framework inside the command, so a
-missing extra reaches the user as `MissingDependency` instead of an import
+missing library reaches the user as `MissingDependency`, naming the interface and the command that
+repairs the install, instead of an import
 traceback.
 
 A frontend never translates an error into another frontend's vocabulary, and

@@ -29,9 +29,10 @@ try:
         ListView,
         Static,
     )
-except ModuleNotFoundError as exc:  # pragma: no cover - only when the extra is absent
+except ModuleNotFoundError as exc:  # pragma: no cover - only in a damaged install
     raise ModuleNotFoundError(
-        "the text UI needs the 'tui' extra: pip install 'boxganizer[tui]'"
+        "the text UI needs textual, which every boxganizer install carries: repair the "
+        "install (pipx install --force boxganizer)"
     ) from exc
 
 from boxganizer import boxtypes

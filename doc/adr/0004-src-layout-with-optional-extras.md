@@ -1,7 +1,7 @@
 # 4. src layout with optional extras
 
 Date: 2026-10-24
-Status: accepted — the console-script part is superseded by 0005
+Status: accepted (the optional-extras part superseded by ADR 24) — the console-script part is superseded by 0005
 
 ## Context
 

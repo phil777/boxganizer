@@ -104,10 +104,18 @@ class StoreError(BoxganizerError):
 
 
 class MissingDependency(BoxganizerError):
-    """The command needs an optional extra that is not installed."""
+    """The command needs a library that every boxganizer install is supposed to carry.
 
-    def __init__(self, extra: str) -> None:
+    It used to name an extra (`boxganizer[web]`), which was a polite way of telling someone to go
+    and find a feature they had already asked for. Since ADR 24 the interfaces are plain
+    dependencies, so landing here means the install is damaged or older than the change — and the
+    message says so and tells them how to put it back.
+    """
+
+    def __init__(self, interface: str) -> None:
         super().__init__(
-            f"this command needs the {extra!r} extra: pip install 'boxganizer[{extra}]'"
+            f"this install has no {interface!r} interface: the library it needs is missing, "
+            "and it should have come with boxganizer. Repair the install — "
+            "pipx install --force boxganizer, or pip install --force-reinstall boxganizer"
         )
-        self.extra = extra
+        self.interface = interface

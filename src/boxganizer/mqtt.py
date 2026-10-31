@@ -50,7 +50,6 @@ STATES = ("connecting", "live", "value", "retrying", "refused")
 
 #: The module the live view needs, and the extra that brings it.
 DEPENDENCY = "aiomqtt"
-EXTRA = "live"
 
 
 def has_dependency() -> bool:
@@ -64,27 +63,29 @@ def has_dependency() -> bool:
 
 
 def install_hint() -> str:
-    """The command that fixes this install, in the form its own installer understands.
+    """The command that repairs this install, in the form its own installer understands.
 
-    A generic `pip install "boxganizer[live]"` is a small lie to the largest group of people
-    who will read it: `box` is a console script inside an isolated environment, and running
-    pip in the wrong Python installs the library somewhere the running program will never
-    look. So the answer is read off the environment the server is actually running in —
-    pipx, uv, or a plain venv — rather than guessed at from documentation.
+    Since ADR 24 every interface is a plain dependency, so a missing module is no longer a
+    missing option: it means this install is damaged, or is older than the change. The advice
+    is therefore a repair, and it is still read off the environment the server is actually
+    running in — pipx, uv, or a plain venv — because `box` is a console script in an isolated
+    environment and running pip in the wrong Python installs the library somewhere the running
+    program will never look.
     """
     prefix = sys.prefix.replace("\\", "/").lower()
     if "/pipx/" in prefix:
-        return f"pipx inject boxganizer {DEPENDENCY}"
+        return "pipx install --force boxganizer"
     if "/uv/tools/" in prefix:
-        return f"uv tool install 'boxganizer[{EXTRA}]' --force"
-    return f"python -m pip install 'boxganizer[{EXTRA}]'"
+        return "uv tool install --reinstall boxganizer"
+    return "python -m pip install --force-reinstall boxganizer"
 
 
 def missing_dependency() -> MqttError:
     """The refusal, with the thing to run in it."""
     return MqttError(
-        f"this install cannot listen to MQTT: the {DEPENDENCY!r} module is missing. "
-        f"Install it, then start the server again — {install_hint()}"
+        f"this install cannot listen to MQTT: the {DEPENDENCY!r} module is missing, and it "
+        f"should have come with boxganizer. Repair the install, then start the server again "
+        f"— {install_hint()}"
     )
 
 

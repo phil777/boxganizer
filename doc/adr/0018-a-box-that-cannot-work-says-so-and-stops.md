@@ -1,7 +1,7 @@
 # 18. A box that cannot work says so, and stops
 
 Date: 2026-11-08
-Status: accepted
+Status: accepted (the install advice in it was rewritten by ADR 24: a missing module is now a broken install, not a missing extra)
 
 ## Context
 

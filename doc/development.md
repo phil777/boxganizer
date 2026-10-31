@@ -41,7 +41,7 @@ never `src.boxganizer`.
   person typing.
 * Tests never touch the developer's database. `conftest.py` gives each test a
   `tmp_path` database; keep it that way.
-* Web and text UI tests call `pytest.importorskip`, so a missing optional extra
+* Web and text UI tests call `pytest.importorskip`, so a missing library in a damaged install
   skips the suite instead of failing it.
 * `filterwarnings = ["error"]` is set in `pyproject.toml`: a new deprecation
   warning breaks the build on purpose.

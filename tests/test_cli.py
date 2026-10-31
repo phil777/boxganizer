@@ -132,7 +132,7 @@ def test_serve_accepts_host_and_reload(db_path: Path, monkeypatch: pytest.Monkey
     assert calls["reload"] is True
 
 
-def test_serve_without_the_web_extra_says_what_to_install(
+def test_serve_without_the_web_library_says_the_install_is_broken(
     db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import boxganizer.web.server as web_server
@@ -143,7 +143,7 @@ def test_serve_without_the_web_extra_says_what_to_install(
     monkeypatch.setattr(web_server, "run", missing)
     result = invoke(db_path, "serve")
     assert isinstance(result.exception, MissingDependency)
-    assert result.exception.extra == "web"
+    assert result.exception.interface == "web"
 
 
 def test_tui_opens_the_terminal_app(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -178,10 +178,13 @@ def test_markup_characters_in_box_data_stay_visible(db_path: Path) -> None:
     assert "Budget [2026]" in tree.output
 
 
-def test_missing_dependency_names_the_extra_exactly() -> None:
-    assert str(MissingDependency("web")) == (
-        "this command needs the 'web' extra: pip install 'boxganizer[web]'"
-    )
+def test_missing_dependency_says_the_install_is_broken_rather_than_incomplete() -> None:
+    """The old sentence told people to install an extra they had never been offered."""
+    message = str(MissingDependency("web"))
+    assert "boxganizer[" not in message
+    assert "Repair the install" in message
+    assert "pipx install --force boxganizer" in message
+    assert "no 'web' interface" in message
 
 
 def test_the_install_hint_reaches_stderr_with_its_brackets(
@@ -198,7 +201,8 @@ def test_the_install_hint_reaches_stderr_with_its_brackets(
     with pytest.raises(SystemExit):
         main()
     captured = capsys.readouterr()
-    assert "boxganizer[web]" in captured.err
+    assert "Repair the install" in captured.err
+    assert "boxganizer[" not in captured.err
     assert "serving" not in captured.out  # nothing promised before the server exists
 
 

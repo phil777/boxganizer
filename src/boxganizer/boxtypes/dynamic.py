@@ -193,10 +193,10 @@ class MQTTResource(SensorResource):
     """A value published on an MQTT topic."""
 
     key: ClassVar[str] = "mqtt"
-    #: The live view needs a client library, which ships as an extra rather than a
-    #: dependency: a library organizer should not drag a MQTT client into every install.
+    #: A client library is still named, so that an install which somehow lacks it says which
+    #: module is missing instead of failing on the first message (ADR 18). It is a plain
+    #: dependency now (ADR 24) — the name is diagnostic, not an option to buy.
     dependency: ClassVar[str | None] = "aiomqtt"
-    dependency_extra: ClassVar[str | None] = "live"
 
     @classmethod
     def is_available(cls) -> bool:

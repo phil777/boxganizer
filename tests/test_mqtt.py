@@ -469,14 +469,18 @@ def test_the_install_command_matches_the_install_that_is_running(
     """`pip install` inside a pipx environment installs it somewhere nothing will look.
 
     The server knows which environment it is running in, so the advice is read from there:
-    pipx gets `inject`, uv gets `uv tool install`, a plain venv gets pip.
+    pipx gets a forced pipx install, uv gets a forced uv tool install, a plain venv gets pip.
+    What none of them gets is an extra to add (ADR 24): `aiomqtt` is a dependency, so a missing
+    module means the install is broken or stale, and `pipx inject` would be advice to go buy
+    something the person already owns.
     """
     monkeypatch.setattr(sys, "prefix", "/home/pbi/.local/share/pipx/venvs/boxganizer")
-    assert mqtt.install_hint() == "pipx inject boxganizer aiomqtt"
+    assert mqtt.install_hint() == "pipx install --force boxganizer"
     monkeypatch.setattr(sys, "prefix", "/home/pbi/.local/share/uv/tools/boxganizer")
-    assert mqtt.install_hint().startswith("uv tool install")
+    assert mqtt.install_hint() == "uv tool install --reinstall boxganizer"
     monkeypatch.setattr(sys, "prefix", str(tmp_path / ".venv"))
-    assert mqtt.install_hint() == "python -m pip install 'boxganizer[live]'"
+    assert mqtt.install_hint() == "python -m pip install --force-reinstall boxganizer"
+    assert "boxganizer[" not in str(mqtt.missing_dependency())
 
 
 def test_a_missing_module_is_a_refusal_in_the_stream_and_not_a_retry(tmp_path: Path) -> None:

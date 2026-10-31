@@ -52,8 +52,8 @@ other boxes. Rules in brackets are enforced by the store.
         (ADR 22)
         - `mqtt` 📶 MQTT Sensor — schemes: mqtt mqtts; the topic is the path
         of the address (`metadata["topic"]` remains as an override)
-        needs the `live` extra (`aiomqtt`): the type, the dialog and `box types` all say so
-        when it is absent, and the box is then refused rather than retried
+        needs `aiomqtt`, which ships with the install (ADR 24); if it is absent the type, the
+        dialog and `box types` all say so, and the box is refused rather than retried (ADR 18)
         - `http` 📥 HTTP Sensor — resource required; schemes: http https
         - `home-assistant` 🏠 Home Assistant — schemes: http https;
         needs metadata: entity_id (nowhere in a URL to be read from)

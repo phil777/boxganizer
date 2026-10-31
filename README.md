@@ -22,16 +22,20 @@ library, so anything you add in one shows up in the others.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"          # core + CLI + web + text UI + tooling
+pip install -e ".[dev]"          # the program, plus the test and lint tooling
 ```
 
-Extras on their own: `pip install -e ".[web]"` or `pip install -e ".[tui]"`.
+There is nothing else to choose. `pipx install boxganizer`, `uv tool install boxganizer` and a
+plain `pip install boxganizer` all give you the CLI, the web app, the text UI and MQTT — every
+interface is a normal dependency, not an option you have to know the name of (ADR 24). `dev` is
+the only extra, and it is the tooling to work on boxganizer, not a feature of it.
 
-Installing `box` as a command, the way you would install any tool — `pipx install boxganizer`
-or `uv tool install boxganizer` — puts it in an environment of its own, where plain `pip
-install` of an extra would land in a Python the tool never imports. That is why the message a
-missing extra produces is generated from the running process rather than copied out of this
-file: a pipx install is told `pipx inject boxganizer aiomqtt`, and it is the right command.
+If an interface's library is genuinely missing, the install is broken or older than this change,
+and the program says so in the form your installer understands — a pipx install is told
+`pipx install --force boxganizer`, a uv one `uv tool install --reinstall boxganizer`, a plain venv
+`python -m pip install --force-reinstall boxganizer`. That advice is generated from the running
+process rather than copied out of this file, because `box` is a console script in an isolated
+environment and pip in the wrong Python installs it somewhere the tool will never look.
 
 ## Use
 
@@ -270,16 +274,16 @@ request so it is never nowhere). ADR 23.
 
 An MQTT box is the one kind that talks to something outside the machine: while
 its page is open the server subscribes to `mqtt://` or `mqtts://host[:port]/topic`
-and pushes every message to the page. That needs the `live` extra. Without it, the box type
-says *"not in this install"* while you are still choosing it, the dialog names the module and
-prints the command that fixes this particular install, and the opened box shows **"cannot
+and pushes every message to the page. `aiomqtt` ships with the install; if it is not there, the
+box type says *"not in this install"* while you are still choosing it, the dialog names the module
+and prints the command that repairs this particular install, and the opened box shows **"cannot
 listen"** with that sentence instead of a message about a dropped stream — a box that cannot
 work is refused, not retried forever. `box value NAME` reads one message and exits, for scripts,
 and reports the same way. ADR 18.
 
-`box serve` and `box tui` import their own framework, so `box --help` works
-even when only the core is installed; asking for one without its extra prints
-the `pip install` line for it.
+`box serve` and `box tui` import their own framework when you ask for them, so `box --help`
+and every filing command work even in an install whose web or text UI library has gone missing;
+asking for one that cannot start prints the line that repairs it.
 
 The database lives at `$BOXGANIZER_DB`, else
 `$XDG_DATA_HOME/boxganizer/boxes.db`, else `~/.local/share/boxganizer/boxes.db`.

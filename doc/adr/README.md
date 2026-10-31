@@ -38,3 +38,18 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0007   | Box rows are edited as YAML via `$EDITOR`       | accepted |
 | 0008   | Layout and view settings live in the config   | accepted |
 | 0009   | The graph may contain cycles                    | accepted |
+| 0010   | Index box file contents in the database, with FTS5 | accepted |
+| 0011   | A mindmap node is a box, and an unwritten node may be replaced | accepted |
+| 0012   | SSH boxes borrow the system client and never hold a password | accepted |
+| 0013   | A resource is a row, and the index is keyed on it | accepted |
+| 0014   | A box's own words are a file beside the database | accepted |
+| 0015   | The server speaks VNC, and the page is shown pictures | accepted, amended by ADR 17 (authentication) |
+| 0016   | A folder's index is the files inside it       | accepted |
+| 0017   | A VNC password is asked for per connection, and never kept | accepted |
+| 0018   | A box that cannot work says so, and stops     | accepted (the install advice in it was rewritten by ADR 2… |
+| 0019   | A tag's name is its identity, and its parents are never stored | accepted |
+| 0020   | A dynamic folder's filter is one expression, and the builder writes that expression | accepted |
+| 0021   | A sensor's meaning is written by its owner, in Jinja, and rendered by the server | accepted |
+| 0022   | A numeric sensor's scale belongs to its owner, is checked to cover itself, and clamps out loud | accepted |
+| 0023   | A viewport lends its space: the layout is a tree the server owns, and a drop copies unless Shift says otherwise | accepted |
+| 0024   | boxganizer installs fully featured: an interface is a dependency, not an extra | accepted |

@@ -301,7 +301,9 @@ def test_a_type_can_say_its_live_behaviour_needs_a_module_it_lacks() -> None:
     from boxganizer.boxtypes.dynamic import MQTTResource
 
     assert MQTTResource.dependency == "aiomqtt"
-    assert MQTTResource.dependency_extra == "live"
+    # no extra to name any more (ADR 24): the sentence about a missing module has to describe a
+    # broken install, because there is no option left that a person could have declined
+    assert not hasattr(MQTTResource, "dependency_extra")
     # the default: a type that declares nothing is always available
     folder = boxtypes.get("folder")
     assert folder.dependency is None
@@ -310,6 +312,15 @@ def test_a_type_can_say_its_live_behaviour_needs_a_module_it_lacks() -> None:
 
     described = MQTTResource.describe()
     assert described["dependency"] == "aiomqtt"
+    assert "dependency_extra" not in described
+
+    class Ghost(BoxType):
+        key = "ghost-type"
+        label = "Ghost"
+        dependency = "a-module-nobody-ships"
+
+    assert "should have been installed with boxganizer" in Ghost.unavailable_reason()
+    assert "boxganizer[" not in Ghost.unavailable_reason()
     assert set(described) >= {"available", "unavailable_reason"}
 
 

@@ -1,4 +1,4 @@
-"""Text UI package (Textual). Optional extra: ``pip install 'boxganizer[tui]'``."""
+"""Text UI package (Textual). Ships with the install — see ADR 24."""
 
 from boxganizer.tui.app import BoxganizerApp
 

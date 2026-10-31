@@ -26,23 +26,22 @@ dependencies = [
     "pypdfium2>=4.30",
     "pyyaml>=6.0",
     "typer>=0.12",
-]
-
-[project.optional-dependencies]
-web = [
+    # Every interface ships with the install (ADR 24). An extra is a way of shipping a
+    # feature you did not ask for while making the one you want a separate decision, and
+    # for a personal tool the interesting feature is always the one that is missing: the
+    # `live` extra produced bug reports that were really "`pipx install` gave me a box that
+    # cannot listen to MQTT and says so in a sentence I did not read".
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
-    "jinja2>=3.1",
-]
-tui = [
     "textual>=0.80",
-]
-live = [
     "aiomqtt>=2.0",
 ]
-all = ["boxganizer[web,tui,live]"]
+
+# Test and lint tooling is not a feature of the program, so it is still an extra — the one
+# choice left is between a 40 MB dev environment and a small install for someone who only
+# wants to organise boxes.
+[project.optional-dependencies]
 dev = [
-    "boxganizer[all]",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "httpx2>=2.0",

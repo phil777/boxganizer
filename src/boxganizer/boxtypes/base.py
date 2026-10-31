@@ -61,8 +61,6 @@ class BoxType:
     #: person is still choosing the type — which is a different experience from discovering
     #: it afterwards, in a message about a dropped stream.
     dependency: ClassVar[str | None] = None
-    #: The extra that brings that module, for the command shown beside it.
-    dependency_extra: ClassVar[str | None] = None
     #: True when at most one box of this type may exist in a database.
     singleton: ClassVar[bool] = False
     #: True when the resource is a directory the interfaces may list.
@@ -209,7 +207,6 @@ class BoxType:
             "available": cls.is_available(),
             "unavailable_reason": cls.unavailable_reason(),
             "dependency": cls.dependency,
-            "dependency_extra": cls.dependency_extra,
         }
 
     @classmethod
@@ -230,14 +227,16 @@ class BoxType:
         """Why this install cannot run the type, in one sentence, or "" when it can.
 
         The generic wording names the module. A type that knows a better answer — the MQTT
-        box, which also knows the command that fixes *this* install — overrides it.
+        box, which also knows the command that repairs *this* install — overrides it. Nothing
+        here offers an extra any more (ADR 24): a missing module is a damaged install, not an
+        option the person declined.
         """
         if cls.is_available():
             return ""
         assert cls.dependency is not None
-        extra = f" (the {cls.dependency_extra!r} extra)" if cls.dependency_extra else ""
         return (
-            f"this install cannot run {cls.label}: the {cls.dependency!r} module is missing{extra}"
+            f"this install cannot run {cls.label}: the {cls.dependency!r} module is missing, "
+            "and it should have been installed with boxganizer"
         )
 
     @classmethod

@@ -5,7 +5,7 @@ core, print the result. No business logic lives here.
 
 ``box`` is also how the other two interfaces start: ``box serve`` runs the web
 app and ``box tui`` opens the text UI. Both import their framework lazily, so
-the CLI works when the optional extra is not installed.
+the CLI works when an interface's library is missing from a damaged install.
 """
 
 from __future__ import annotations

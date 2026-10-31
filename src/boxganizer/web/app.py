@@ -85,9 +85,10 @@ try:
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
     from pydantic import BaseModel, Field, JsonValue
-except ModuleNotFoundError as exc:  # pragma: no cover - only when the extra is absent
+except ModuleNotFoundError as exc:  # pragma: no cover - only in a damaged install
     raise ModuleNotFoundError(
-        "the web frontend needs the 'web' extra: pip install 'boxganizer[web]'"
+        "the web frontend needs fastapi, which every boxganizer install carries: repair the "
+        "install (pipx install --force boxganizer)"
     ) from exc
 
 #: Files larger than this are not handed to the browser.

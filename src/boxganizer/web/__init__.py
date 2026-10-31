@@ -1,4 +1,4 @@
-"""Web frontend (FastAPI). Optional extra: ``pip install 'boxganizer[web]'``."""
+"""Web frontend (FastAPI). Ships with the install — see ADR 24."""
 
 from boxganizer.web.app import create_app
 
