@@ -34,7 +34,12 @@ class DynamicFolder(FolderBox):
 
     key: ClassVar[str] = "dynamic-folder"
     label: ClassVar[str] = "Dynamic Folder"
-    icon: ClassVar[str] = "\U0001f300"  # 🌀
+    # 🗃️ a file box, not 🌀 a whirlwind: this is a folder whose contents happen to come from a
+    # filter, and a spiral said "dynamic" while hiding the one thing a person is looking for —
+    # that double-clicking it opens a folder. 📂, 📁, 🗂️ and 🗄️ were already worn by folder,
+    # directory, indexed-directory and cabinet; this is the last glyph in the filing family that
+    # a font actually draws, and it stays distinguishable from the cabinet at icon size.
+    icon: ClassVar[str] = "\U0001f5c3️"  # 🗃️
     summary: ClassVar[str] = "Members are every box matching a saved filter."
     #: The store keeps the links of this type in step with its filter.
     resolves_membership: ClassVar[bool] = True
