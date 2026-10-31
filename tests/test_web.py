@@ -3006,3 +3006,57 @@ def test_tags_are_painted_outside_the_canvas_and_carry_no_view_logic(client: Tes
     ]
     assert 'chip.explicit ? "" : " inherited"' in chips
     assert "if (chip.explicit) {" in chips
+
+
+def test_a_directory_box_opens_at_the_top_and_lets_a_file_be_dragged_out(
+    client: TestClient,
+) -> None:
+    """Two halves of one complaint about the explorer box.
+
+    The browse position used to be remembered per box, so a reopened directory showed some
+    folder three levels down and looked like a box with the wrong contents; and the only way to
+    make a box out of a file inside one was the context menu. Now opening is always the top of
+    the folder, and a file can be dragged onto a box — or onto the library list, which is the
+    difference between "put this here" and "put this somewhere".
+    """
+    script = client.get("/static/app.js").text
+    # the memory is dropped when a box is opened, not when the pane re-renders it
+    open_box = script[script.index("async function openBox") :]
+    assert "dirNav.clear();" in open_box[: open_box.index("\n}\n")]
+    # a file drags as a file, not as a box uuid
+    assert 'const FILE_DRAG_TYPE = "application/x-boxganizer-file";' in script
+    assert "row.draggable = true;" in script
+    assert 'event.dataTransfer.effectAllowed = "copy";' in script
+    # the type is asked of the server, because that is where the inference lives
+    assert "api.suggestType(payload.path)" in script
+    assert "async function createBoxFromDraggedFile(payload, parent)" in script
+    assert "resource_uri: payload.path" in script
+    # both drop targets: the box on screen, and the library itself
+    pane = script[script.index("function wirePaneDrops") : script.index("async function init()")]
+    assert "types.includes(FILE_DRAG_TYPE)" in pane
+    assert 'const sideList = el("side");' in script
+    assert "await createBoxFromDraggedFile(dragged, null);" in script
+    assert "request(`/api/types/suggest?resource_uri=${encodeURIComponent(resourceUri)}`)" in script
+
+
+def test_a_dragged_file_becomes_a_box_of_the_inferred_type(tmp_path: Path) -> None:
+    """The endpoint the page leans on: a path in, a sensible type out."""
+    store = BoxStore(tmp_path / "drag.db", content_root=tmp_path)
+    try:
+        note = tmp_path / "rates.md"
+        note.write_text("# Rates\n", encoding="utf-8")
+        with TestClient(create_app(store, content_root=tmp_path)) as test_client:
+            suggested = test_client.get(
+                "/api/types/suggest", params={"resource_uri": str(note)}
+            ).json()
+            assert suggested["suggestion"]["key"] == "markdown"
+            made = test_client.post(
+                "/api/boxes",
+                json={"name": "rates", "box_type": "markdown", "resource_uri": str(note)},
+            )
+            assert made.status_code == 201
+            detail = test_client.get("/api/boxes/rates").json()
+            assert detail["box_type"] == "markdown"
+            assert detail["resource_uri"] == str(note)
+    finally:
+        store.close()

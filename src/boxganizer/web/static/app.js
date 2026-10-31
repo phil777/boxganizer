@@ -87,6 +87,8 @@ const api = {
   resolveFolder: (ref) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/resolve`, { method: "POST" }),
   indexStatus: (check) => request(`/api/index/status${check ? "?check=1" : ""}`),
+  suggestType: (resourceUri) =>
+    request(`/api/types/suggest?resource_uri=${encodeURIComponent(resourceUri)}`),
   tags: () => request("/api/tags"),
   createTag: (payload) =>
     request("/api/tags", { method: "POST", body: JSON.stringify(payload) }),
@@ -367,6 +369,11 @@ function status(message, isError = false) {
 /* ------------------------------------------------------------ navigation --- */
 
 async function openBox(ref, options = {}) {
+  // A directory box shows its top directory when it is opened, every time. Remembering where
+  // a browse left off sounds kind and is not: the box looks like it has children it does not
+  // have, and the second opening is not the first thing the person was looking for. Re-renders
+  // of the box already on screen keep their place, because those are not openings.
+  dirNav.clear();
   try {
     const box = await api.box(ref);
     // A child opened from a view extends the path; anything else starts a new one.
@@ -2184,9 +2191,11 @@ function wirePaneDrops() {
 
   pane.addEventListener("dragover", (event) => {
     if (!paneAcceptsDrops()) return;
-    if (!event.dataTransfer || !Array.from(event.dataTransfer.types).includes("text/plain")) return;
+    const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
+    const draggingFile = types.includes(FILE_DRAG_TYPE);
+    if (!draggingFile && !types.includes("text/plain")) return;
     event.preventDefault(); // a candidate, not a claim: a view may still take this drop
-    event.dataTransfer.dropEffect = "move";
+    event.dataTransfer.dropEffect = draggingFile ? "copy" : "move";
     pane.classList.add("drop-target");
   });
 
@@ -2198,9 +2207,21 @@ function wirePaneDrops() {
     pane.classList.remove("drop-target");
     if (event.defaultPrevented) return; // a view means something specific by this one
     const box = paneAcceptsDrops();
-    const uuid = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
-    if (!box || !uuid || uuid === box.uuid) return;
+    if (!box) return;
     event.preventDefault();
+    const dragged = readDraggedFile(event);
+    if (dragged) {
+      try {
+        const takesChildren = (typeOf(box) || {}).allows_children !== false;
+        await createBoxFromDraggedFile(dragged, takesChildren ? box.uuid : null);
+        openBox(box.uuid); // land back where the drop happened, now showing what arrived
+      } catch (error) {
+        status(`cannot make a box from that file: ${error.message}`, true);
+      }
+      return;
+    }
+    const uuid = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
+    if (!uuid || uuid === box.uuid) return;
     try {
       await api.link(box.uuid, uuid);
       await refreshSide();
@@ -2304,6 +2325,29 @@ async function init() {
   });
 
   wirePaneDrops();
+  // Dropping on the library list means "into the library", not "into this box": the box is made
+  // and left unfiled, which is where a box belongs when nobody chose a home for it.
+  const sideList = el("side");
+  sideList.addEventListener("dragover", (event) => {
+    const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
+    if (!types.includes(FILE_DRAG_TYPE)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    sideList.classList.add("drop-target");
+  });
+  sideList.addEventListener("dragleave", () => sideList.classList.remove("drop-target"));
+  sideList.addEventListener("drop", async (event) => {
+    sideList.classList.remove("drop-target");
+    const dragged = readDraggedFile(event);
+    if (!dragged) return;
+    event.preventDefault();
+    try {
+      await createBoxFromDraggedFile(dragged, null);
+    } catch (error) {
+      status(`cannot make a box from that file: ${error.message}`, true);
+    }
+  });
+
   el("side-menu").addEventListener("click", openSideMenu);
   el("about-close").addEventListener("click", () => el("about-modal").close());
   el("tags-close").addEventListener("click", () => el("tags-modal").close());
@@ -3765,6 +3809,64 @@ registerView("folder", folderView);
 
 const dirNav = new Map(); // box uuid -> { sub, preview }, so a re-render keeps the place
 
+/* What a dragged file is carrying, and where it came from.
+ *
+ * A box and a file are different things to drop, and the difference has to travel with the
+ * drag: `text/plain` holds a box uuid, and a view that files that uuid would happily file the
+ * directory box itself, which is a box that was never being moved. So a file gets its own type,
+ * its own path, and the name the box would sensibly take.
+ */
+const FILE_DRAG_TYPE = "application/x-boxganizer-file";
+
+function fileDragPayload(box, entry) {
+  return JSON.stringify({
+    from: box.uuid,
+    sub: entry.sub,
+    path: entry.path || "",
+    name: entry.name.replace(/\.[^.]+$/, ""),
+  });
+}
+
+function readDraggedFile(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer || !Array.from(transfer.types).includes(FILE_DRAG_TYPE)) return null;
+  const raw = transfer.getData(FILE_DRAG_TYPE);
+  if (!raw) return null;
+  try {
+    const payload = JSON.parse(raw);
+    return payload && payload.path ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Make a box out of a file that was dragged out of a directory box.
+ *
+ * The type is asked of the server, because that is where the inference lives: a second copy in
+ * the page would disagree with `box add` about what a .md file is within a release. `parent` is
+ * omitted when the drop lands on the library list rather than on a box, which leaves the new
+ * box in the cabinet and unfiled — the same thing typing a name in the side pane would do.
+ */
+async function createBoxFromDraggedFile(payload, parent) {
+  let type = "file";
+  try {
+    const suggested = await api.suggestType(payload.path);
+    if (suggested && suggested.suggestion) type = suggested.suggestion.key || type;
+  } catch (error) {
+    // A suggestion is a convenience. The box still gets made, as a plain file.
+  }
+  const made = await api.create({
+    name: payload.name || "untitled",
+    box_type: type,
+    resource_uri: payload.path,
+    ...(parent ? { parent } : {}),
+  });
+  await refreshSide();
+  status(`made a ${type} box from ${payload.name}`);
+  return made;
+}
+
 /**
  * A `directory` box, browsed for real: the files on disk, in place of the box's
  * own children. Double-click a directory to go deeper — still the same box's
@@ -3908,6 +4010,16 @@ const directoryView = {
         const row = document.createElement("div");
         row.className = `fs-row ${entry.kind}`;
         row.dataset.sub = entry.sub;
+        if (entry.kind !== "dir" && entry.path) {
+          // out of the folder and into a box, by dragging: the row already knows what type the
+          // file would infer to, and the server is the one that will say so
+          row.draggable = true;
+          row.title = "Drag onto a box to make a box out of this file";
+          row.addEventListener("dragstart", (event) => {
+            event.dataTransfer.setData(FILE_DRAG_TYPE, fileDragPayload(box, entry));
+            event.dataTransfer.effectAllowed = "copy";
+          });
+        }
         const glyph = iconElement({ uuid: null, icon: entry.icon, config: {}, box_type: entry.box_type });
         const name = document.createElement("span");
         name.className = "fs-name";

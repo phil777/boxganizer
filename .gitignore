@@ -45,3 +45,6 @@ data/
 *.swp
 *~
 .DS_Store
+
+# goal-extension state, local to a machine
+.pi/
