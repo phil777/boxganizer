@@ -922,6 +922,36 @@ pre.text {
   cursor: pointer;
 }
 
+' The split buttons show the split: a rectangle, and a line where the new bar will be. A
+   glyph was tried first and failed twice — fonts draw ◫ and ◨ differently, and neither reads as a
+   direction — so this is drawn, and the click reads a data attribute instead of a character. */
+.vp-icon {
+  position: relative;
+  width: 1.05rem;
+  height: 0.85rem;
+  border: 1px solid currentColor;
+}
+
+.vp-icon::after {
+  content: "";
+  position: absolute;
+  background: currentColor;
+}
+
+.vp-icon-horizontal::after {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+}
+
+.vp-icon-vertical::after {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+}
+
 .vp-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;

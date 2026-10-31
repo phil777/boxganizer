@@ -627,9 +627,19 @@ const viewportView = {
         return node2;
       };
 
+      // Drawn in CSS (a rectangle with a line where the new bar will be) rather than a geometric
+      // character: ◫ and ◨ do not read as "side by side" and "above and below" in most fonts, and
+      // the click handler was telling them apart by their textContent, which is a glyph-deep way
+      // to pick a direction. The words say what the panes will do, not which axis is named.
+      const split = (direction, title) => {
+        const entry = button("", title, "vp-split");
+        entry.dataset.direction = direction;
+        entry.className = `vp-btn vp-icon vp-icon-${direction}`;
+        return entry;
+      };
       buttons.append(
-        button("◫", "Split this viewport horizontally", "vp-split"),
-        button("◨", "Split this viewport vertically", "vp-split"),
+        split("horizontal", "Split this viewport side by side"),
+        split("vertical", "Split this viewport above and below"),
         button("×", "Close this viewport", "vp-close"),
       );
       buttons.querySelectorAll("button").forEach((entry) => {
@@ -950,8 +960,7 @@ const viewportView = {
       if (!hit) return;
       const action = hit.dataset.action;
       if (action === "vp-split") {
-        const vertical = hit.textContent === "◨";
-        await act("split", { node: hit.dataset.node, direction: vertical ? "vertical" : "horizontal" });
+        await act("split", { node: hit.dataset.node, direction: hit.dataset.direction });
       } else if (action === "vp-close") {
         await act("close", { node: hit.dataset.node });
       } else if (action === "vp-window") {
