@@ -135,6 +135,83 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+/* A box's settings row, wherever it lives.
+
+   The row is marked with a class rather than listed by view name: the pane has grown a
+   settings row in a dozen places, and the rule that tried to enumerate them elsewhere ended up
+   silently wrong for every view added afterwards.
+
+   Hidden means *not in the way*, so it takes no space when closed — the content below grows
+   back into it rather than being covered. `max-height` animates the drawer; `visibility` is
+   delayed on the way out so a fading row is still readable, and switched at once on the way in
+   so nothing has to be tabbed through in the dark. Overflow stays visible while open because
+   several of these rows pop a list downward (the note's box picker, a folder's suggestions),
+   and clipping those would be a worse bug than the one being animated. */
+.box-config {
+  max-height: 14rem;
+  opacity: 1;
+  visibility: visible;
+  transition:
+    max-height 0.2s ease,
+    opacity 0.16s ease,
+    padding 0.2s ease,
+    margin 0.2s ease,
+    visibility 0s linear 0s;
+}
+
+#canvas:not(.config-open) .box-config {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  padding-top: 0;
+  padding-bottom: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  border-top-width: 0;
+  border-bottom-width: 0;
+  transition:
+    max-height 0.2s ease,
+    opacity 0.16s ease,
+    padding 0.2s ease,
+    margin 0.2s ease,
+    visibility 0s linear 0.2s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .box-config,
+  #canvas:not(.config-open) .box-config {
+    transition: none;
+  }
+}
+
+.main-head .gear {
+  /* the top line's right end: this is the one control in that row that is about the box's
+     behaviour rather than about where the person is in the graph */
+  margin-left: auto;
+  flex: none;
+  appearance: none;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+}
+
+.main-head .gear[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+#status {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 #breadcrumb { display: flex; gap: 0.35rem; flex-wrap: wrap; font-size: 0.9rem; }
 #breadcrumb button { border: none; background: none; color: inherit; cursor: pointer; padding: 0.1rem 0.2rem; }
 #breadcrumb button[aria-current="true"] { font-weight: 600; }
@@ -145,6 +222,24 @@ body {
   overflow: auto;
   padding: var(--gap);
   position: relative;
+  /* A column, so opening the settings drawer *takes* space from the box below it. Laid out as
+     a block, the row would push the content down and the pane would scroll — which is the
+     drawer lying over the box while pretending to be above it. */
+  display: flex;
+  flex-direction: column;
+}
+
+/* Settings rows take what they need; the box takes the rest. Views that have a root element
+   already lay themselves out this way — the row is inside them — so this only does something
+   for the views that write straight into the pane, which is exactly where the drawer used to
+   fail to shrink anything. */
+#canvas > .box-config {
+  flex: none;
+}
+
+#canvas > :not(.box-config) {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* The whole pane takes a box a view did not claim. The outline is inside the edge so
@@ -406,7 +501,17 @@ pre.text {
 
 .children-toolbar { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.6rem; }
 .children-toolbar button { margin-left: 0.25rem; }
-.children { display: flex; flex-direction: column; gap: 0.1rem; }
+/* The list is the box's content, so it takes the room that is left and scrolls in itself:
+   a folder with forty children should not scroll the whole pane, and a settings drawer opening
+   above it should take room from the list rather than push it out of sight. */
+.children {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
 
 .children-view[data-layout="grid"] .children {
   display: grid;
@@ -444,7 +549,18 @@ pre.text {
 
 /* A folder accepts a drop anywhere in its own area, including the empty part of an
    empty folder — which is the moment someone most wants to drop something. */
-.children-view { min-height: 3.5rem; border: 1px dashed transparent; border-radius: 0.35rem; padding: 0.25rem; }
+/* A column, so the list below the toolbar takes what is left: that is what lets a settings
+   drawer opening above it take room from the children rather than shove them out of the pane.
+   The 3.5rem floor is the empty folder still being somewhere to drop a box onto. */
+.children-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-height: 3.5rem;
+  border: 1px dashed transparent;
+  border-radius: 0.35rem;
+  padding: 0.25rem;
+}
 .children-view.drop-target { border-color: var(--accent); background: var(--panel); }
 
 /* What a dynamic folder asks for, and the controls to change it. */

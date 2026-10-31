@@ -381,6 +381,46 @@ const context = {
   edit: openEditBoxModal,
 };
 
+/* -- a box's settings, shown only when asked for -----------------------------
+ *
+ * Almost every view carries a row of controls: a folder's search, a desktop's grid size, a
+ * note's format bar, a sensor's address. They are wanted occasionally and in the way
+ * constantly, and the space they took was the space the box's own content wanted. So they
+ * start closed, and one button in the top line opens them — pushing the content down rather
+ * than lying over it, because a drawer you cannot read underneath is a drawer on top of a bug.
+ *
+ * The choice belongs to the page, not to the box: it is about how this person likes to work,
+ * and a library should not change shape because somebody opened a folder once. It is remembered
+ * in `localStorage`, which survives a reload and does not travel with the database.
+ */
+const CONFIG_STORAGE_KEY = "boxganizer.configHeader";
+let configHeaderOpen = localStorage.getItem(CONFIG_STORAGE_KEY) === "1";
+let configSyncTimer = 0;
+
+function applyConfigHeader() {
+  el("canvas").classList.toggle("config-open", configHeaderOpen);
+  syncConfigGear();
+}
+
+function syncConfigGear() {
+  const gear = el("toggle-config");
+  if (!gear) return;
+  const rows = el("canvas").querySelectorAll(".box-config");
+  // A gear over a box that has no settings row is a control with nothing to control, and the
+  // pane is redrawn asynchronously, so this is asked after each repaint rather than trusted
+  // at click time.
+  gear.hidden = rows.length === 0;
+  gear.setAttribute("aria-expanded", configHeaderOpen ? "true" : "false");
+  gear.title = configHeaderOpen ? "Hide the box's settings" : "Show the box's settings";
+}
+
+function toggleConfigHeader() {
+  configHeaderOpen = !configHeaderOpen;
+  localStorage.setItem(CONFIG_STORAGE_KEY, configHeaderOpen ? "1" : "0");
+  applyConfigHeader();
+  status(configHeaderOpen ? "showing the box's settings" : "hiding the box's settings");
+}
+
 function renderMain() {
   const canvas = el("canvas");
   canvas.replaceChildren();
@@ -397,6 +437,10 @@ function renderMain() {
     return;
   }
   view.render(canvas, box, context, "content", { embedded: false, depth: 0 });
+  applyConfigHeader();
+  // Views fill themselves in after their own awaits — a folder's children, a sensor's probe —
+  // so the gear is re-checked when the canvas settles rather than only when it was cleared.
+  queueMicrotask(() => syncConfigGear());
 }
 
 /**
@@ -1878,6 +1922,16 @@ async function init() {
   el("new-box").addEventListener("click", () => openNewBoxModal());
   el("go-root").addEventListener("click", goToRoot);
   el("index-status").addEventListener("click", openIndexModal);
+  el("toggle-config").addEventListener("click", toggleConfigHeader);
+  applyConfigHeader();
+  // Views fill the pane in after their own awaits — a folder's children, a grid's placement,
+  // a sensor's probe — so whether this box has a settings row at all is only known when the
+  // canvas settles. One observer for the pane, coalesced: a repaint is a burst of mutations,
+  // and the answer is one boolean.
+  new MutationObserver(() => {
+    window.clearTimeout(configSyncTimer);
+    configSyncTimer = window.setTimeout(syncConfigGear, 60);
+  }).observe(el("canvas"), { childList: true, subtree: true });
   el("index-close").addEventListener("click", () => el("index-modal").close());
   el("pending-look").addEventListener("click", () => drawPending({ check: true }));
   el("pending-reindex").addEventListener("click", () => {
@@ -2226,7 +2280,7 @@ function chipFor(child, ctx) {
 
 function gridToolbar(box, options, ctx) {
   const bar = document.createElement("div");
-  bar.className = "grid-toolbar";
+  bar.className = "grid-toolbar box-config";
 
   const stepper = (labelText, value, actionPrefix, max) => {
     const group = document.createElement("span");
@@ -2685,7 +2739,7 @@ async function placeOnDesktop(box, ctx, childUuid, x, y) {
 
 function desktopToolbar(box, options, ctx, count) {
   const bar = document.createElement("div");
-  bar.className = "desktop-toolbar";
+  bar.className = "desktop-toolbar box-config";
 
   const title = document.createElement("strong");
   title.textContent = `${box.icon} ${box.name}`;
@@ -3101,7 +3155,7 @@ const folderView = {
     canvas.append(wrap);
 
     const toolbar = document.createElement("div");
-    toolbar.className = "children-toolbar";
+    toolbar.className = "children-toolbar box-config";
     if (opts.embedded) toolbar.classList.add("compact");
     const title = document.createElement("strong");
     title.textContent = `${box.icon} ${box.name}`;
@@ -3240,7 +3294,7 @@ const folderView = {
 
     if (dynamic) {
       const bar = document.createElement("div");
-      bar.className = "filter-bar";
+      bar.className = "filter-bar box-config";
       const says = document.createElement("span");
       says.className = "filter-says";
       bar.append(says);
@@ -3401,7 +3455,7 @@ const directoryView = {
     canvas.append(wrap);
 
     const bar = document.createElement("div");
-    bar.className = "fs-bar";
+    bar.className = "fs-bar box-config";
     wrap.append(bar);
 
     const pane = document.createElement("div");
@@ -3780,7 +3834,7 @@ const browserView = {
     let current = box.resource_uri;
 
     const bar = document.createElement("div");
-    bar.className = "browser-bar";
+    bar.className = "browser-bar box-config";
     const address = document.createElement("input");
     address.type = "url";
     address.className = "browser-url";
@@ -3903,7 +3957,7 @@ const mqttView = {
     const address = document.createElement("span");
     address.className = "mqtt-address muted";
     const head = document.createElement("div");
-    head.className = "mqtt-head";
+    head.className = "mqtt-head box-config";
     head.append(chip, topic, address);
 
     const value = document.createElement("span");
@@ -4074,7 +4128,7 @@ async function markdownView(canvas, box, ctx, opts = {}) {
   stage.style.setProperty("--text-size", `${options.font_size}px`);
 
   const bar = document.createElement("div");
-  bar.className = "markdown-bar";
+  bar.className = "markdown-bar box-config";
   Object.entries(MARKDOWN_SECTIONS).forEach(([key, label]) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -4784,7 +4838,7 @@ async function mindmapView(canvas, box, ctx, opts = {}) {
 /** What the map is, how many nodes it holds, and the keys that drive it. */
 function mindmapToolbar(box, ctx) {
   const bar = document.createElement("div");
-  bar.className = "mindmap-toolbar";
+  bar.className = "mindmap-toolbar box-config";
   const title = document.createElement("strong");
   title.textContent = `${box.icon} ${box.name}`;
   const keys = document.createElement("span");
@@ -4870,7 +4924,7 @@ async function vncView(canvas, box, ctx, opts = {}) {
 
   if (status.destination) {
     const controls = document.createElement("div");
-    controls.className = "vnc-controls";
+    controls.className = "vnc-controls box-config";
     const play = document.createElement("button");
     play.type = "button";
     play.className = "vnc-play";
@@ -5165,7 +5219,7 @@ async function noteView(canvas, box, ctx, opts = {}) {
   wrap.dataset.format = format;
 
   const bar = document.createElement("div");
-  bar.className = "note-bar";
+  bar.className = "note-bar box-config";
   wrap.append(bar);
 
   const surface = document.createElement("div");
@@ -5839,7 +5893,7 @@ async function sshView(canvas, box, ctx, opts = {}) {
   wrap.className = "ssh-view";
 
   const head = document.createElement("div");
-  head.className = "ssh-head";
+  head.className = "ssh-head box-config";
   const address = document.createElement("strong");
   address.textContent = `ssh://${where.user ? `${where.user}@` : ""}${where.host}:${where.port}`;
   head.append(address);

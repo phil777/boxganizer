@@ -129,6 +129,14 @@ Browse and the index tick disappear when the resource is not a file on this mach
 asking. A refusal is written **inside the dialog**, in its own line, because the status bar
 behind an open modal is a message nobody receives.
 
+Every box's own controls — a folder's search, a desktop's grid size, a note's format bar, a
+sensor's address — live in a row that is **hidden until you ask**. A ⚙ at the right end of the
+top line opens it, and the box's content gives up the room: the drawer pushes the pane down
+rather than lying over it. A box with no controls shows no gear, because a control with nothing
+to control is decoration. The choice is remembered in the browser, not in the library: it is
+about how you like to work, and a library should not change shape because you opened a folder
+once.
+
 What is indexed is decided per **resource**, not per box, and the dialog says so as you
 fill it in — a tick box, with the reason beside it:
 

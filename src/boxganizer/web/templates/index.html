@@ -52,6 +52,19 @@
           <button id="up" type="button" title="Go to the parent box">↑</button>
           <nav id="breadcrumb" aria-label="Path"></nav>
           <span id="status" class="muted"></span>
+          <!-- Settings are wanted occasionally and in the way constantly, so they start hidden
+               and this is where the decision is made. It hides itself when the box on screen has
+               no settings row: a control with nothing to control is decoration. -->
+          <button
+            id="toggle-config"
+            type="button"
+            class="gear"
+            title="Show the box's settings"
+            aria-expanded="false"
+            hidden
+          >
+            &#9881;
+          </button>
         </header>
         <section id="canvas" tabindex="-1"></section>
       </main>

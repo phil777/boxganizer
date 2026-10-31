@@ -2855,7 +2855,7 @@ def test_the_pending_list_tells_work_apart_from_a_dead_end(
         script = client.get("/static/app.js").text
         assert "items.filter((item) => item.fixable)" in script
         assert "Reindexing will not change this one." in script
-        assert "it has\n      \" no row until something walks the folder" not in script
+        assert 'it has\n      " no row until something walks the folder' not in script
     finally:
         store.close()
 
@@ -2874,3 +2874,102 @@ def test_a_view_in_a_cell_fills_the_cell(client: TestClient) -> None:
     # the enumeration is gone, because that was the bug rather than the fix
     assert ".cell-content .image-view," not in css
     assert ".cell-content .icon-view { width: 100%; }" not in css
+
+
+def test_a_boxs_settings_are_hidden_until_asked_for_and_take_room_when_shown(
+    client: TestClient,
+) -> None:
+    """The drawer is above the content, not over it.
+
+    Every view carries a row of controls somewhere, and together they cost the box the top of
+    its own pane. So they start closed behind one gear in the top line — which hides itself when
+    the box has no settings row, because a control with nothing to control is decoration.
+    """
+    page = client.get("/").text
+    assert 'id="toggle-config"' in page
+    assert 'aria-expanded="false"' in page
+    assert page.index('id="toggle-config"') > page.index('id="breadcrumb"')
+    assert (
+        "hidden"
+        in page[
+            page.index('id="toggle-config"') : page.index(">", page.index('id="toggle-config"'))
+        ]
+    )
+
+    css = client.get("/static/app.css").text
+    # the pane is a column, so opening the row takes height from the box below it
+    canvas = css[css.index("#canvas {") : css.index("}", css.index("#canvas {"))]
+    assert "display: flex;" in canvas and "flex-direction: column;" in canvas
+    assert "#canvas > .box-config {" in css
+    assert "#canvas > :not(.box-config) {" in css
+    closed = css[css.index("#canvas:not(.config-open) .box-config {") :]
+    closed = closed[: closed.index("}")]
+    assert "max-height: 0;" in closed and "visibility: hidden;" in closed
+    # hidden must mean hidden to a keyboard, not merely invisible
+    assert "pointer-events: none;" in closed
+    assert "position: absolute" not in closed, "the drawer may not lie over the box"
+    assert "prefers-reduced-motion" in css
+
+    script = client.get("/static/app.js").text
+    assert 'const CONFIG_STORAGE_KEY = "boxganizer.configHeader";' in script
+    assert 'localStorage.getItem(CONFIG_STORAGE_KEY) === "1"' in script
+    assert 'el("canvas").classList.toggle("config-open", configHeaderOpen)' in script
+    # the gear is re-checked after the view settles, because views fill themselves in late
+    assert 'observe(el("canvas"), { childList: true, subtree: true })' in script
+    assert "gear.hidden = rows.length === 0;" in script
+    assert "applyConfigHeader();" in script[script.index("function renderMain()") :]
+
+
+def test_the_settings_row_is_marked_by_convention_not_by_a_list_of_views(
+    client: TestClient,
+) -> None:
+    """Every view that has a controls row says so; the CSS never has to know their names.
+
+    The list-of-views mistake was made once already in this stylesheet — `.image-view,
+    .text-view, .children-view, .grid-board` — and every view added afterwards was quietly
+    wrong. A class on the row is the same lesson applied before the damage.
+    """
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    for view in (
+        "children-toolbar",
+        "desktop-toolbar",
+        "grid-toolbar",
+        "fs-bar",
+        "filter-bar",
+        "markdown-bar",
+        "mindmap-toolbar",
+        "mqtt-head",
+        "note-bar",
+        "ssh-head",
+        "vnc-controls",
+        "browser-bar",
+    ):
+        assert f'"{view} box-config"' in script, view
+    assert script.count("box-config") >= 12
+    # a row that *reports* is not a row that *configures*: the checklist head shows a tally
+    assert '"checklist-head box-config"' not in script
+    # and the stylesheet mentions no view name to find the drawer
+    assert ".children-toolbar" in css  # existing rules may still style it
+    drawer = css[
+        css.index("/* A box's settings row, wherever it lives.") : css.index(".main-head .gear")
+    ]
+    for name in ("children-toolbar", "fs-bar", "note-bar", "vnc-controls", "ssh-head"):
+        assert name not in drawer, name
+
+
+def test_a_folder_list_takes_the_room_left_and_scrolls_in_itself(client: TestClient) -> None:
+    """The pane should not scroll because a folder has forty children.
+
+    It also means a drawer opening above the list takes room from the list, which is the whole
+    point of "it does not come over it", and an empty folder keeps its floor: an empty folder is
+    still somewhere to drop a box onto.
+    """
+    css = client.get("/static/app.css").text
+    block = css[css.index(".children {") :]
+    block = block[: block.index("}")]
+    assert "flex: 1 1 auto;" in block and "min-height: 0;" in block and "overflow: auto;" in block
+    view = css[css.index(".children-view {") :]
+    view = view[: view.index("}")]
+    assert "display: flex;" in view and "flex-direction: column;" in view
+    assert "min-height: 3.5rem;" in view, "an empty folder must still be a drop target"
