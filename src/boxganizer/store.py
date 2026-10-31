@@ -427,6 +427,39 @@ class BoxStore:
             return filters.Filter()
         return filters.parse_of(folder)
 
+    def resolve_lookup(self, needs: filters.Needs) -> filters.Lookup:
+        """Answer the two kinds of clause a box cannot answer for itself.
+
+        A tag's meaning is its whole branch — `kitchen` holds the boxes tagged `boiler` below it
+        — and a content clause means exactly what the search box means, thesaurus and fuzzy forms
+        included, because a folder that quietly used a different idea of "contains this word"
+        than the search field would be two search engines in one product.
+
+        Built once per pass and handed to every box, rather than asked per box: a library of a
+        thousand boxes would otherwise run one full-text query per box per folder.
+        """
+        from boxganizer import search as text_search
+
+        tags = {name.casefold(): frozenset(self.boxes_with_tag(name)) for name in needs.tags}
+        content: dict[str, frozenset[str]] = {}
+        for query in needs.content:
+            found: set[str] = set()
+            def probe(word: str) -> Sequence[str]:
+                # a def, not a lambda: the planner wants a word and answers with the words in
+                # the index that start with it, which is what makes a fuzzy or thesaurus form
+                # of this query reach the same boxes
+                return self.vocabulary(prefix=word[:1])
+
+            planned = text_search.plan(query, probe)
+            if planned.worth_asking:
+                for resource_id, _score, _passage in self.content_search(
+                    planned.content_match, limit=1000
+                ):
+                    for box, _inside in self.boxes_for_text(resource_id):
+                        found.add(box.uuid)
+            content[query.casefold()] = frozenset(found)
+        return filters.Lookup(tags=tags, content=content)
+
     def resolve_folder(self, ref: str) -> int | None:
         """Write one folder's membership from its filter, and return the member count.
 
@@ -440,11 +473,12 @@ class BoxStore:
         if kind is None or not kind.resolves_membership or folder.id is None:
             return None
         wanted = self.filter_of(folder)
+        lookup = self.resolve_lookup(wanted.needs)
         now = _now()
         held = {int(row["child_id"]) for row in self._rows(_SELECT_CHILD_IDS, (folder.id,))}
         keep: set[int] = set()
         for box in self.list_boxes():
-            if box.id is None or not wanted.matches(box):
+            if box.id is None or not wanted.matches(box, lookup):
                 continue
             if boxtypes.known(box.box_type) and boxtypes.get(box.box_type).is_root:
                 continue
@@ -474,11 +508,17 @@ class BoxStore:
         kind = boxtypes.get(box.box_type) if boxtypes.known(box.box_type) else None
         filed_here: set[int] = set()
         root_box = kind is not None and kind.is_root
+        # One lookup for every folder being reconciled against this box, rather than one per
+        # folder: the tag branch and the index answers do not change between them.
+        lookups: dict[int, filters.Lookup] = {}
         for folder in self.resolving_folders():
             if folder.id is None or folder.id == box.id:
                 continue
             filed_here.add(folder.id)
-            wants = self.filter_of(folder).matches(box)
+            asked = self.filter_of(folder)
+            if folder.id not in lookups:
+                lookups[folder.id] = self.resolve_lookup(asked.needs)
+            wants = asked.matches(box, lookups[folder.id])
             held = self._rows(_SELECT_ONE_LINK, (folder.id, box.id))
             if wants and not held and not root_box:
                 self._execute(
