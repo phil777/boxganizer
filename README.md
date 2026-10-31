@@ -157,6 +157,9 @@ to control is decoration. The choice is remembered in the browser, not in the li
 about how you like to work, and a library should not change shape because you opened a folder
 once.
 
+A note or checklist you save is re-read into the search index **by the save itself** — no index
+pass, no button: a word you just typed answers a search, and a word you deleted stops answering.
+
 What is indexed is decided per **resource**, not per box, and the dialog says so as you
 fill it in — a tick box, with the reason beside it:
 

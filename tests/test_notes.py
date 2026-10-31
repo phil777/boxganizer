@@ -218,3 +218,47 @@ def test_reading_a_note_written_by_hand_outside_the_page(
     target.write_text("# from my own editor\n", encoding="utf-8")
     body = client.get(f"/api/boxes/{note.uuid}/note").json()
     assert body["source"] == "# from my own editor\n"
+
+
+def _who_says(store: BoxStore, word: str) -> list[str]:
+    """Box names whose indexed words answer for `word` — the page's own path."""
+    found: list[str] = []
+    for resource_id, _score, _passage in store.content_search(word):
+        for box, _inside in store.boxes_for_text(resource_id):
+            if box.name not in found:
+                found.append(box.name)
+    return found
+
+
+def test_a_saved_note_is_searchable_without_any_index_pass(tmp_path: Path) -> None:
+    """The save and the index are one gesture, not two.
+
+    A word typed into a note and saved is a word the person will search for immediately, and
+    "search finds it after you press Re-index" would make the index a thing you have to remember
+    rather than a property of the library. Removal is the same promise in the other direction: a
+    word taken out of the text must stop answering to a search, or the index quietly keeps
+    sentences the note no longer says.
+    """
+    store = BoxStore(tmp_path / "immediate.db", content_root=tmp_path)
+    try:
+        note = store.add(Box(name="Memo", box_type="note"))
+        with TestClient(create_app(store, content_root=tmp_path)) as client:
+            client.put(
+                f"/api/boxes/{note.uuid}/note",
+                json={"source": "quagginess valve", "format": "text"},
+            )
+            assert _who_says(store, "quagginess") == ["Memo"]
+            assert store.index_counts()["indexed"] == 1, "indexed by the save, not by a later pass"
+
+            client.put(
+                f"/api/boxes/{note.uuid}/note",
+                json={"source": "nothing of the sort", "format": "text"},
+            )
+            assert _who_says(store, "quagginess") == [], "the index kept a deleted sentence"
+            client.put(
+                f"/api/boxes/{note.uuid}/note",
+                json={"source": "a grommet fitting", "format": "text"},
+            )
+            assert _who_says(store, "grommet") == ["Memo"]
+    finally:
+        store.close()
