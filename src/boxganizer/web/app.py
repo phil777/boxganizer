@@ -270,9 +270,12 @@ class FilterUpdate(BaseModel):
 
     `{}` asks for every box. An unrecognised clause is refused rather than stored,
     because a folder that silently selects nothing looks like an empty library.
+
+    A string is the whole filter written as one expression (ADR 20), which is what the filter bar
+    writes; the mapping form stays for what older folders hold and for `box edit`.
     """
 
-    filter: dict[str, Any]
+    filter: dict[str, Any] | str
 
 
 class FilterBody(BaseModel):
@@ -284,6 +287,42 @@ class FilterBody(BaseModel):
     usable: bool
     broken: str
     members: list[dict[str, object]]
+
+
+class FilterClause(BaseModel):
+    """One clause of an expression, as a row of controls.
+
+    Sent so the page can draw a folder's filter as a list it can edit — add, remove, reorder —
+    without owning a second parser. Two grammars in two languages is how a control and a stored
+    filter start disagreeing about what a folder selects.
+    """
+
+    field: str
+    value: str
+    mode: str
+    negate: bool
+
+
+class FilterParse(BaseModel):
+    """Request body for reading an expression without saving it anywhere."""
+
+    expression: str
+
+
+class FilterParsed(BaseModel):
+    """What an expression means, whether it can be drawn as rows, and what it would select.
+
+    `clauses` is null when the expression nests (brackets, or a mix of `and` with `or`): there is
+    then no row order that would still mean the same thing after a reorder, so the text field is
+    the editor and the page says so instead of drawing a list that would lie.
+    """
+
+    expression: str
+    describes: str
+    usable: bool
+    broken: str
+    join: str
+    clauses: list[FilterClause] | None
 
 
 class LinkCreate(BaseModel):
@@ -2032,6 +2071,37 @@ def create_app(
             members=[_brief(child) for child in store.children(box.uuid)],
         )
 
+    @app.post("/api/filters/parse", response_model=FilterParsed)
+    def parse_filter_expression(payload: FilterParse) -> FilterParsed:
+        """Read one filter expression without touching any folder.
+
+        The filter bar needs this to keep its controls and the text in the field the same filter:
+        the grammar, the wording, and the decision about what can be drawn as a list all live in
+        `filters.py`, and the page must not hold a copy of any of them.
+        """
+        asked = filters.parse_expression_filter(payload.expression)
+        rows = filters.editable_clauses(asked.root)
+        join = "or" if isinstance(asked.root, filters.Alternative) else "and"
+        return FilterParsed(
+            expression=asked.expression
+            if asked.usable
+            else filters.render_expression(asked.root)
+            if asked.root is not None
+            else asked.expression,
+            describes=asked.describe(),
+            usable=asked.usable,
+            broken=asked.broken,
+            join=join,
+            clauses=None
+            if rows is None
+            else [
+                FilterClause(
+                    field=row.field_name, value=row.value, mode=row.mode, negate=row.negate
+                )
+                for row in rows
+            ],
+        )
+
     @app.put("/api/boxes/{ref}/filter", response_model=FilterBody)
     def write_filter(ref: str, payload: FilterUpdate, store: StoreDep) -> FilterBody:
         """Set a dynamic folder's filter, and update the link table to match it.
@@ -2040,7 +2110,14 @@ def create_app(
         when a filter is edited through `box edit` or a raw config write.
         """
         box = _resolving_box(store, ref)
-        asked = filters.parse(payload.filter)
+        # the string form is stored under the key that means "this is an expression", because
+        # `filters.parse` deliberately refuses a bare string: a value this version used to
+        # reject must not quietly gain a meaning in somebody's already-filed library
+        asked = filters.parse(
+            {filters.EXPRESSION_KEY: payload.filter}
+            if isinstance(payload.filter, str)
+            else payload.filter
+        )
         if not asked.usable:
             raise HTTPException(
                 status_code=422,

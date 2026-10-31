@@ -563,6 +563,80 @@ pre.text {
 }
 .children-view.drop-target { border-color: var(--accent); background: var(--panel); }
 
+/* The filter bar: one field holding the expression, and the controls that write into it. */
+.filter-expression {
+  flex: 1 1 16rem;
+  min-width: 10rem;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.82rem;
+  padding: 0.2rem 0.4rem;
+}
+
+.filter-builder {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.filter-builder select,
+.filter-builder input,
+.filter-builder button {
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.12rem 0.3rem;
+}
+
+.filter-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1 1 100%;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.filter-row select,
+.filter-row input,
+.filter-row button {
+  font: inherit;
+  font-size: 0.76rem;
+  padding: 0.1rem 0.3rem;
+}
+
+.filter-row-controls {
+  border-top: 1px dashed var(--line);
+  padding-top: 0.25rem;
+}
+
+.filter-nested {
+  font-size: 0.76rem;
+  font-style: italic;
+}
+
+.filter-value {
+  flex: 0 1 8rem;
+  min-width: 5rem;
+}
+
+.filter-broken {
+  flex: 1 1 100%;
+  color: var(--accent);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.filter-lost {
+  flex: 1 1 100%;
+  font-size: 0.74rem;
+  font-style: italic;
+}
+
 /* What a dynamic folder asks for, and the controls to change it. */
 .filter-bar {
   display: flex;

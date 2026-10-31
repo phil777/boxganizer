@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from boxganizer.filters import Lookup, parse, parse_expression_filter
+from boxganizer.filters import (
+    Lookup,
+    editable_clauses,
+    parse,
+    parse_expression,
+    parse_expression_filter,
+    render_expression,
+)
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
@@ -260,3 +267,78 @@ def test_a_regex_where_words_are_asked_is_refused_rather_than_left_dead() -> Non
         asked = parse_expression_filter(bad)
         assert not asked.usable, bad
         assert "words, not characters" in asked.broken, bad
+
+
+def test_the_rows_the_bar_draws_are_the_clauses_the_expression_holds() -> None:
+
+    for text in (
+        "type:note",
+        "type:note and tag:urgent",
+        "name:a or name:b or name:c",
+        "not type:note and tag:urgent",
+        'type:note and not name:"weekly log"',
+        "resource:/\\.pdf$/",
+    ):
+        rows = editable_clauses(parse_expression(text))
+        assert rows is not None, text
+        rebuilt = expression_from_rows(rows, "or" if " or " in text else "and")
+        assert render_expression(parse_expression(rebuilt)) == render_expression(
+            parse_expression(text)
+        ), text
+
+
+def test_an_expression_that_groups_has_no_row_order_that_means_the_same_thing() -> None:
+    for text in ("(type:note or type:pdf) and tag:x", "not (name:a or name:b)", "a and b or c"):
+        assert editable_clauses(parse_expression(text)) is None, text
+
+
+def expression_from_rows(rows: object, join: str) -> str:
+    """The JavaScript rule, restated here so the two cannot drift silently.
+
+    `app.js` builds the text from the rows the API handed it; this says the same construction,
+    in the same order, produces an expression that parses to the same tree.
+    """
+    parts = []
+    for row in rows:  # type: ignore[attr-defined]
+        body = f"/{row.value}/" if row.mode == "regex" else row.value  # type: ignore[attr-defined]
+        if " " in body:
+            body = f'"{body}"'
+        parts.append(f"{'not ' if row.negate else ''}{row.field_name}:{body}")  # type: ignore[attr-defined]
+    return f" {join} ".join(parts)
+
+
+def test_a_regular_expression_keeps_the_operators_inside_it() -> None:
+    """`resource:/meter|photo/` is one value, not a value, an `or`, and a broken value.
+
+    This is the shape people reach for first when a filter needs two words, and reading it as
+    three tokens would turn "matches either" into "matches the first, or a syntax error" — a
+    filter that quietly selects something else than it looks like.
+    """
+    for text, field, pattern in (
+        ("resource:/meter|photo/", "resource", "meter|photo"),
+        ('name:/a|"b"/', "name", 'a|"b"'),
+        ("type:/^note$|^markdown$/", "type", "^note$|^markdown$"),
+        ("not name:/x|y/", "name", "x|y"),
+    ):
+        asked = parse_expression_filter(text)
+        assert asked.usable, f"{text}: {asked.broken}"
+        assert asked.root is not None
+        row = editable_clauses(asked.root)
+        assert row is not None, text
+        clause = row[-1]
+        assert (clause.field_name, clause.value, clause.mode) == (field, pattern, "regex"), text
+        # and it still means the same thing written back out
+        assert render_expression(parse_expression(render_expression(asked.root))) == (
+            render_expression(asked.root)
+        ), text
+
+
+def test_a_regex_asking_for_a_slash_is_still_a_regex_not_a_split_value() -> None:
+    """`name:/^\\/etc/` keeps its escaped slash, and a value that never closes is refused."""
+    slash = parse_expression_filter("name:/a\\/b/")
+    assert slash.usable, slash.broken
+    assert editable_clauses(slash.root)[-1].value == "a\\/b"
+
+    unclosed = parse_expression_filter("name:/unclosed")
+    assert not unclosed.usable
+    assert "written /like this/" in unclosed.broken

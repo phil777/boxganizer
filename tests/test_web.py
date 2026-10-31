@@ -1961,13 +1961,80 @@ def test_a_dynamic_folder_shows_its_filter_and_the_way_to_change_it(client: Test
         "await api.filter(box.uuid)",
         'apply.dataset.action = "apply-filter"',
         'again.dataset.action = "resolve-folder"',
-        "await api.setFilter(box.uuid, wanted)",
         "await api.resolveFolder(box.uuid)",
+        # the bar holds one expression field, and the builder writes into that same field rather
+        # than keeping a private model the text could contradict
+        'expression.className = "filter-expression";',
+        "async function renderFilterRows(",
+        "expression.value = expressionFromRows(rows, join);",
+        # the rows come from the server's parse, so the page owns no second grammar
+        "data = await api.parseFilter(text);",
+        'button.dataset.action = "move-clause";',
+        'remove.dataset.action = "remove-clause";',
+        'add.dataset.action = "add-clause";',
+        "groups clauses with brackets, so it is edited in the field",
+        "await api.setFilter(box.uuid, text)",
+        "async function commit(text)",
+        # a refused expression is answered where it was typed, and the folder is not reloaded
+        # into a membership the server never accepted
+        "complaint.textContent = error.message;",
+        "function storedExpression(filter)",
     ):
         assert needle in script, needle
+    # every field of the grammar is reachable from the controls, not only from the keyboard
+    for field in (
+        'value: "type"',
+        'value: "name"',
+        'value: "tag"',
+        'value: "content"',
+        'value: "resource"',
+    ):
+        assert field in script, field
+    for join in ('value: "and"', 'value: "or"', 'value: "not"'):
+        assert join in script, join
     # a cabinet is everything by definition, so it is said and not edited
     assert 'says.textContent = "holds every box in the library, and this one";' in script
-    assert ".filter-bar" in client.get("/static/app.css").text
+    css = client.get("/static/app.css").text
+    for rule in (
+        ".filter-bar",
+        ".filter-expression",
+        ".filter-rows",
+        ".filter-row",
+        ".filter-broken",
+    ):
+        assert rule in css, rule
+
+
+def test_the_api_reads_an_expression_without_saving_it(client: TestClient) -> None:
+    """The bar asks the server what a filter means, instead of keeping its own parser.
+
+    `clauses` is a list for a chain the controls can draw, and null when the expression groups —
+    a reorder of a bracketed group would silently change what the folder selects.
+    """
+    answer = client.post(
+        "/api/filters/parse",
+        json={"expression": 'type:note and not name:"weekly log"'},
+    )
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["usable"] is True
+    assert body["join"] == "and"
+    assert [(row["field"], row["value"], row["negate"]) for row in body["clauses"]] == [
+        ("type", "note", False),
+        ("name", "weekly log", True),
+    ]
+
+    grouped = client.post(
+        "/api/filters/parse", json={"expression": "(type:note or type:pdf) and tag:x"}
+    )
+    assert grouped.status_code == 200
+    assert grouped.json()["usable"] is True
+    assert grouped.json()["clauses"] is None
+
+    broken = client.post("/api/filters/parse", json={"expression": "type:note and"})
+    assert broken.json()["usable"] is False
+    assert broken.json()["broken"]
+    assert broken.json()["clauses"] is None
 
 
 def test_the_desktop_is_one_scaled_canvas_so_icons_stay_on_the_picture(

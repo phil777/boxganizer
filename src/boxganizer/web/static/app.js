@@ -79,6 +79,11 @@ const api = {
   thumbnailUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/thumbnail`,
   root: () => request("/api/root"),
   filter: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/filter`),
+  parseFilter: (expression) =>
+    request("/api/filters/parse", {
+      method: "POST",
+      body: JSON.stringify({ expression }),
+    }),
   setFilter: (ref, value) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/filter`, {
       method: "PUT",
@@ -3739,44 +3744,68 @@ async function renderFilterEditor(bar, says, box, ctx, token) {
   says.textContent = info.usable ? `holds every box where ${info.describes}` : info.describes;
   says.dataset.usable = String(info.usable);
 
-  const nameInput = document.createElement("input");
-  nameInput.type = "search";
-  nameInput.placeholder = "name contains";
-  nameInput.value = info.filter.name || "";
-  nameInput.setAttribute("aria-label", "Names must contain");
+  // One text field holds the filter, because the filter is one expression (ADR 20) and the
+  // page is an editor for it, not a second representation of it. The controls underneath write
+  // into that field; they never hold a private copy of the filter, so there is no way for the
+  // two halves to disagree about what the folder selects.
+  const expression = document.createElement("input");
+  expression.type = "text";
+  expression.className = "filter-expression";
+  expression.spellcheck = false;
+  expression.setAttribute("aria-label", "Filter expression");
+  expression.placeholder = 'type:note and tag:urgent and not name:"draft"';
+  expression.value = storedExpression(info.filter);
+  bar.append(expression);
 
-  const typeSelect = document.createElement("select");
-  typeSelect.setAttribute("aria-label", "Type must be");
-  const anyType = document.createElement("option");
-  anyType.value = "";
-  anyType.textContent = "any type";
-  typeSelect.append(anyType);
-  [...state.types.values()]
-    .filter((entry) => !entry.abstract)
-    .forEach((entry) => {
-      const option = document.createElement("option");
-      option.value = entry.key;
-      option.textContent = `${entry.icon} ${entry.label}`;
-      typeSelect.append(option);
-    });
-  typeSelect.value = info.filter.type || "";
+  const complaint = document.createElement("span");
+  complaint.className = "filter-broken";
+  complaint.hidden = true;
+  bar.append(complaint);
 
   const apply = document.createElement("button");
   apply.type = "button";
   apply.dataset.action = "apply-filter";
   apply.textContent = "Apply filter";
-  apply.addEventListener("click", async () => {
-    const wanted = {};
-    if (nameInput.value.trim()) wanted.name = nameInput.value.trim();
-    if (typeSelect.value) wanted.type = typeSelect.value;
-    try {
-      const answer = await api.setFilter(box.uuid, wanted);
-      ctx.status(`filter set: ${answer.describes}`);
-      ctx.reload();
-    } catch (error) {
-      ctx.status(`filter refused: ${error.message}`, true);
+  apply.addEventListener("click", () => commit(expression.value.trim()));
+
+  bar.append(apply);
+
+  expression.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit(expression.value.trim());
     }
   });
+
+  // A folder written before the grammar may filter on metadata, which an expression does not
+  // carry. Saying so beats dropping a clause the person cannot see being dropped.
+  if (info.filter.metadata && Object.keys(info.filter.metadata).length) {
+    const note = document.createElement("span");
+    note.className = "filter-lost muted";
+    note.textContent = "this folder also filters on metadata; applying an expression replaces that";
+    bar.append(note);
+  }
+
+  const rows = document.createElement("div");
+  rows.className = "filter-rows";
+  bar.append(rows);
+
+  // The says line is the server's sentence about the current text, so it is redrawn from every
+  // parse: a person reads what their folder would hold before they apply it.
+  const paint = (data) => {
+    says.textContent = data.usable ? `holds every box where ${data.describes}` : data.describes;
+    says.dataset.usable = String(data.usable);
+  };
+  const drawRows = () => renderFilterRows(rows, expression, says, complaint, paint);
+  expression.addEventListener("change", () => {
+    // A change that reports the text the rows were already drawn from is not new information.
+    // This matters because a click on a clause's own button blurs the field first, and that
+    // blur used to start a second render of the text as it was *before* the click — which then
+    // finished after it and painted the clause back.
+    if (expression.value.trim() === (rows.dataset.drawn || "").trim()) return;
+    drawRows();
+  });
+  await drawRows();
 
   const again = document.createElement("button");
   again.type = "button";
@@ -3793,8 +3822,291 @@ async function renderFilterEditor(bar, says, box, ctx, token) {
       ctx.status(`could not re-apply the filter: ${error.message}`, true);
     }
   });
+  bar.append(again);
 
-  bar.append(nameInput, typeSelect, apply, again);
+  async function commit(text) {
+    complaint.hidden = true;
+    try {
+      const answer = await api.setFilter(box.uuid, text);
+      ctx.status(`filter set: ${answer.describes}`);
+      ctx.reload();
+    } catch (error) {
+      // The reason belongs here, in the bar, next to the words that caused it — and the folder
+      // must not be reloaded into a state the server refused.
+      complaint.textContent = error.message;
+      complaint.hidden = false;
+      says.dataset.usable = "false";
+    }
+  }
+}
+
+/**
+ * The stored filter as one expression, for the field.
+ *
+ * A filter written the old way (a mapping of clauses) is rendered into the new form rather than
+ * hidden behind a "this folder is legacy" state, because the person has to be able to see and
+ * edit what their folder actually does. `metadata` has no expression form, and the caller says
+ * so when it is present.
+ */
+function storedExpression(filter) {
+  if (typeof filter === "string") return filter;
+  if (filter && typeof filter.expression === "string") return filter.expression;
+  const parts = [];
+  if (filter && filter.type) parts.push(`type:${quoteTerm(filter.type)}`);
+  if (filter && filter.name) parts.push(`name:${quoteTerm(filter.name)}`);
+  if (filter && filter.resource) parts.push(`resource:${quoteTerm(filter.resource)}`);
+  return parts.join(" and ");
+}
+
+function quoteTerm(value) {
+  const text = String(value);
+  return /[\s()|&"']/.test(text) || text === "" ? `"${text}"` : text;
+}
+
+/**
+ * The controls under a folder's expression: one row per clause, and the list writes the text.
+ *
+ * The rows are drawn from what the **server** parsed (ADR 20), not from a second parser here.
+ * The page holding its own copy of the grammar would be two grammars — and the first symptom is
+ * pretty controls that disagree with the stored filter about what the folder selects. So: the
+ * field is the filter, the server reads it, this draws the reading, and every edit here produces
+ * text for the field, which is read again the same way a typed filter is.
+ */
+let filterRowsSeq = 0;
+
+async function renderFilterRows(host, expression, says, complaint, onParsed) {
+  // Every edit of a clause re-reads the whole expression from the server, and two of those reads
+  // can be in flight at once — typing fast, or a hand edit landing while a click is still being
+  // drawn. Whoever started first must then be the one to throw away its answer, or an old parse
+  // paints rows for a filter the field no longer holds. Same rule as pane generation, same
+  // reason: an asynchronous page has to say which render it is still speaking for.
+  const seq = ++filterRowsSeq;
+  const stale = () => seq !== filterRowsSeq;
+  const text = expression.value.trim();
+  let data = null;
+  try {
+    data = await api.parseFilter(text);
+  } catch (error) {
+    if (!stale()) host.replaceChildren(noteRow(`filter could not be read: ${error.message}`));
+    return;
+  }
+  if (stale()) return;
+  onParsed(data);
+  host.replaceChildren();
+
+  if (!data.usable) {
+    // Nothing is drawn under a filter that could not be read: the reason belongs in the row
+    // above, next to the words that caused it, and a half-drawn list of rows would imply the
+    // folder was understood.
+    complaint.textContent = data.broken;
+    complaint.hidden = false;
+    return;
+  }
+  complaint.hidden = true;
+
+  if (data.clauses === null || data.clauses === undefined) {
+    // Nested groups have no row order that survives a reorder, so the field keeps them.
+    host.append(noteRow("groups clauses with brackets, so it is edited in the field"));
+    return;
+  }
+
+  const rows = data.clauses.map((clause) => ({ ...clause }));
+  let join = data.join || "and";
+
+  const rebuild = () => {
+    expression.value = expressionFromRows(rows, join);
+    render();
+  };
+
+  const render = async () => {
+    if (stale()) return;
+    host.dataset.drawn = expression.value.trim();
+    host.replaceChildren();
+    rows.forEach((row, index) => host.append(rowFor(row, index)));
+    host.append(controlRow());
+    await sync();
+  };
+
+  // Ask the server what the current text means, then redraw from that answer. Every edit —
+  // here or in the field — ends up going through this, which is what keeps the two in step.
+  const sync = async () => {
+    let data2 = null;
+    try {
+      data2 = await api.parseFilter(expression.value.trim());
+    } catch (error) {
+      if (stale()) return;
+      complaint.textContent = error.message;
+      complaint.hidden = false;
+      return;
+    }
+    if (stale()) return;
+    if (data2.usable) {
+      complaint.hidden = true;
+    } else {
+      complaint.textContent = data2.broken;
+      complaint.hidden = false;
+    }
+    onParsed(data2);
+  };
+
+  const rowFor = (row, index) => {
+    const line = document.createElement("div");
+    line.className = "filter-row";
+
+    const negate = select(
+      "Negate",
+      [
+        { value: "", label: "with" },
+        { value: "not", label: "without" },
+      ],
+      row.negate ? "not" : "",
+    );
+    const field = select(
+      "Field",
+      [
+        { value: "type", label: "type" },
+        { value: "name", label: "name" },
+        { value: "tag", label: "tag" },
+        { value: "content", label: "words" },
+        { value: "resource", label: "resource" },
+      ],
+      row.field,
+    );
+    const mode = select(
+      "Match",
+      [
+        { value: "text", label: "contains" },
+        { value: "regex", label: "matches /regex/" },
+      ],
+      row.mode,
+    );
+    const wordsOnly = row.field === "tag" || row.field === "content";
+    if (wordsOnly) {
+      mode.value = "text";
+      mode.disabled = true;
+      mode.title = "tags and words are asked in words; a regular expression belongs on the field";
+    }
+
+    const value = document.createElement("input");
+    value.type = "text";
+    value.className = "filter-value";
+    value.setAttribute("aria-label", "Value to match");
+    value.value = row.value;
+    if (row.field === "tag" && typeof ensureTagOptions === "function") {
+      value.setAttribute("list", "tag-options");
+      ensureTagOptions();
+    }
+
+    const move = (label, delta, at) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.action = "move-clause";
+      button.textContent = label;
+      button.setAttribute("aria-label", `${label} clause ${at + 1}`);
+      // one rule per arrow, not one for both: with two clauses, a single "either end disables
+      // both" test leaves nothing clickable and the contract to reorder clauses is a lie
+      button.disabled = delta < 0 ? at === 0 : at === rows.length - 1;
+      button.addEventListener("click", () => {
+        const other = at + delta;
+        const held = rows[at];
+        rows[at] = rows[other];
+        rows[other] = held;
+        rebuild();
+      });
+      return button;
+    };
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.dataset.action = "remove-clause";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", "Remove this clause");
+    remove.addEventListener("click", () => {
+      rows.splice(index, 1);
+      rebuild();
+    });
+
+    const changed = () => {
+      row.negate = negate.value === "not";
+      row.field = field.value;
+      row.mode = mode.disabled ? "text" : mode.value;
+      row.value = value.value.trim();
+      rebuild();
+    };
+    [negate, field, mode].forEach((control) => control.addEventListener("change", changed));
+    value.addEventListener("input", () => {
+      row.value = value.value.trim();
+    });
+    value.addEventListener("change", changed);
+
+    line.append(negate, field, mode, value, move("↑", -1, index), move("↓", 1, index), remove);
+    return line;
+  };
+
+  const controlRow = () => {
+    const line = document.createElement("div");
+    line.className = "filter-row filter-row-controls";
+
+    const joins = select(
+      "Combine clauses with",
+      [
+        { value: "and", label: "match every clause (and)" },
+        { value: "or", label: "match any clause (or)" },
+      ],
+      join,
+    );
+    joins.addEventListener("change", () => {
+      join = joins.value;
+      rebuild();
+    });
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.dataset.action = "add-clause";
+    add.textContent = "Add clause";
+    add.addEventListener("click", () => {
+      // A new row starts empty and stays out of the expression until it has a value, so an
+      // unfinished clause cannot quietly become "name contains nothing" and empty the folder.
+      rows.push({ field: "name", value: "", mode: "text", negate: false });
+      render();
+    });
+
+    line.append(joins, add);
+    return line;
+  };
+
+  await render();
+}
+
+function noteRow(text) {
+  const note = document.createElement("div");
+  note.className = "filter-nested muted";
+  note.textContent = text;
+  return note;
+}
+
+function select(label, options, chosen) {
+  const node = document.createElement("select");
+  node.setAttribute("aria-label", label);
+  options.forEach((option) => {
+    const item = document.createElement("option");
+    item.value = option.value;
+    item.textContent = option.label;
+    node.append(item);
+  });
+  if (chosen !== undefined && chosen !== null) node.value = chosen;
+  return node;
+}
+
+/** The expression a list of rows stands for, in the one syntax the server reads. */
+function expressionFromRows(rows, join) {
+  return rows
+    .filter((row) => row.value !== "")
+    .map((row) => {
+      const body = row.mode === "regex" ? `/${row.value}/` : quoteTerm(row.value);
+      return `${row.negate ? "not " : ""}${row.field}:${body}`;
+    })
+    .join(` ${join} `);
 }
 
 function childTile(child, parent, ctx) {

@@ -51,6 +51,11 @@ field   := type | name | tag | content | resource
 * **Juxtaposition ANDs.** `type:note urgent` is two conditions with the word left out. Nobody
   writes `and` between two things they mean together, and reading the pair as one search term
   would silently *widen* a filter that was being narrowed.
+* **A regex keeps the operators inside it.** `resource:/meter|photo/` is one value: the lexer reads
+  a slash-delimited value to its closing slash, honouring `\/`, before it looks for `|`, `&` or a
+  bracket. Without that rule the same text is three tokens — `/meter`, `or`, `photo/` — so the
+  filter a person wrote for two words would silently become a filter for one word and a syntax
+  error, which is the worst kind of mistake to make in a language that is supposed to be typed.
 * **A regex is written with slashes**, `/\.pdf$/`, or with an explicit `re:` prefix. A value that
   starts with a slash and never closes is an error naming both spellings, not a literal search for
   a slash: nobody puts a leading slash in a search string meaning the slash, and the case where
@@ -67,7 +72,20 @@ library in the folder**. A typo would look like the library had changed rather t
 had. So `broken` carries the reason, `matches` returns False for every box, `describe()` prints the
 complaint, and the page shows it in the folder rather than showing an empty list or an all-ones.
 
-### 4. Tags and words are looked up, never reasoned about here
+### 4. The bar edits a list, and stops when the expression is not a list
+
+The filter bar draws one row per clause — negate, field, plain-or-regex, value — plus move up,
+move down, remove, and one switch between `and` and `or`. It asks the **server** to parse
+(`POST /api/filters/parse`) and draws what comes back, because a JavaScript copy of this grammar
+would be a second grammar: the first symptom would be pretty controls disagreeing with the stored
+filter about what a folder holds.
+
+A grouped expression — `(a or b) and c`, or `not (a or b)` — has **no row order that survives a
+reorder**, so the parse returns `clauses: null` and the bar says the expression is edited in the
+field. Drawing it as rows anyway would let one click on a ↓ button change what the folder selects.
+The same answer is given for an unreadable expression: no rows, one line naming the reason.
+
+### 5. Tags and words are looked up, never reasoned about here
 
 `filters.py` knows boxes and nothing else — no database, no index, no tag tree. Two fields need
 answers from outside:
@@ -85,7 +103,7 @@ not "ignore this clause" — ignoring it would add boxes — and not "match ever
 nothing, exactly as a broken clause does, because an unanswered question has no evidence in the
 box's favour.
 
-### 5. Old stored filters are untouched, and a bare string is still an error
+### 6. Old stored filters are untouched, and a bare string is still an error
 
 A mapping without an `expression` key parses to the same flat clauses, with `root` left `None`, and
 `as_config()` writes it back in the same shape it came in. No migration rewrites anyone's folders,
@@ -96,7 +114,7 @@ give a value this version **rejected** a meaning it never had — a typo silentl
 "name contains pdf" in a library somebody already filed. The new form has its own key, which is
 what `as_config()` writes, so there is exactly one way to store an expression.
 
-### 6. Words about a filter keep the brackets
+### 7. Words about a filter keep the brackets
 
 `describe()` is for a human deciding whether this folder is right, and `not a or b` reads as
 `(not a) or b` to a hurried eye, while `not type contains 'x'` reads as a comparison against a

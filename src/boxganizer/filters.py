@@ -298,7 +298,8 @@ _TOKEN = re.compile(
     | (?P<or>\|\||\||\bor\b)
     | (?P<and>&&|\band\b)
     | (?P<not>!|\bnot\b)
-    | (?P<regex>/[^/\n]+/)                     # /plain regex/
+    | (?P<field_regex>\w+:/(?:\\.|[^/\\\n])+/)  # name:/meter|photo/ — one value, pipes and all
+    | (?P<regex>/(?:\\.|[^/\\\n])+/)              # /plain regex/
     | (?P<quoted>"[^"]*"|'[^']*')               # "a phrase with spaces"
     | (?P<word>[^\s()|"']+)                    # bare, or field:value
     """,
@@ -385,6 +386,15 @@ def _parse_unary(tokens: list[tuple[str, str]]) -> tuple[Node, list[tuple[str, s
             ),
             tokens[2:],
         )
+    if kind == "field_regex":
+        # A regular expression on a field is one value, and the tokeniser has to know that:
+        # `/meter|photo/` otherwise lexes as `/meter`, the or-operator, and `photo/`, which is
+        # how a filter for two words silently became a filter for one word or a broken one.
+        field_name, _, body = text.partition(":")
+        folded = field_name.casefold()
+        if folded not in FIELDS:
+            raise ExpressionError(f"no filter asks about {folded!r}; try {', '.join(FIELDS)}")
+        return _term_for(folded, body), tokens[1:]
     return _parse_term(kind, text), tokens[1:]
 
 
@@ -453,6 +463,50 @@ def _compile(pattern: str) -> re.Pattern[str]:
 def render_expression(node: Node) -> str:
     """The expression that would rebuild *node*."""
     return node.text() if not isinstance(node, All) or node.parts else ""
+
+
+@dataclass(frozen=True)
+class ClauseEdit:
+    """One clause as a row of controls: what to ask, how to match it, whether to negate it."""
+
+    field_name: str
+    value: str
+    mode: str = "text"
+    negate: bool = False
+
+
+def editable_clauses(node: Node | None) -> list[ClauseEdit] | None:
+    """A uniform chain of clauses as rows, or None when the expression cannot be a list.
+
+    The bar edits a *list*: one row per clause, one join for the whole folder. An expression
+    with brackets inside — `not (a or b)`, or `a and b or c`, which parses as a group — has no
+    row order that would mean the same thing after a reorder, so this declines and the text
+    field stays the editor. Guessing a flat reading of a nested expression would let a click
+    quietly change what a folder selects, which is the one thing a filter editor must not do.
+    """
+    if node is None:
+        return None
+    if isinstance(node, All) and not node.parts:
+        return []
+    if not isinstance(node, All | Alternative):
+        flattened = _clause_of(node)
+        return [flattened] if flattened is not None else None
+    rows: list[ClauseEdit] = []
+    for part in node.parts:
+        row = _clause_of(part)
+        if row is None:
+            return None
+        rows.append(row)
+    return rows
+
+
+def _clause_of(node: Node) -> ClauseEdit | None:
+    """A term, or the negation of one term — anything deeper is a group and has no row."""
+    negate = isinstance(node, Negation)
+    inner = node.part if isinstance(node, Negation) else node
+    if not isinstance(inner, Term):
+        return None
+    return ClauseEdit(inner.field_name, inner.value, inner.mode, negate)
 
 
 def needs_of(node: Node) -> Needs:

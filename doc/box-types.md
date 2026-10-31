@@ -160,6 +160,38 @@ path proposes `directory`. `boxganizer/paths.py` holds the one URI parser that
 inference, the file endpoint and the type all share — three readers of the same
 field was three chances to disagree about `file://` quoting.
 
+## How a dynamic folder decides what it holds
+
+A dynamic folder stores one expression. The page writes it, the store reads it, and both use the
+same parser, so the controls and the text cannot disagree about what the folder selects (ADR 20).
+
+    type:note and (tag:urgent or name:"boiler fix") and not resource:/\.pdf$/
+
+Five fields are available:
+
+| Field | Asks | Plain text means | Regex means |
+| --- | --- | --- | --- |
+| `type` | the box's type | type is this, or below it in the hierarchy | pattern matched against the type key |
+| `name` | the box's name | case-insensitive substring | pattern matched against the name |
+| `tag` | the tag tree | carries this tag, or any tag below it | refused: a tag is a name, not a pattern |
+| `content` | the box's own words | the same query the search box runs | refused: the index is stemmed full text |
+| `resource` | the resource URI | case-insensitive substring | pattern matched against the URI |
+
+`and`, `or` and `not` combine clauses, brackets group them, and writing clauses next to each other
+means `and`. A value with spaces is quoted: `name:"boiler fix"`. A regular expression is written
+`/like this/`.
+
+Three rules keep a folder honest:
+
+* **An expression that cannot be read holds nothing, and says why.** A half-read filter would
+  easily end up with no conditions, and no conditions means the whole library in the folder.
+* **The filter bar shows one row per clause** — field, plain or regex, value, and whether to
+  negate it — with add, remove, move up, move down, and a single switch between `and` and `or`.
+  A grouped expression (`(a or b) and c`) is edited in the field: no row order means the same
+  thing after a reorder, so the bar says so instead of drawing a list that would lie.
+* **Membership is written by the store**, whenever the filter is edited or any box changes. A box
+  the filter stops selecting is taken back out.
+
 ## Adding a type
 
 1. Pick the module that owns the branch (`content.py`, `resource.py`,
