@@ -164,7 +164,11 @@ body {
     visibility 0s linear 0s;
 }
 
-#canvas:not(.config-open) .box-config {
+/* Folded: the row is there and takes no room. On the main screen the canvas decides; inside a
+   viewport each pane decides for the rows of its own box, and marks them itself (`pane-folded`),
+   because the canvas cannot be six opinions at once. */
+#canvas:not(.config-open) .box-config:not(.vp-pane *),
+.box-config.pane-folded {
   max-height: 0;
   opacity: 0;
   overflow: hidden;
@@ -186,7 +190,8 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .box-config,
-  #canvas:not(.config-open) .box-config {
+  #canvas:not(.config-open) .box-config,
+  .box-config.pane-folded {
     transition: none;
   }
 }
@@ -205,6 +210,18 @@ body {
   line-height: 1;
   padding: 0.15rem 0.4rem;
   cursor: pointer;
+}
+
+.vp-btn.gear {
+  /* the same glyph as the header's gear, the same size as its pane's other buttons */
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0.1rem 0.3rem;
+}
+
+.vp-btn.gear[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .main-head .gear[aria-expanded="true"] {

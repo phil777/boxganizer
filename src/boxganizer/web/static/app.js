@@ -493,6 +493,23 @@ const context = {
  * deciding what the other's click meant, and the tree model would exist twice, in two languages,
  * with the same name.
  */
+/* A pane folds its own settings row, and no one else's.
+
+   On the main screen the gear in the header decides for the one box on screen, and the canvas carries
+   that decision. A viewport has several boxes at once: one gear for all of them would mean unfolding
+   a grid's columns when you came to change the checklist beside it, and — worse — a second person's
+   viewport would move under the first's click. So the state lives on the pane, and the rows carry the
+   mark their own pane made: `pane-folded`. The mark is set from the pane after every render rather
+   than by a selector, because "the pane this row belongs to" means the *innermost* one, and a
+   viewport nested inside a viewport has two answers to give.
+*/
+function foldPaneRows(pane) {
+  const open = pane.classList.contains("config-open");
+  pane.querySelectorAll(".box-config").forEach((row) => {
+    if (row.closest(".vp-pane") === pane) row.classList.toggle("pane-folded", !open);
+  });
+}
+
 const viewportView = {
   async render(canvas, box, ctx, mode, opts = {}) {
     const token = paneGeneration;
@@ -581,6 +598,10 @@ const viewportView = {
           body.replaceChildren();
           await renderContentIn(body, target, paneContext(target), { depth: 0, embedded: false });
           drawCrumbs();
+          foldPaneRows(pane);
+          // A control with nothing to control is decoration: the same rule that hides the header's
+          // gear when a box has no settings row applies to a pane's.
+          gear.hidden = !body.querySelector(".box-config");
         },
         async reload() {
           if (trail.length) await self.open(trail[trail.length - 1].uuid, { trail: trail.slice(0, -1) });
@@ -646,7 +667,23 @@ const viewportView = {
         entry.className = `vp-btn vp-icon vp-icon-${direction}`;
         return entry;
       };
+      const gear = document.createElement("button");
+      gear.type = "button";
+      gear.className = "vp-btn gear";
+      gear.dataset.action = "vp-config";
+      gear.dataset.node = node;
+      gear.innerHTML = "&#9881;";
+      gear.title = "Show this viewport's settings";
+      gear.setAttribute("aria-expanded", "false");
+      gear.setAttribute("aria-label", `settings for viewport ${node}`);
+      gear.addEventListener("click", () => {
+        const open = pane.classList.toggle("config-open");
+        gear.setAttribute("aria-expanded", String(open));
+        gear.title = open ? "Hide this viewport's settings" : "Show this viewport's settings";
+        foldPaneRows(pane);
+      });
       buttons.append(
+        gear,
         split("horizontal", "Split this viewport side by side"),
         split("vertical", "Split this viewport above and below"),
         button("×", "Close this viewport", "vp-close"),
@@ -661,6 +698,9 @@ const viewportView = {
       if (!layout.closable) close.title = "the last viewport cannot be closed; split one first";
 
       drawCrumbs();
+      // Views repaint their controls in place — a grid that changes its column count, a folder that
+      // switches layout — and a row drawn after the pane's last render would arrive unfolded.
+      new MutationObserver(() => foldPaneRows(pane)).observe(body, { childList: true, subtree: true });
       if (shown) {
         // The pane's box is drawn from the brief the layout already carried, then filled in.
         self.draw(shown);

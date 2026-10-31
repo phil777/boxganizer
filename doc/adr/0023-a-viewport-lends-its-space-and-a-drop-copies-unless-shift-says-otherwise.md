@@ -142,3 +142,24 @@ after a drop onto a map, with the status naming it), Shift takes it off the orig
 (`["TheMap","cabinet"]`), and nothing was ever deleted. A mindmap **node** keeps its own gesture — it
 fills the node with a box that already belongs to the map, and says so when one does not — which is
 why the board is where filing happens. No page errors.
+
+---
+
+## Amendment (2026-11-10): a pane folds its own settings, and its own only
+
+The first build left one thing shared that should not have been. The settings row of every view is
+folded behind a gear in the page's top line, and the fold was a class on `#canvas` — written for a
+screen showing one box. Inside a viewport that meant a single gear for four boxes: opening the grid's
+columns also unfolded the checklist beside it, and a second person's viewport would move under the
+first's click.
+
+Each pane carries the decision now. The pane's path line holds its own gear, and the rows take the mark
+their own pane made (`pane-folded`) rather than a selector guessing which container a row belongs to —
+in a viewport inside a viewport there are two answers, and the innermost is the one that governs.
+`#canvas:not(.config-open)` therefore excludes anything inside a pane (`:not(.vp-pane *)`), so the
+header gear folds the box on the main screen and nothing else.
+
+The gear hides itself in a pane whose box has no settings row, exactly as it does on the main screen:
+a control with nothing to control is decoration. A checklist shows none — its head reports a tally, it
+does not configure — and neither does a note, whose toolbar is how you write (ADR on the note switch),
+nor a viewport, whose panes each have one of their own.

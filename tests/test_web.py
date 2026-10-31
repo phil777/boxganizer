@@ -3142,7 +3142,7 @@ def test_a_boxs_settings_are_hidden_until_asked_for_and_take_room_when_shown(
     assert "display: flex;" in canvas and "flex-direction: column;" in canvas
     assert "#canvas > .box-config {" in css
     assert "#canvas > :not(.box-config) {" in css
-    closed = css[css.index("#canvas:not(.config-open) .box-config {") :]
+    closed = css[css.index("#canvas:not(.config-open) .box-config:not(.vp-pane *)") :]
     closed = closed[: closed.index("}")]
     assert "max-height: 0;" in closed and "visibility: hidden;" in closed
     # hidden must mean hidden to a keyboard, not merely invisible
@@ -3150,7 +3150,25 @@ def test_a_boxs_settings_are_hidden_until_asked_for_and_take_room_when_shown(
     assert "position: absolute" not in closed, "the drawer may not lie over the box"
     assert "prefers-reduced-motion" in css
 
+    # ...and inside a viewport the canvas is not the one deciding. `:not(.vp-pane *)` takes the
+    # pane rows out from under the header's gear, and `pane-folded` is the mark a pane puts on the
+    # rows of its own box — the innermost pane wins, which no selector says about nested viewports.
+    fold = css[css.index("#canvas:not(.config-open) .box-config:not(.vp-pane *)") :]
+    fold = fold[: fold.index("{")]
+    assert ".box-config.pane-folded" in fold
+    assert "#canvas:not(.config-open) .box-config {" not in css, "the canvas must not fold a pane"
     script = client.get("/static/app.js").text
+    pane = script[script.index("function foldPaneRows(pane)") :]
+    pane = pane[: pane.index("const viewportView")]
+    assert 'row.closest(".vp-pane") === pane' in pane
+    shell = script[script.index("function paneShell(node, shown)") :]
+    shell = shell[: shell.index('pane.addEventListener("dragover"')]
+    assert 'gear.className = "vp-btn gear";' in shell
+    assert 'gear.setAttribute("aria-expanded", "false");' in shell
+    assert "pane.classList.toggle(" in shell
+    assert "gear.hidden = !body.querySelector(" in shell
+    assert "new MutationObserver(() => foldPaneRows(pane))" in shell
+
     assert 'const CONFIG_STORAGE_KEY = "boxganizer.configHeader";' in script
     assert 'localStorage.getItem(CONFIG_STORAGE_KEY) === "1"' in script
     assert 'el("canvas").classList.toggle("config-open", configHeaderOpen)' in script
