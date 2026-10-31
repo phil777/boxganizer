@@ -497,6 +497,11 @@ def show_in_window(layout: Layout, child: str) -> tuple[Layout, str]:
     if layout.kind != "windowed":
         raise ViewportError("a tiling viewport shows a box in a pane you name")
     wanted = (child or "").strip()
+    if not wanted:
+        # Nothing to show is "+ window": an empty window asked for is an empty window given. The
+        # fill-an-empty-window rule is only for a box, and applying it here answered the request by
+        # changing nothing at all.
+        return open_window(layout, "")
     for window in layout.windows:
         if not window.child:
             return assign(layout, window.node, wanted), window.node

@@ -71,16 +71,22 @@ const api = {
       method: "PUT",
       body: JSON.stringify({ config }),
     }),
-  link: (parent, child) =>
+  link: (parent, child, moveFrom = null) =>
     request(`/api/boxes/${encodeURIComponent(parent)}/children`, {
       method: "POST",
-      body: JSON.stringify({ child }),
+      body: JSON.stringify({ child, move_from: moveFrom }),
     }),
   rawUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/raw`,
   thumbnailUrl: (ref) => `/api/boxes/${encodeURIComponent(ref)}/thumbnail`,
   root: () => request("/api/root"),
   filter: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/filter`),
   sensorPalette: () => request("/api/sensors/palette"),
+  viewports: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/viewports`),
+  viewportAction: (ref, action, payload = {}) =>
+    request(`/api/boxes/${encodeURIComponent(ref)}/viewports/${action}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   parseFilter: (expression) =>
     request("/api/filters/parse", {
       method: "POST",
@@ -406,6 +412,53 @@ async function saveSetting(key, value, { rerender = true } = {}) {
   }
 }
 
+
+/**
+ * Say what is being dragged, and where it came from.
+ *
+ * The origin travels with the drag rather than living in a page-wide "current drag" variable: the
+ * drop may land in another pane, another viewport, or after a re-render, and a variable set at
+ * dragstart would then be describing a drag that already happened.
+ */
+function dragBox(event, uuid, fromUuid) {
+  event.dataTransfer.setData("text/plain", uuid);
+  if (fromUuid) event.dataTransfer.setData("application/x-boxganizer-from", fromUuid);
+  event.dataTransfer.effectAllowed = "copyMove";
+}
+
+/**
+ * A box was dropped on something that can hold it.
+ *
+ * **A plain drop copies the link**: the box is filed where it landed and stays where it came from.
+ * That is the gesture people mean when they drag a note into a project — "this belongs here too" —
+ * and it is the one that can be undone by taking it back out. **Holding Shift moves it**: the
+ * server takes the link off the origin in the same request that files it here, so there is no
+ * half-way state where the box is nowhere. The server decides the difference; this only says which
+ * was asked for, because two implementations of "move" would drift into different ideas of what
+ * happened to a box, and that is a bug a person discovers by losing something.
+ *
+ * `after` is for views that place as well as file (a grid cell, a desktop, a map node): the link
+ * runs first so a move is finished before the placement, which then finds the box already a child.
+ */
+async function dropBox(event, ctx, targetUuid, { after = null, label = null } = {}) {
+  const dragged = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
+  if (!dragged || dragged === targetUuid) return false;
+  const from = event.dataTransfer ? event.dataTransfer.getData("application/x-boxganizer-from") : "";
+  const move = Boolean(event.shiftKey && from && from !== targetUuid);
+  try {
+    if (move) await api.link(targetUuid, dragged, from);
+    if (after) await after(move);
+    else if (!move) await api.link(targetUuid, dragged);
+    // The two sentences say what changed, because the two gestures look identical and people need
+    // to be able to tell, after the fact, whether the box is still where it was.
+    ctx.status(move ? "moved here; it is no longer filed where you dragged it from" : label || "filed here");
+    return true;
+  } catch (error) {
+    ctx.status(`cannot drop it here: ${error.message}`, true);
+    return false;
+  }
+}
+
 /* ------------------------------------------------------------ main pane ---- */
 
 const context = {
@@ -420,6 +473,512 @@ const context = {
   removeFrom,
   edit: openEditBoxModal,
 };
+
+
+/* -- view ports: the boxes that keep their space ----------------------------
+ *
+ * A viewport box is never replaced by what you open in it: it lends its space out, one box per
+ * pane, each pane with a path line of its own. Everything below paints the layout the server
+ * computed (`/api/boxes/…/viewports`) and sends back *intents* — split, close, move the bar, show
+ * this box here. The page never edits a tree and posts it: two pages open on one box would each be
+ * deciding what the other's click meant, and the tree model would exist twice, in two languages,
+ * with the same name.
+ */
+const viewportView = {
+  async render(canvas, box, ctx, mode, opts = {}) {
+    const token = paneGeneration;
+    const wrap = document.createElement("div");
+    wrap.className = "viewport-view";
+    wrap.dataset.uuid = box.uuid;
+    canvas.append(wrap);
+
+    let layout = null;
+    try {
+      layout = await api.viewports(box.uuid);
+    } catch (error) {
+      wrap.append(emptyMessage(`this viewport could not be read: ${error.message}`));
+      return;
+    }
+    if (!stillOnScreen(token)) return;
+
+    const refresh = async () => {
+      try {
+        layout = await api.viewports(box.uuid);
+      } catch (error) {
+        ctx.status(`could not re-read the viewports: ${error.message}`, true);
+        return;
+      }
+      if (stillOnScreen(token)) paint();
+    };
+
+    // The action routes answer with the layout they produced, so the page adopts that answer
+    // instead of asking again: a re-read could come back behind another tab's write and paint a
+    // layout that is neither the old one nor the one this click asked for.
+    const apply = (next) => {
+      if (next && next.kind) layout = next;
+    };
+
+    const act = async (action, payload, { repaint = true } = {}) => {
+      try {
+        apply(await api.viewportAction(box.uuid, action, payload));
+        if (repaint) paint();
+      } catch (error) {
+        // The server's own sentence, because it is the one that knows why: "the last viewport
+        // cannot be closed; split it first" is advice, "422" is not.
+        ctx.status(error.message, true);
+      }
+    };
+
+    function paneShell(node, shown) {
+      const pane = document.createElement("div");
+      pane.className = "vp-pane";
+      pane.dataset.node = node;
+
+      const path = document.createElement("div");
+      path.className = "vp-path";
+      const crumbs = document.createElement("div");
+      crumbs.className = "vp-crumbs";
+      const buttons = document.createElement("div");
+      buttons.className = "vp-buttons";
+      path.append(crumbs, buttons);
+
+      const body = document.createElement("div");
+      body.className = "vp-body";
+      pane.append(path, body);
+
+      /* Each pane walks on its own path. One shared trail would mean that opening a box in the
+         left pane changed what "back" means in the right one — and the whole point of the box is
+         that two things are open at once. */
+      const trail = shown ? [shown] : [];
+      const self = {
+        node,
+        el: pane,
+        crumbs,
+        body,
+        trail,
+        async open(ref, options = {}) {
+          let target = null;
+          try {
+            target = await api.box(ref);
+          } catch (error) {
+            ctx.status(error.message, true);
+            return;
+          }
+          trail.length = 0;
+          trail.push(...(options.trail || []), target);
+          await self.draw(target);
+        },
+        async draw(target) {
+          body.replaceChildren();
+          await renderContentIn(body, target, paneContext(target), { depth: 0, embedded: false });
+          drawCrumbs();
+        },
+        async reload() {
+          if (trail.length) await self.open(trail[trail.length - 1].uuid, { trail: trail.slice(0, -1) });
+        },
+      };
+
+      function paneContext(target) {
+        return {
+          ...context,
+          open: (ref, options = {}) => self.open(ref, options),
+          trail: () => trail,
+          reload: () => self.reload(),
+          status: ctx.status,
+          // A setting written from inside a pane is still a write to that box, so it goes to the
+          // shared helper — but the re-render must not take the whole viewport with it.
+          saveSetting: (key, value, options = {}) =>
+            saveSettingFor(target, key, value, { onSaved: () => self.reload() }, options),
+        };
+      }
+
+      function drawCrumbs() {
+        crumbs.replaceChildren();
+        if (!trail.length) {
+          const empty = document.createElement("span");
+          empty.className = "vp-empty muted";
+          empty.textContent = "empty — open a box here, or drop one in";
+          crumbs.append(empty);
+          return;
+        }
+        trail.forEach((entry, index) => {
+          if (index) crumbs.append(document.createTextNode("›"));
+          const crumb = document.createElement("button");
+          crumb.type = "button";
+          crumb.dataset.action = "vp-crumb";
+          crumb.textContent = `${entry.icon} ${entry.name}`;
+          crumb.disabled = index === trail.length - 1;
+          crumb.addEventListener("click", () =>
+            self.open(entry.uuid, { trail: trail.slice(0, index) })
+          );
+          crumbs.append(crumb);
+        });
+      }
+
+      const button = (label, title, action, extra = {}) => {
+        const node2 = document.createElement("button");
+        node2.type = "button";
+        node2.className = "vp-btn";
+        node2.dataset.action = action;
+        node2.textContent = label;
+        node2.title = title;
+        node2.setAttribute("aria-label", `${title} (viewport ${node})`);
+        Object.assign(node2, extra);
+        return node2;
+      };
+
+      buttons.append(
+        button("◫", "Split this viewport horizontally", "vp-split"),
+        button("◨", "Split this viewport vertically", "vp-split"),
+        button("×", "Close this viewport", "vp-close"),
+      );
+      buttons.querySelectorAll("button").forEach((entry) => {
+        entry.dataset.node = node;
+      });
+      const close = buttons.querySelector('[data-action="vp-close"]');
+      // Disabled, not hidden and not explained afterwards: the last viewport is the box's last way
+      // of showing anything, and a click that silently does nothing teaches people to click twice.
+      close.disabled = !layout.closable;
+      if (!layout.closable) close.title = "the last viewport cannot be closed; split one first";
+
+      drawCrumbs();
+      if (shown) {
+        // The pane's box is drawn from the brief the layout already carried, then filled in.
+        self.draw(shown);
+      } else {
+        body.append(emptyMessage("Nothing open here."));
+      }
+
+      pane.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = event.shiftKey ? "move" : "copy";
+        pane.classList.add("drop-target");
+      });
+      pane.addEventListener("dragleave", () => pane.classList.remove("drop-target"));
+      pane.addEventListener("drop", async (event) => {
+        pane.classList.remove("drop-target");
+        // A drop the box *inside* this pane already claimed — a folder that filed it, a grid cell
+        // that placed it, a checklist line that took it — is not the pane's to answer too. Without
+        // this guard the same drop filed the box in the folder it landed on *and* in the viewport
+        // box, so one gesture produced two parents and the person watching saw a box appear where
+        // they had not put it. Same convention as the root view's holder and the canvas pane.
+        if (event.defaultPrevented) return;
+        const dragged = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
+        if (!dragged) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const from = event.dataTransfer.getData("application/x-boxganizer-from");
+        const move = Boolean(event.shiftKey && from && from !== dragged);
+        try {
+          if (move) await api.link(box.uuid, dragged, from);
+          apply(await api.viewportAction(box.uuid, "open", { node, child: dragged }));
+          paint();
+          ctx.status(
+            move
+              ? "moved into this viewport"
+              : "opened here; the box is still filed where you dragged it from"
+          );
+        } catch (error) {
+          ctx.status(`cannot open it here: ${error.message}`, true);
+        }
+      });
+
+      return pane;
+    }
+
+    function renderNode(entry) {
+      if (entry.node && entry.child !== undefined && !entry.direction) {
+        // The tree says *which node is where*; the briefs that came with the same answer say what
+        // each node shows. A leaf on its own has no box — asking it for one is how a pane renders
+        // empty while the layout says it is holding something.
+        return paneShell(entry.node, briefs.get(entry.node) || null);
+      }
+      const band = document.createElement("div");
+      band.className = `vp-band vp-${entry.direction}`;
+      band.dataset.node = entry.node;
+      band.dataset.ratio = String(entry.ratio);
+      const first = renderNode(entry.first);
+      const second = renderNode(entry.second);
+      const divider = document.createElement("div");
+      divider.className = "vp-divider";
+      divider.dataset.node = entry.node;
+      divider.dataset.action = "vp-divider";
+      divider.setAttribute("role", "separator");
+      divider.setAttribute("aria-orientation", entry.direction === "vertical" ? "horizontal" : "vertical");
+      divider.setAttribute("aria-label", "drag to change the share of space between these viewports");
+      divider.setAttribute("tabindex", "0");
+      wireDivider(band, divider, entry);
+      band.append(first, divider, second);
+      // After the children are in: the ratio is applied to the panes of this band, and applied
+      // before them it found nothing to size — so a divider dragged to 0.48 and saved came back
+      // at the CSS default on the next load, which is the one thing a saved layout must not do.
+      applyRatio(band, entry.ratio);
+      return band;
+    }
+
+    function applyRatio(band, ratio) {
+      const share = Math.min(Math.max(ratio, 0.05), 0.95);
+      const kids = band.querySelectorAll(":scope > *");
+      kids.forEach((kid) => {
+        if (kid.classList.contains("vp-divider")) kid.style.flex = "0 0 7px";
+        else kid.style.flexGrow = kid === kids[0] ? String(share) : String(1 - share);
+      });
+      band.dataset.ratio = String(share);
+    }
+
+    /**
+     * Drag the bar. The panes follow the pointer at once; the server is told once, at the end.
+     *
+     * The listeners live on `document` for the duration of the drag rather than on the bar: the
+     * bar moves out from under the pointer as the ratio changes, and a capture set on an element
+     * that is replaced mid-gesture ends the drag early — which is how a first version saved the
+     * ratio the pointer had *started* on, and left a person with a divider that snapped back.
+     */
+    function wireDivider(band, divider, entry) {
+      let share = null;
+
+      const move = (event) => {
+        if (share === null) return;
+        const rect = band.getBoundingClientRect();
+        const raw =
+          entry.direction === "vertical"
+            ? (event.clientY - rect.top) / rect.height
+            : (event.clientX - rect.left) / rect.width;
+        share = Math.min(Math.max(raw, 0.05), 0.95);
+        applyRatio(band, share);
+      };
+
+      const end = async () => {
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", end);
+        document.removeEventListener("pointercancel", end);
+        divider.classList.remove("dragging");
+        if (share === null) return;
+        const value = share;
+        share = null;
+        try {
+          apply(
+            await api.viewportAction(box.uuid, "ratio", {
+              node: entry.node,
+              ratio: Number(value.toFixed(4)),
+            }),
+          );
+        } catch (error) {
+          ctx.status(`the divider did not stay: ${error.message}`, true);
+        }
+        // No repaint: the panes are already where the person put them, and rebuilding them would
+        // throw away the scroll position of every box open in them.
+      };
+
+      // A mouse-drag that crosses something draggable hands the gesture to the browser's own drag,
+      // which fires `pointercancel` and ends this one — which is how a first version saved the
+      // ratio the pointer had started on instead of the one it reached.
+      divider.addEventListener("dragstart", (event) => event.preventDefault());
+      divider.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        share = Number(band.dataset.ratio || 0.5);
+        divider.classList.add("dragging");
+        document.addEventListener("pointermove", move);
+        document.addEventListener("pointerup", end);
+        document.addEventListener("pointercancel", end);
+      });
+
+      divider.addEventListener("keydown", (event) => {
+        const step = event.shiftKey ? 0.1 : 0.02;
+        const keys = ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"];
+        if (!keys.includes(event.key)) return;
+        event.preventDefault();
+        const current = Number(band.dataset.ratio || 0.5);
+        const next = keys.indexOf(event.key) < 2 ? current - step : current + step;
+        share = Math.min(Math.max(next, 0.05), 0.95);
+        applyRatio(band, share);
+        const value = share;
+        share = null;
+        api
+          .viewportAction(box.uuid, "ratio", { node: entry.node, ratio: Number(value.toFixed(4)) })
+          .then(apply)
+          .catch((error) => ctx.status(`the divider did not stay: ${error.message}`, true));
+      });
+    }
+
+    function paintTiling() {
+      briefs = new Map((layout.panes || []).map((pane) => [pane.node, pane.box || null]));
+      const root = renderNode(layout.tree);
+      root.classList.add("vp-root");
+      wrap.append(root);
+    }
+
+    function paintWindows() {
+      const stage = document.createElement("div");
+      stage.className = "vp-stage";
+      briefs = new Map((layout.panes || []).map((pane) => [pane.node, pane.box || null]));
+      const order = [...(layout.order || [])];
+      order.forEach((nodeId, index) => {
+        const entry = (layout.panes || []).find((pane) => pane.node === nodeId);
+        if (!entry) return;
+        stage.append(windowFrame(entry, index, order.length));
+      });
+      wrap.append(stage);
+    }
+
+    function windowFrame(entry, index, total) {
+      const frame = document.createElement("div");
+      frame.className = "vp-window";
+      frame.dataset.node = entry.node;
+      frame.dataset.action = "vp-focus";
+      frame.style.left = `${entry.x}px`;
+      frame.style.top = `${entry.y}px`;
+      frame.style.width = `${entry.width}px`;
+      frame.style.height = `${entry.height}px`;
+      frame.style.zIndex = String(10 + index);
+      if (index === total - 1) frame.dataset.focused = "true";
+
+      const pane = paneShell(entry.node, entry.box);
+      pane.classList.add("vp-in-window");
+      frame.append(pane);
+
+      // Clicking anywhere in a window raises it. Raising changes the pile and nothing else: the
+      // other windows keep their place, because "bring this one forward" is not "rearrange my desk".
+      frame.addEventListener("pointerdown", async () => {
+        if (frame.dataset.focused === "true") return;
+        frame.parentElement.querySelectorAll(".vp-window").forEach((other) => {
+          delete other.dataset.focused;
+        });
+        frame.dataset.focused = "true";
+        try {
+          apply(await api.viewportAction(box.uuid, "raise", { node: entry.node }));
+        } catch (error) {
+          ctx.status(`could not raise that window: ${error.message}`, true);
+        }
+      });
+
+      dragWindow(frame, pane.querySelector(".vp-path"), entry, "move");
+      const handle = document.createElement("div");
+      handle.className = "vp-resize";
+      handle.dataset.action = "vp-resize";
+      handle.setAttribute("aria-label", "resize this window");
+      frame.append(handle);
+      dragWindow(frame, handle, entry, "resize");
+      return frame;
+    }
+
+    /** Move or resize a window by dragging. The frame follows the pointer; the box is told once. */
+    function dragWindow(frame, grab, entry, kind) {
+      if (!grab) return;
+      let start = null;
+      grab.addEventListener("pointerdown", (event) => {
+        if (event.target.closest("button")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        grab.setPointerCapture(event.pointerId);
+        start = {
+          x: event.clientX,
+          y: event.clientY,
+          left: frame.offsetLeft,
+          top: frame.offsetTop,
+          width: frame.offsetWidth,
+          height: frame.offsetHeight,
+        };
+      });
+      grab.addEventListener("pointermove", (event) => {
+        if (!start || !grab.hasPointerCapture?.(event.pointerId)) return;
+        const dx = event.clientX - start.x;
+        const dy = event.clientY - start.y;
+        if (kind === "move") {
+          frame.style.left = `${Math.max(0, start.left + dx)}px`;
+          frame.style.top = `${Math.max(0, start.top + dy)}px`;
+        } else {
+          frame.style.width = `${Math.max(120, start.width + dx)}px`;
+          frame.style.height = `${Math.max(60, start.height + dy)}px`;
+        }
+      });
+      const finish = async (event) => {
+        if (!start) return;
+        grab.releasePointerCapture?.(event.pointerId);
+        start = null;
+        const payload = { node: entry.node };
+        if (kind === "move") {
+          payload.x = frame.offsetLeft;
+          payload.y = frame.offsetTop;
+        } else {
+          payload.width = frame.offsetWidth;
+          payload.height = frame.offsetHeight;
+        }
+        try {
+          // The frame already sits where it was dragged; the answer is kept, not repainted, so the
+          // window does not jump back for a moment while the write lands.
+          apply(await api.viewportAction(box.uuid, kind === "move" ? "move" : "resize", payload));
+        } catch (error) {
+          ctx.status(`that window did not stay put: ${error.message}`, true);
+        }
+      };
+      grab.addEventListener("pointerup", finish);
+      grab.addEventListener("pointercancel", finish);
+    }
+
+    let briefs = new Map();
+
+    function paint() {
+      wrap.replaceChildren();
+      if (layout.problems && layout.problems.length) {
+        const warn = document.createElement("p");
+        warn.className = "vp-problem";
+        warn.setAttribute("role", "alert");
+        warn.textContent = `the saved layout could not be read: ${layout.problems.join("; ")}. It starts as one viewport.`;
+        wrap.append(warn);
+      }
+      if (layout.kind === "windowed") {
+        const bar = document.createElement("div");
+        bar.className = "vp-toolbar box-config";
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "vp-btn";
+        add.dataset.action = "vp-window";
+        add.textContent = "+ window";
+        add.title = "Open another window";
+        bar.append(add);
+        wrap.append(bar);
+        paintWindows();
+      } else {
+        paintTiling();
+      }
+      queueMicrotask(() => syncConfigGear());
+    }
+
+    wrap.addEventListener("click", async (event) => {
+      const hit = event.target.closest("button[data-action], div[data-action='vp-divider']");
+      if (!hit) return;
+      const action = hit.dataset.action;
+      if (action === "vp-split") {
+        const vertical = hit.textContent === "◨";
+        await act("split", { node: hit.dataset.node, direction: vertical ? "vertical" : "horizontal" });
+      } else if (action === "vp-close") {
+        await act("close", { node: hit.dataset.node });
+      } else if (action === "vp-window") {
+        await act("window", {});
+      }
+    });
+
+    paint();
+  },
+};
+
+/**
+ * Save a setting on a box that is not the one the page is centred on.
+ *
+ * `saveSetting` writes to `state.current`, which is the viewport box when a pane is being edited.
+ * A pane's own setting — its columns, its sort, its surface — belongs to the box inside the pane,
+ * so this is the same write aimed at the right box, followed by a re-render of that pane alone.
+ */
+async function saveSettingFor(box, key, value, { onSaved }, options = {}) {
+  const config = { ...(box.config || {}), [key]: value };
+  try {
+    await api.setConfig(box.uuid, config);
+    if (onSaved) await onSaved();
+  } catch (error) {
+    status(`could not save ${key}: ${error.message}`, true);
+  }
+}
 
 /* -- tags: chips under the top line ------------------------------------------
  *
@@ -784,8 +1343,13 @@ const MAX_EMBED_DEPTH = 2;
  * The root view shows its one child at full size, so it does not set the flag.
  */
 async function renderContent(container, box, { depth, embedded = true, cell = false }) {
+  await renderContentIn(container, box, context, { depth, embedded, cell });
+}
+
+/** The same, with a caller's context — which is how a viewport pane gets its own navigation. */
+async function renderContentIn(container, box, ctx, { depth = 0, embedded = true, cell = false } = {}) {
   const view = viewFor(box) || views.get("*");
-  await view.render(container, box, context, "content", { embedded, depth, cell });
+  await view.render(container, box, ctx, "content", { embedded, depth, cell });
 }
 
 function emptyMessage(text) {
@@ -2255,11 +2819,11 @@ function wirePaneDrops() {
     const box = paneAcceptsDrops();
     if (!box) return;
     event.preventDefault();
-    const dragged = readDraggedFile(event);
-    if (dragged) {
+    const draggedFile = readDraggedFile(event);
+    if (draggedFile) {
       try {
         const takesChildren = (typeOf(box) || {}).allows_children !== false;
-        await createBoxFromDraggedFile(dragged, takesChildren ? box.uuid : null);
+        await createBoxFromDraggedFile(draggedFile, takesChildren ? box.uuid : null);
         openBox(box.uuid); // land back where the drop happened, now showing what arrived
       } catch (error) {
         status(`cannot make a box from that file: ${error.message}`, true);
@@ -2406,12 +2970,32 @@ async function init() {
   sideList.addEventListener("drop", async (event) => {
     sideList.classList.remove("drop-target");
     const dragged = readDraggedFile(event);
-    if (!dragged) return;
+    if (dragged) {
+      event.preventDefault();
+      try {
+        await createBoxFromDraggedFile(dragged, null);
+      } catch (error) {
+        status(`cannot make a box from that file: ${error.message}`, true);
+      }
+      return;
+    }
+    // A box dropped back on the list is not a filing: every box is already in the list, so there
+    // is nothing to copy a link into. Shift is the gesture with a meaning here — "take it out of
+    // the box I dragged it from" — and without Shift the drop changes nothing, which is the only
+    // answer that cannot lose somebody's filing.
+    const uuid = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
+    const from = event.dataTransfer ? event.dataTransfer.getData("application/x-boxganizer-from") : "";
+    if (!uuid || !event.shiftKey || !from) {
+      if (uuid) status(uuid && from ? "it is still filed where it was; hold Shift to take it out" : "");
+      return;
+    }
     event.preventDefault();
     try {
-      await createBoxFromDraggedFile(dragged, null);
+      await api.unlink(from, uuid);
+      status("taken out of the box it came from; the box itself is untouched");
+      await refreshSide();
     } catch (error) {
-      status(`cannot make a box from that file: ${error.message}`, true);
+      status(`could not unfile it: ${error.message}`, true);
     }
   });
 
@@ -2696,22 +3280,20 @@ registerView("grid", {
       label.className = "muted";
       label.textContent = `Not placed (${orphans.length}): drag one onto a cell`;
       strip.append(label);
-      orphans.forEach((child) => strip.append(chipFor(child, ctx)));
+      orphans.forEach((child) => strip.append(chipFor(child, ctx, box.uuid)));
       canvas.append(strip);
     }
   },
 });
 
-function chipFor(child, ctx) {
+function chipFor(child, ctx, fromUuid) {
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = "chip";
+  chip.dataset.from = fromUuid || "";
   chip.draggable = true;
   chip.append(iconElement(child), document.createTextNode(` ${child.name}`));
-  chip.addEventListener("dragstart", (event) => {
-    event.dataTransfer.setData("text/plain", child.uuid);
-    event.dataTransfer.effectAllowed = "move";
-  });
+  chip.addEventListener("dragstart", (event) => dragBox(event, child.uuid, chip.dataset.from));
   chip.addEventListener("dblclick", () => ctx.open(child.uuid, { trail: ctx.trail() }));
   return chip;
 }
@@ -2829,8 +3411,7 @@ function gridCell(box, ctx, row, column, child, depth) {
 
   cell.addEventListener("dragstart", (event) => {
     if (!child) return;
-    event.dataTransfer.setData("text/plain", child.uuid);
-    event.dataTransfer.effectAllowed = "move";
+    dragBox(event, child.uuid, box.uuid);
   });
   cell.addEventListener("dragover", (event) => {
     event.preventDefault();
@@ -2841,14 +3422,10 @@ function gridCell(box, ctx, row, column, child, depth) {
   cell.addEventListener("drop", async (event) => {
     event.preventDefault();
     cell.classList.remove("drop-target");
-    const dragged = event.dataTransfer.getData("text/plain");
-    if (!dragged) return;
-    try {
-      await api.gridPlace(box.uuid, dragged, [row, column]);
-      ctx.reload();
-    } catch (error) {
-      ctx.status(`cannot place that box here: ${error.message}`, true);
-    }
+    const placed = await dropBox(event, ctx, box.uuid, {
+      after: () => api.gridPlace(box.uuid, event.dataTransfer.getData("text/plain"), [row, column]),
+    });
+    if (placed) ctx.reload();
   });
   cell.addEventListener("dblclick", () => {
     if (child) ctx.open(child.uuid, { trail: ctx.trail() });
@@ -3070,7 +3647,7 @@ registerView("desktop", {
       label.className = "muted";
       label.textContent = `Not placed (${loose.length}): drag one onto the surface`;
       strip.append(label);
-      loose.forEach((child) => strip.append(chipFor(child, ctx)));
+      loose.forEach((child) => strip.append(chipFor(child, ctx, box.uuid)));
       wrap.append(strip);
     }
 
@@ -3087,6 +3664,11 @@ registerView("desktop", {
       surface.classList.remove("drop-target");
       const dragged = event.dataTransfer.getData("text/plain");
       if (!dragged) return;
+      if (event.shiftKey) {
+        // A move is filed first, so the tile that appears under the pointer is the box's only copy
+        const from = event.dataTransfer.getData("application/x-boxganizer-from");
+        if (from && from !== box.uuid) await api.link(box.uuid, dragged, from);
+      }
       const frame = surface.getBoundingClientRect();
       // The rect is the scaled box; the position the server keeps is in canvas
       // pixels, so the pointer's distance from the corner is divided back out.
@@ -3537,15 +4119,8 @@ registerView("root", {
       // the drop landed on.
       if (event.defaultPrevented) return;
       event.preventDefault();
-      const dragged = event.dataTransfer.getData("text/plain");
-      if (!dragged) return;
-      try {
-        await api.link(box.uuid, dragged);
-        ctx.status("the root now shows that box");
-        ctx.reload();
-      } catch (error) {
-        ctx.status(`cannot file it in the root: ${error.message}`, true);
-      }
+      const landed = await dropBox(event, ctx, box.uuid, { label: "the root now shows that box" });
+      if (landed) ctx.reload();
     });
   },
 });
@@ -3643,15 +4218,8 @@ const folderView = {
     wrap.addEventListener("drop", async (event) => {
       event.preventDefault();
       wrap.classList.remove("drop-target");
-      const dragged = event.dataTransfer.getData("text/plain");
-      if (!dragged || dragged === box.uuid) return;
-      try {
-        await api.link(box.uuid, dragged);
-        ctx.status(`filed in ${box.name}`);
-        ctx.reload();
-      } catch (error) {
-        ctx.status(`cannot file it in ${box.name}: ${error.message}`, true);
-      }
+      const landed = await dropBox(event, ctx, box.uuid, { label: `filed in ${box.name}` });
+      if (landed) ctx.reload();
     });
 
     let children = [];
@@ -4153,10 +4721,7 @@ function childTile(child, parent, ctx) {
   item.addEventListener("dblclick", () =>
     ctx.open(child.uuid, { trail: ctx.trail() })
   );
-  item.addEventListener("dragstart", (event) => {
-    event.dataTransfer.setData("text/plain", child.uuid);
-    event.dataTransfer.effectAllowed = "move";
-  });
+  item.addEventListener("dragstart", (event) => dragBox(event, child.uuid, parent.uuid));
   item.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -5373,6 +5938,8 @@ const mqttView = {
   },
 };
 
+registerView("tiling-viewport", viewportView);
+registerView("windowed-viewport", viewportView);
 registerView("mqtt", mqttView);
 
 /* -- markdown ----------------------------------------------------------------
@@ -5774,10 +6341,7 @@ async function mindmapView(canvas, box, ctx, opts = {}) {
     // A node can be dragged onto another node: the drop either fills an empty
     // placeholder or files the dragged box inside, which is what the server decides.
     tile.draggable = true;
-    tile.addEventListener("dragstart", (event) => {
-      event.dataTransfer.setData("text/plain", row.node.uuid);
-      event.dataTransfer.effectAllowed = "move";
-    });
+    tile.addEventListener("dragstart", (event) => dragBox(event, row.node.uuid, map.uuid));
     tile.addEventListener("dragover", (event) => {
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
@@ -5790,6 +6354,10 @@ async function mindmapView(canvas, box, ctx, opts = {}) {
       tile.classList.remove("drop-target");
       const dragged = event.dataTransfer.getData("text/plain");
       if (!dragged || dragged === row.node.uuid) return;
+      if (event.shiftKey) {
+        const from = event.dataTransfer.getData("application/x-boxganizer-from");
+        if (from && from !== map.uuid) await api.link(map.uuid, dragged, from);
+      }
       await fillNode(row, dragged);
     });
     return tile;
@@ -6078,7 +6646,12 @@ async function mindmapView(canvas, box, ctx, opts = {}) {
     board.classList.remove("drop-target");
     const dragged = event.dataTransfer.getData("text/plain");
     if (!dragged || dragged === map.uuid) return;
-    await applied(api.link(map.uuid, dragged), "filed as a branch of the centre");
+    const from = event.dataTransfer.getData("application/x-boxganizer-from");
+    const move = event.shiftKey && from && from !== map.uuid;
+    await applied(
+      api.link(map.uuid, dragged, move ? from : null),
+      move ? "moved here, off the box it came from" : "filed as a branch of the centre"
+    );
   });
 
   paint(map);
@@ -7092,12 +7665,16 @@ async function checklistView(canvas, box, ctx, opts = {}) {
       line.classList.add("is-target");
     });
     line.addEventListener("dragleave", () => line.classList.remove("is-target"));
-    line.addEventListener("drop", (event) => {
+    line.addEventListener("drop", async (event) => {
       event.preventDefault();
       event.stopPropagation();
       line.classList.remove("is-target");
       const uuid = event.dataTransfer.getData("text/plain");
       if (!uuid || uuid === box.uuid || item.refs.includes(uuid)) return;
+      const from = event.dataTransfer.getData("application/x-boxganizer-from");
+      // Shift while dropping onto a line means "move it here", and the save below only files it;
+      // the unlink has to happen for the origin, which this box is not.
+      if (event.shiftKey && from && from !== box.uuid) await api.link(box.uuid, uuid, from);
       const known = unattached.find((child) => child.uuid === uuid);
       item.refs.push(uuid);
       if (known) {
@@ -7124,10 +7701,7 @@ async function checklistView(canvas, box, ctx, opts = {}) {
     });
     if (!gone) {
       tag.draggable = true;
-      tag.addEventListener("dragstart", (event) => {
-        event.dataTransfer.setData("text/plain", child.uuid);
-        event.dataTransfer.effectAllowed = "move";
-      });
+      tag.addEventListener("dragstart", (event) => dragBox(event, child.uuid, box.uuid));
       // lifting an icon off a line takes the link away and leaves the box filed here
       const detach = document.createElement("span");
       detach.className = "checklist-detach";

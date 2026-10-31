@@ -73,10 +73,13 @@ other boxes. Rules in brackets are enforced by the store.
       - `parental-graph` 🌳 Parental Graph
     - `dashboard` 📊 Dashboard
     - `checklist` 📋 Checklist
-  - `viewport` 🎛️ Viewport — group
+  - `viewport` 🎛️ Viewport — group; lends its space out, so it is never replaced by what you open
     - `simple-viewport` 👁️ Simple Viewport
-    - `tiling-viewport` 🔷 Tiling Viewport
-    - `windowed-viewport` 🪟 Windowed Viewport
+    - `tiling-viewport` 🔷 Tiling Viewport — `config.viewports` holds a binary tree of panes
+      (`v1, v2, …`) and dividers (`s1, s2, …`) with a direction and a ratio per split; split, close
+      and ratio are intents the server applies and answers with the whole layout (ADR 23)
+    - `windowed-viewport` 🪟 Windowed Viewport — `config.viewports.windows` holds each window's
+      position and size, `order` the pile; move, resize, raise and close persist on the box
 ```
 
 44 types: 5 grouping levels and 39 you can put on a box.
@@ -140,6 +143,22 @@ make the type impossible to create. Required metadata is only for what the user
 knows at creation time: `ssh` needs `host` and refuses an address carrying a password,
 `mqtt` needs `topic`,
 `home-assistant` needs `entity_id`.
+
+## View ports and the drop rule
+
+A viewport box is the one kind that is never replaced by what you open in it: it keeps its space and
+lends it out, one box per pane, each pane with its own path line. The boxes it shows are its
+**children**, so `box tree` and the side pane see the same filing the page paints; the layout in
+`config` only says which pane draws which. Closing a pane unfiles its box and never deletes it, and
+the last pane cannot be closed. ADR 23.
+
+Drag a box onto another box and you get a **copy of the link** — the box is filed in both — because
+that is what dragging a note into a project means, and it is reversible by taking it back out.
+**Hold Shift and it is a move**: the same request files it here and takes it off the origin, so
+there is no moment where the box is nowhere. A box dragged out of the left-hand list has no origin,
+so Shift there cannot unfile it from anything; dropping a box onto the list changes nothing, and
+Shift on the list means "take it out of the box I dragged it from". Every drop on the page goes
+through this one rule.
 
 ## Resource analysis and proposals
 

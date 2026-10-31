@@ -440,3 +440,9 @@ def test_opening_a_window_fills_the_empty_one_before_making_another(tmp_path: Pa
         ("v1", "box-a"),
         ("v2", "box-b"),
     ]
+    third, fresh = viewports.show_in_window(second, "")
+    assert [window.node for window in third.windows] == [
+        "v1",
+        "v2",
+        fresh,
+    ], "empty means another window"

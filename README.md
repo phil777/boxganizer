@@ -214,6 +214,8 @@ whole pane takes it. What a box shows depends on what it is:
 | folder, directory, cabinet | its children, as a list or as icons; double-click opens one in place; a search box narrows the list by name or type — it starts empty every time, while the searches you have tried are remembered in the box. A **directory** box shows the top of its folder whenever it is opened, however deep the last browse went; a file in it can be dragged out — onto another box to file a new box inside it, or onto the library list to leave it unfiled — with the type inferred from the file |
 | grid               | rows and columns you set (type them or step them), one child per cell, drag to move, drop on an occupied cell to swap, right-click to create a box in a cell |
 | desktop            | icons anywhere on the surface: drag them with the pointer, drag a corner to size them, arrow-key them about, and let a magnetic grid of the size you chose pull them onto its lines. The resource, when it is a picture, is the wallpaper — right-click the bare surface to choose one or take it away. Double-click opens a box in place of the desktop. Shown in a smaller pane it is the whole desktop drawn smaller, not a corner of it: canvas, wallpaper and icons scale by one factor, so an icon stays on the same feature of the picture |
+| tiling-viewport    | its space split into panes, each showing one box with its own path line and three buttons — close, split horizontally, split vertically — and a bar between any two panes you can drag; the split, the ratio and what is open where are saved on the box |
+| windowed-viewport  | floating windows over the same space, each with its own path line; drag the title to move a window, the corner to resize it, click it to raise it, and they come back where you left them |
 | dynamic-folder     | the folder list; above it the filter as one expression, a row per clause to add, remove, reorder or negate, what the filter asks for in words, and a button to re-apply it |
 | mindmap            | the box in a rounded node at the centre, its children as branches growing left and right, each branch curved to its parent in its own colour. Click into it and the keys drive it: **Insert** a node under the one in hand, **Enter** beside it, **arrows** to walk the map, **Ctrl+↑↓** to shuffle a node among its siblings, **Ctrl+←→** to push it deeper into the map or pull it out towards the centre — read off the side the branch grows on, so Ctrl always means away from the middle or towards it, and a branch of the centre changes side instead of rising above it. Double-click, or **F2**, writes the node's name where it stands. A box dragged onto a node that nothing has been written into takes that node's place; onto any other node it is filed inside |
 | browser, web       | the page, framed; the address bar saves back to the box |
@@ -257,6 +259,14 @@ top of its range. For a value that stays text, the alternative to a styling temp
 regular expressions, each with a text and a background colour, first match wins, plus a default.
 The server decides where the value sits; the page only paints it, so an opened box, a grid cell and
 `box value` cannot disagree. ADR 22.
+
+**View ports** are the way to look at two boxes at once. A viewport box is never replaced by what
+you open in it: a *tiling* viewport splits its space into panes (split, drag the bar, close a pane
+and its sibling takes the room back — the last pane refuses), a *windowed* one floats windows you
+move, resize, raise and close. What a viewport shows, it holds: those boxes are its children, so the
+tree view and the side list agree with the page. Dragging a box onto another box **copies the link**
+(it is filed in both); **holding Shift moves it** (filed here, taken off where it came from, in one
+request so it is never nowhere). ADR 23.
 
 An MQTT box is the one kind that talks to something outside the machine: while
 its page is open the server subscribes to `mqtt://` or `mqtts://host[:port]/topic`

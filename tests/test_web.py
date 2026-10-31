@@ -512,7 +512,107 @@ def test_the_root_view_shows_its_one_child_content(client: TestClient) -> None:
 def test_the_root_view_accepts_a_drop(client: TestClient) -> None:
     script = client.get("/static/app.js").text
     assert 'holder.addEventListener("drop"' in script
-    assert "await api.link(box.uuid, dragged)" in script
+    assert 'await dropBox(event, ctx, box.uuid, { label: "the root now shows that box" })' in script
+
+
+def test_the_viewport_view_paints_panes_windows_and_dividers(client: TestClient) -> None:
+    """The page draws the server's layout and sends back intents, never a tree.
+
+    `applyRatio` moves the panes while the pointer is down and posts once on release: a `ratio`
+    request per pixel would be a write storm against a box, and the person dragging would be
+    editing a database instead of a layout.
+    """
+    script = client.get("/static/app.js").text
+    for needle in (
+        "const viewportView = {",
+        'registerView("tiling-viewport", viewportView);',
+        'registerView("windowed-viewport", viewportView);',
+        'pane.className = "vp-pane";',
+        'divider.className = "vp-divider";',
+        'frame.className = "vp-window";',
+        "api.viewportAction(box.uuid, action, payload)",
+        'api.viewportAction(box.uuid, "ratio", {',
+        'api.viewportAction(box.uuid, "raise", { node: entry.node }));',
+        # a gesture adopts the layout the server answered with, rather than asking again and
+        # painting a layout that is neither the old one nor the one this click asked for
+        "const apply = (next) => {",
+        "apply(await api.viewportAction(box.uuid, action, payload));",
+        # the divider's listeners live on the document for the length of the drag: the bar
+        # moves out from under the pointer, so a capture on the bar ended the drag early
+        'document.addEventListener("pointermove", move);',
+        'document.addEventListener("pointerup", end);',
+        "const value = share;",
+        'await act("split", { node: hit.dataset.node, direction:',
+        'await act("close", { node: hit.dataset.node });',
+        "close.disabled = !layout.closable;",
+        "the last viewport cannot be closed; split one first",
+        "const trail = shown ? [shown] : [];",
+        "async function renderContentIn(",
+        "async function saveSettingFor(box, key, value, { onSaved }, options = {}) {",
+        "empty — open a box here, or drop one in",
+    ):
+        assert needle in script, needle
+    # the divider is a separator the keyboard can reach too
+    assert 'divider.setAttribute("tabindex", "0");' in script
+    assert 'const keys = ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"];' in script
+    assert 'divider.setAttribute("aria-orientation"' in script
+    # a pane that receives a drop repaints the viewport, or the box is filed but not shown
+    assert (
+        'apply(await api.viewportAction(box.uuid, "open", { node, child: dragged }));' in script
+    )
+
+    css = client.get("/static/app.css").text
+    for rule in (
+        ".viewport-view",
+        ".vp-pane",
+        ".vp-path",
+        ".vp-divider",
+        ".vp-window",
+        ".vp-resize",
+        ".vp-pane.drop-target",
+    ):
+        assert rule in css, rule
+
+
+def test_every_drop_goes_through_one_copy_or_move_rule(client: TestClient) -> None:
+    """Eleven drop handlers, one decision — because a view that invented its own rule would
+    silently delete someone's filing on a gesture that looks exactly like the safe one.
+
+    A plain drop copies the link; Shift moves it; a drag from the side list has no origin, so
+    Shift there cannot take anything off anything. The page sends the intent and the server makes
+    it one atomic change, so no half of a move can fail on its own.
+    """
+    script = client.get("/static/app.js").text
+    for needle in (
+        "async function dropBox(event, ctx, targetUuid, { after = null, label = null } = {})",
+        'event.dataTransfer.setData("application/x-boxganizer-from", fromUuid)',
+        "function dragBox(event, uuid, fromUuid)",
+        "const move = Boolean(event.shiftKey && from && from !== targetUuid);",
+        # the client has to carry the origin, or every shift-drop is a silent copy — which is what
+        # it was until this line existed: the page said "moved here" while the server filed a copy
+        "link: (parent, child, moveFrom = null) =>",
+        "body: JSON.stringify({ child, move_from: moveFrom }),",
+        "await api.link(targetUuid, dragged, from);",
+        "await api.link(targetUuid, dragged);",
+        "moved here; it is no longer filed where you dragged it from",
+    ):
+        assert needle in script, needle
+    # every view that can be dropped on reaches the same rule, or files the move itself
+    for view, needle in (
+        ("folder", "await dropBox(event, ctx, box.uuid,"),
+        ("root", 'label: "the root now shows that box"'),
+        ("grid", "after: () => api.gridPlace(box.uuid"),
+        ("desktop", "if (event.shiftKey) {"),
+        ("mindmap", 'move ? "moved here, off the box it came from"'),
+        ("checklist", "await api.link(box.uuid, uuid, from);"),
+    ):
+        assert needle in script, f"{view} drop does not go through the rule"
+    # the side list starts a drag with no origin, so Shift there cannot unfile anything
+    start = script.index('item.addEventListener("dragstart"')
+    assert "dragBox(event, box.uuid)" not in script[start : start + 200], (
+        "a library row has no single origin"
+    )
+    assert 'event.dataTransfer.setData("text/plain", box.uuid);' in script[start : start + 200]
 
 
 def test_a_link_between_two_boxes_can_be_deleted(client: TestClient, populated: BoxStore) -> None:
@@ -1914,7 +2014,7 @@ def test_a_folder_takes_a_box_dropped_from_the_panel(client: TestClient) -> None
     end = script.index("function childTile(")
     folder_block = script[start:end]
     assert 'wrap.addEventListener("drop"' in folder_block
-    assert "await api.link(box.uuid, dragged);" in folder_block
+    assert "await dropBox(event, ctx, box.uuid," in folder_block
     # preventing the default is what claims the drop from the root's holder
     assert "event.preventDefault();" in folder_block
     css = client.get("/static/app.css").text
@@ -3212,6 +3312,48 @@ def test_the_page_shows_the_worded_value_and_the_editor_for_it(client: TestClien
         ".sensor-bad",
     ):
         assert rule in css, rule
+
+
+def test_dropping_a_box_copies_the_link_and_shift_moves_it(client: TestClient) -> None:
+    """The two gestures a drag can mean, with the parent set asserted on both sides.
+
+    A copy leaves the box under both boxes — "put this note in that project too" — and a move takes
+    it off the origin and onto the target, once. Neither deletes anything, and a move that claims to
+    come from a box that never held it is refused rather than quietly unfileing something.
+    """
+    origin = client.post("/api/boxes", json={"name": "Origin", "box_type": "folder"}).json()
+    target = client.post("/api/boxes", json={"name": "Target", "box_type": "folder"}).json()
+    elsewhere = client.post("/api/boxes", json={"name": "Elsewhere", "box_type": "folder"}).json()
+    box = client.post("/api/boxes", json={"name": "Cargo", "box_type": "note"}).json()
+
+    def parents() -> set[str]:
+        return {p["uuid"] for p in client.get(f"/api/boxes/{box['uuid']}").json()["parents"]}
+
+    client.post(f"/api/boxes/{origin['uuid']}/children", json={"child": box["uuid"]})
+    assert parents() == {origin["uuid"]}
+
+    copied = client.post(f"/api/boxes/{target['uuid']}/children", json={"child": box["uuid"]})
+    assert copied.status_code == 201
+    assert copied.json()["moved"] is False
+    assert parents() == {origin["uuid"], target["uuid"]}, "a plain drop is a copy of the link"
+    assert client.get(f"/api/boxes/{box['uuid']}").status_code == 200, "nothing was deleted"
+
+    refused = client.post(
+        f"/api/boxes/{elsewhere['uuid']}/children",
+        json={"child": box["uuid"], "move_from": elsewhere["uuid"]},
+    )
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"] == "not_filed_there"
+    assert parents() == {origin["uuid"], target["uuid"]}, "a refused move changed nothing"
+
+    moved = client.post(
+        f"/api/boxes/{elsewhere['uuid']}/children",
+        json={"child": box["uuid"], "move_from": origin["uuid"]},
+    )
+    assert moved.status_code == 201 and moved.json()["moved"] is True
+    assert parents() == {target["uuid"], elsewhere["uuid"]}, "off the origin, onto the target"
+    assert [c["name"] for c in client.get(f"/api/boxes/{origin['uuid']}/children").json()] == []
+    assert client.get(f"/api/boxes/{box['uuid']}").status_code == 200
 
 
 def test_the_page_draws_the_owners_scale_and_offers_the_controls_for_it(client: TestClient) -> None:

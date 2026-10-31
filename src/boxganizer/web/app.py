@@ -347,9 +347,20 @@ class FilterParsed(BaseModel):
 
 
 class LinkCreate(BaseModel):
-    """Request body for putting one box inside another."""
+    """Request body for putting one box inside another.
+
+    `move_from` turns the link into a **move**: the box is filed in this box and taken out of the
+    one named. It is a parameter of the link rather than a second request the page makes because two
+    requests are not one action — if the unlink failed after the link the box would be filed twice
+    and the page would say it had moved, and if the link failed after the unlink the box would be
+    off the shelf with nowhere new to be.
+    """
 
     child: str
+    move_from: str | None = Field(
+        default=None,
+        description="Name or uuid of the box to take the child out of, after filing it here.",
+    )
 
 
 def _store_of(request: Request) -> BoxStore:
@@ -2276,9 +2287,38 @@ def create_app(
 
     @app.post("/api/boxes/{ref}/children", status_code=201)
     def add_child(ref: str, payload: LinkCreate, store: StoreDep) -> dict[str, object]:
+        """File a box here — and, with `move_from`, stop filing it somewhere else.
+
+        A plain drop of one box onto another **copies the link**: the box ends up a child of both,
+        which is what "put a copy of this note in that project" means and what the page's own
+        wording says. Holding Shift while dropping asks for a move, and that is this parameter.
+        """
         parent = store.resolve(ref)
-        store.link(parent.uuid, payload.child)
-        return {"children": [_brief(b) for b in store.children(parent.uuid)]}
+        child_uuid = store.resolve(payload.child).uuid
+        origin = store.resolve(payload.move_from) if payload.move_from else None
+        if origin is not None:
+            # Checked before anything is filed, so a move that does not add up changes nothing at
+            # all: a box pulled out of a parent it never had, or filed in a place the page only
+            # thinks it is, is worse than a drop that did nothing.
+            filed = {child.uuid for child in store.children(origin.uuid)}
+            if child_uuid not in filed:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "not_filed_there",
+                        "reason": (
+                            f"{origin.name} does not hold that box, so nothing was moved; "
+                            "it is still filed where it was"
+                        ),
+                    },
+                )
+        store.link(parent.uuid, child_uuid)
+        if origin is not None:
+            store.unlink(origin.uuid, child_uuid)
+        return {
+            "children": [_brief(b) for b in store.children(parent.uuid)],
+            "moved": bool(payload.move_from),
+        }
 
     @app.get("/api/search")
     def search(
