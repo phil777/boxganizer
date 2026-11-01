@@ -6,20 +6,144 @@
 
 Personal knowledge management where **everything is a box**.
 
-A box holds one thing — a file, a note, a photo, a passport — and any number of
-other boxes. Boxes inside boxes give you a graph you can navigate, search and
-reshape. One store, three ways in:
+A box is one thing you keep: a scanned passport, a photograph, a PDF, a note you typed, a
+running boiler, a book you mean to read. Boxes hold other boxes too, so a folder, a project,
+a list of things to do and a mindmap are all the same kind of thing wearing different clothes.
+One SQLite file holds them all, and the same store answers to a command line, a terminal
+window and a browser — which means nothing you file is locked inside the tool you happened to
+be using.
 
-Everything runs through one command, `box`:
+What you end up with is a library you can do the four things a library has to support.
 
-| Interface   | Command        | Package          |
-| ----------- | -------------- | ---------------- |
-| CLI         | `box`          | `boxganizer.cli` |
-| Web app     | `box serve`    | `boxganizer.web` |
-| Text UI     | `box tui`      | `boxganizer.tui` |
+* **Capture** it however it arrives: a file dropped on the page becomes a box typed to match
+  its contents, a note is a box, a photo is a box, a sensor reading is a box.
+* **Organise** it without choosing one scheme: a box can sit in several parents at once, so
+  `Passport` can be under `Trip to Lisbon` and under `Identity` without either owning it.
+  Tags add a hierarchy on top, and grids, desktops, checklists and mindmaps arrange the same
+  boxes visually.
+* **Find** it again by what it is, what it is called, what it is tagged, or what its files
+  say — full-text search reads inside text and PDF files and shows the passage that answered.
+* **Keep it alive**: a dynamic folder holds whatever a saved filter matches, so a box you
+  tagged an hour ago is already in the right folder; a sensor box redraws itself when the
+  broker publishes.
 
-All three read and write the **same** SQLite database through the same core
-library, so anything you add in one shows up in the others.
+Nothing here is a graph of pretty nodes you cannot query. Every box is a row, every link is a
+row, and `box` will tell you both.
+
+## Everything is a box
+
+There are 44 types. They are not 44 unrelated features: they sit in one hierarchy with five
+grouping levels, and 39 of them are the kinds you can put on a box. Two of the levels do
+almost all the explaining.
+
+**Some boxes hold a resource.** A `file`, `image`, `pdf`, `markdown`, `text`, `directory` or
+`ssh` box points at one thing outside the library — a path, a URL, an address — and its whole
+job is to show you that thing and keep its rules. A `pdf` box refuses a `.png`. A `web` box
+insists on `http(s)`. Most resource boxes cannot contain other boxes — a picture holding a
+folder is a lie about a picture — with one deliberate exception: a `directory` points at a
+folder on disk *and* may hold boxes you file in it by hand, because that is the one place
+where the two kinds of container genuinely overlap.
+
+**Some boxes organise other boxes.** A `folder` holds whatever you put in it. A `cabinet`
+holds every box in the library. A `dynamic-folder` holds whatever its filter matches and
+refuses to have a box filed into it by hand, because the next re-list would take it back out
+(ADR 25). A `grid`, `desktop`, `checklist` or `mindmap` also organises, but it organises
+*spatially or structurally*: cell, coordinate, line, branch. A `viewport` organises your
+attention rather than your boxes — it lends its space out and shows several boxes at once.
+
+Everything else is a leaf that behaves like content: a `note` is words of boxganizer's own,
+written to a plain markdown file beside the database (ADR 14) so your library stays readable
+even if this program never ships again.
+
+Two rules hold across all of it, and both are enforced by the store rather than by the screen:
+
+* **Filing is many-to-one and never moves the box.** Dropping `Passport` into a second folder
+  adds a link; the box is not copied, and `box show` lists every parent it has.
+* **A tag's name is its identity, and its parents are never stored** (ADR 19). A box tagged
+  `boiler` answers to `home` as well, because `boiler` hangs below it — which is why a tag
+  you merely renamed can empty a dynamic folder the moment you rename it.
+
+## Three ways in
+
+All three read and write the same database, and none of them has a private feature the others
+lack for long.
+
+| Interface   | Command        | What it is for                                                     |
+| ----------- | -------------- | ------------------------------------------------------------------ |
+| CLI         | `box`          | scripts, muscle memory, and everything you want to do in a pipe    |
+| Text UI     | `box tui`      | one screen over SSH: filter, list, detail                          |
+| Web app     | `box serve`    | the whole library: content views, drag & drop, live sensors        |
+
+**The CLI** is one word after `box` — `box add`, `box list`, `box show`, `box search`,
+`box tag give`, `box link`, `box check`. Its reference is below, and it is the interface
+everything else is obliged to agree with.
+
+**The text UI** is one screen: a filter field, the list of boxes it narrows, and a detail
+panel for whatever you select. `n` makes a box, `r` re-reads the store, `escape` clears the
+filter, `q` leaves. That is the whole program. It is deliberately small — it is there for the
+machine you have only a terminal on, and it does not try to draw a picture of a desktop in
+characters.
+
+**The web app** is where the library is legible: every type has a view, boxes are dragged
+between each other, and what you see is the box's content rather than a table about it.
+
+## The web app
+
+`box serve` and open `http://127.0.0.1:8000`. One pane to find things, one pane to look at
+the thing you found.
+
+![The library: the box list down the left with the root pinned at the top, and a markdown note rendered in the main pane](doc/assets/web-library-note.png)
+
+**Left: the library.** The root is pinned first, then every box, each with its icon and type.
+The field above it searches by a box's own fields *and* by the words inside its text and PDF
+files, shows the passage that answered, and says what your words were widened to. ☰ beside
+the library name holds what belongs to the library rather than to one box: About, Check the
+library, and the two index passes. Along the bottom, in front of the count, the index reports
+itself permanently — `75 indexed`, or `2 out of date`, or `indexing…`.
+
+**Right: one box, content first.** This note is being *read*, not edited: a note shows an
+`edit` switch, and the sheet itself carries a small `read-only` / `editing` cue, so the note's
+condition is legible from wherever your eye is rather than only from the toolbar. Both
+settings live on the box. The toolbox writes markdown markers into your text and nothing else,
+and a box can be named inside a sentence as `[📋 name](boxganizer:uuid)` — an ordinary markdown
+link on a scheme that reaches nothing until this page decides that clicking it opens the box.
+
+![A grid box: four boxes placed in named cells of a grid whose rows and columns were typed in](doc/assets/web-grid.png)
+
+**A grid is rows and columns you set** — type the numbers or step them — with one child per
+cell. Drag a box into a cell to place it; drop on an occupied cell and the two swap;
+right-click a cell to make a box there. Nothing about the arrangement is decorative: the
+placement is stored on the grid box, so it comes back. A `desktop` is the same idea with the
+lines taken away (icons anywhere, a wallpaper if the box points at a picture, a magnetic grid
+only if you ask for one), and a `checklist` is the same idea as a markdown list you can tick,
+written out as plain `- [ ]` lines beside the database.
+
+![A dynamic folder with its filter unfolded: one row per clause, the expression it writes, and the one box it currently matches](doc/assets/web-filter.png)
+
+**A dynamic folder is a saved question.** The filter is one expression — `tag:kitchen or
+name:pot` — and the rows above the list are an editor for it: one row per clause, add, remove,
+reorder, negate, with the expression rewritten as you go and the two never able to disagree
+(ADR 20). Membership is written into the links table, so `box show`, `box tree` and every box's
+`in` list see a filtered folder exactly like one filled by hand. And because the folder is a
+question, filing into it by hand is refused — the sentence in the screenshot's own corner tells
+you to change the box instead — while a tag renamed three windows ago re-cuts it immediately.
+
+![A viewport box split into two panes: a grid on the left, the dynamic folder on the right, each with its own path line and gear](doc/assets/web-viewport.png)
+
+**A viewport lends its space.** Opening a box from another box replaces it, which is right for
+filing and useless for comparison; a viewport box is never replaced. Split a pane side by side
+or above and below, drag the bar, close a pane and its sibling reclaims the room. Each pane
+keeps its own path line — so `Panel › InCell › Deep` is clickable back — its own folded
+settings row, and its own idea of where it is. Drop a box on a pane and it is *copied* there;
+hold Shift and it *moves*, which is the only honest way to make one gesture mean two things
+people can distinguish afterwards (ADR 23). The windowed kind floats windows instead of tiling
+them: each can be minimized to its title, maximized over the board and restored to the exact
+rectangle it had, and the pile's transparency is a slider that starts fully transparent and
+keeps the window you last touched solid.
+
+What every other type shows — images, PDFs, markdown, directories, mindmaps, MQTT and HTTP
+sensors, VNC screens, SSH consoles, notes, checklists — is set out in
+[doc/web-app.md](doc/web-app.md), along with the controls each view carries.
 
 ## Install
 
@@ -41,7 +165,7 @@ and the program says so in the form your installer understands — a pipx instal
 process rather than copied out of this file, because `box` is a console script in an isolated
 environment and pip in the wrong Python installs it somewhere the tool will never look.
 
-## Use
+## The CLI
 
 ```bash
 box init                                     # create the database: root + cabinet
@@ -222,103 +346,6 @@ box serve --port 8000                        # UI on /, API on /api, docs on /do
 box tui                                      # browse, filter (type), drill in (enter), new (n)
 ```
 
-### The web app
-
-A left pane to search and pick — **Root** above it, the search field below, which
-finds boxes by their own fields and by the words inside their text and PDF files,
-showing the passage that answered and what your words were widened to — and a main
-pane to show one box, **its content first**. **New box** opens a modal where you
-choose the type (the list is searchable, because there are 39 of them) and configure
-it. ☰ beside the name at the top of that panel is what belongs to the library rather than
-to one box: **About**, **Check the library**, and the two index passes. Along the bottom,
-in front of the box count, the index reports itself all the time — `75 indexed`, or `2 out
-of date`, or `indexing…` — with the detail on hover, including which files hold nothing to
-read. A drop that no view claimed files the box into the box you are looking at, so the
-whole pane takes it.
-
-What each kind of box draws is set out in [doc/web-app.md](doc/web-app.md#what-each-box-shows) — the four rows worth knowing before you open anything: a **note** is a sheet you can switch between editing and reading, a **folder** is a list or a set of icons, a **grid** is rows and columns you size, and a **viewport** lends its space to other boxes. Anything with no view of its own shows its icon and its detail panel.
-
-A box created **from** another box — "New box here" on a folder, "New box in X" in
-a right-click menu, a cell of a grid — has that box already chosen as its parent,
-and after creating it the view stays on the parent, because that is where the user
-was looking. The parent is fetched by uuid if the left panel does not show it, so
-this holds in a library bigger than one page and while a search has the panel
-narrowed.
-
-Display mode, list-or-icons, text appearance, the grid layout, the desktop surface
-and the searches a folder has remembered are saved in the box's own `config`
-column, so they come back tomorrow in another browser. A grid remembers cells by box **uuid**, and a desktop its icon
-positions, so renaming a box does not scramble either; shrinking a grid leaves
-children linked and shows them as "Not placed", and so does a desktop whose icons
-nobody has placed yet.
-
-Every sensor box — `sensor`, `mqtt`, `http`, `home-assistant` — turns what arrived into a value
-using three templates the owner writes in the box's own settings drawer: *the value in what
-arrived* (`{{ data.pressure }}`), *how the value is worded* (`{{ extracted }} {{ data.unit }}`), and
-*how the words are dressed* (`<b class="{{ "sensor-bad" if number > 1.3 else "sensor-good" }}">`).
-They are Jinja, run by the server in a sandbox with no loader, and the styling one is rebuilt
-against an allow-list of formatting tags, page classes and CSS properties before it reaches the
-page: `<script>`, `<img onerror>`, `href="javascript:"`, `onclick` and `position: fixed` do not
-survive it. A template that fails says so beside the reading, which stays on screen. ADR 21.
-
-When the value is a number, the box can also be given a **scale**: `min`, `max`, the range split
-into colour intervals that must **fully cover it** — a stop short of `max` is refused, with the
-reading that would fall through named — and one of four pictures: a gauge, a horizontal bar, a
-vertical bar or a progression bar. Colours come from 16 presets served by the API, or from the
-colour picker. A value outside the range is clamped to the end of the bar **and says so** (`above
-10`), because a sensor pinned at the top of its scale otherwise looks exactly like a sensor at the
-top of its range. For a value that stays text, the alternative to a styling template is a list of
-regular expressions, each with a text and a background colour, first match wins, plus a default.
-The server decides where the value sits; the page only paints it, so an opened box, a grid cell and
-`box value` cannot disagree. ADR 22.
-
-**View ports** are the way to look at two boxes at once. A viewport box is never replaced by what
-you open in it: a *tiling* viewport splits its space into panes (split, drag the bar, close a pane
-and its sibling takes the room back — the last pane refuses), a *windowed* one floats windows you
-move, resize, raise and close — and a window can be minimized to its title, maximized over the whole
-board, and restored to the rectangle it had, which is kept rather than recomputed. A window fades to
-whatever the **transparency** slider says — **0 % is invisible, 100 % is solid**, and it starts at 0 —
-while the focused one stays solid either way, so the desk can show through the pile without the box you
-are reading going with it. The stored number is the same one an existing box already carried, so an old
-library opens looking the way you left it. Every pane and window brings its own gear: a box's settings row folds
-and unfolds inside the space it occupies, so changing a grid's columns does not unfold the checklist
-beside it, and the gear in the page's top line folds only the box on the main screen. What a viewport
-shows, it holds: those boxes are its children, so the tree view and the side list agree with the page.
-Opening a box **inside a pane stays inside that pane**, however deep it is embedded: a folder in a grid
-cell in a pane answers to that pane's path line, and the settings its own view writes land on the
-folder — not on the grid, and not on the viewport around it. Dragging a box onto another box **copies the link**
-(it is filed in both); **holding Shift moves it** (filed here, taken off where it came from, in one
-request so it is never nowhere). ADR 23.
-
-An MQTT box is the one kind that talks to something outside the machine: while
-its page is open the server subscribes to `mqtt://` or `mqtts://host[:port]/topic`
-and pushes every message to the page. `aiomqtt` ships with the install; if it is not there, the
-box type says *"not in this install"* while you are still choosing it, the dialog names the module
-and prints the command that repairs this particular install, and the opened box shows **"cannot
-listen"** with that sentence instead of a message about a dropped stream — a box that cannot
-work is refused, not retried forever. `box value NAME` reads one message and exits, for scripts,
-and reports the same way. ADR 18.
-
-`box serve` and `box tui` import their own framework when you ask for them, so `box --help`
-and every filing command work even in an install whose web or text UI library has gone missing;
-asking for one that cannot start prints the line that repairs it.
-
-The database lives at `$BOXGANIZER_DB`, else
-`$XDG_DATA_HOME/boxganizer/boxes.db`, else `~/.local/share/boxganizer/boxes.db`.
-Point at another file anywhere with `--db path/to/boxes.db`.
-
-Boxes whose words Boxganizer writes itself — a checklist — keep them next to that file, in
-`files/`, one file per box named after the box's uuid. They are markdown, they are indexed
-through a resource row like any other file, and they are not deleted when the box is: the
-row can be re-created, the words cannot.
-
-A **folder** marked for indexing is not read — there is nothing to read in a folder — it is
-walked, and every text file inside it becomes a resource of its own: its own modification
-time, its own entry in the index, its own answer to "has this changed". The folder keeps a
-link to each one it brought in, so a file deleted from the folder stops answering searches,
-and a file the library also holds directly is never discarded by the folder. Hidden entries,
-symlinks and files nothing can read words out of are left alone, and a hit inside a folder
-answers with the folder and names the file that spoke. ADR 16.
 
 ## Layout
 

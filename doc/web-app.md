@@ -33,3 +33,101 @@ panel — the last row of the table.
 | note               | an `edit` switch (a real switch: `role=switch`, `aria-checked`, knob) and a `read-only` / `editing` cue on the sheet; the toolbar is always visible because it is how you write, not a setting | a post-it with a place in the graph: **Markdown** or **Plain text**, and — when markdown — one **`edit`** switch — a real switch, `role="switch"` with `aria-checked`, the word beside it never moving — and the note says its condition on itself with a small `read-only` or `editing` cue, because the toolbar is one thing and the sheet you are about to type into is another. Both settings are kept on the box. The toolbox writes markdown markers into the text and nothing else: `**` around a selection, a `#` or a `-` at the start of every line the selection touches. A box can be named inside a sentence, by picking it from the toolbox or dragging it in, and is written as `[📋 name](boxganizer:uuid)` — an ordinary markdown link on a scheme that reaches nothing until the page decides that clicking it opens the box. Naming a box here files it here too, so a note cannot quietly lose what it points at; deleting the sentence does not throw the box out |
 | checklist          | a list to tick. Type under the list and press **Enter** to add a line; click a square to tick it and the count at the top moves. A child box dragged onto a line hangs there as an icon — at the right end of the line, centred on it — and clicking the icon opens that box; lifting it off takes the link and leaves the box filed here. Anything filed in the box but on no line is listed underneath rather than hidden. What you type is written to a file of Boxganizer's own beside the database, in plain `- [ ]` markdown, and reindexed each time it changes, so the items are found by full-text search like the words in any other file |
 | anything else      | its icon, and a detail panel with description, resource, metadata and config |
+
+## How the page is put together
+
+A left pane to search and pick — **Root** above it, the search field below, which
+finds boxes by their own fields and by the words inside their text and PDF files,
+showing the passage that answered and what your words were widened to — and a main
+pane to show one box, **its content first**. **New box** opens a modal where you
+choose the type (the list is searchable, because there are 39 of them) and configure
+it. ☰ beside the name at the top of that panel is what belongs to the library rather than
+to one box: **About**, **Check the library**, and the two index passes. Along the bottom,
+in front of the box count, the index reports itself all the time — `75 indexed`, or `2 out
+of date`, or `indexing…` — with the detail on hover, including which files hold nothing to
+read. A drop that no view claimed files the box into the box you are looking at, so the
+whole pane takes it.
+
+What each kind of box draws is set out in [doc/web-app.md](doc/web-app.md#what-each-box-shows) — the four rows worth knowing before you open anything: a **note** is a sheet you can switch between editing and reading, a **folder** is a list or a set of icons, a **grid** is rows and columns you size, and a **viewport** lends its space to other boxes. Anything with no view of its own shows its icon and its detail panel.
+
+A box created **from** another box — "New box here" on a folder, "New box in X" in
+a right-click menu, a cell of a grid — has that box already chosen as its parent,
+and after creating it the view stays on the parent, because that is where the user
+was looking. The parent is fetched by uuid if the left panel does not show it, so
+this holds in a library bigger than one page and while a search has the panel
+narrowed.
+
+Display mode, list-or-icons, text appearance, the grid layout, the desktop surface
+and the searches a folder has remembered are saved in the box's own `config`
+column, so they come back tomorrow in another browser. A grid remembers cells by box **uuid**, and a desktop its icon
+positions, so renaming a box does not scramble either; shrinking a grid leaves
+children linked and shows them as "Not placed", and so does a desktop whose icons
+nobody has placed yet.
+
+Every sensor box — `sensor`, `mqtt`, `http`, `home-assistant` — turns what arrived into a value
+using three templates the owner writes in the box's own settings drawer: *the value in what
+arrived* (`{{ data.pressure }}`), *how the value is worded* (`{{ extracted }} {{ data.unit }}`), and
+*how the words are dressed* (`<b class="{{ "sensor-bad" if number > 1.3 else "sensor-good" }}">`).
+They are Jinja, run by the server in a sandbox with no loader, and the styling one is rebuilt
+against an allow-list of formatting tags, page classes and CSS properties before it reaches the
+page: `<script>`, `<img onerror>`, `href="javascript:"`, `onclick` and `position: fixed` do not
+survive it. A template that fails says so beside the reading, which stays on screen. ADR 21.
+
+When the value is a number, the box can also be given a **scale**: `min`, `max`, the range split
+into colour intervals that must **fully cover it** — a stop short of `max` is refused, with the
+reading that would fall through named — and one of four pictures: a gauge, a horizontal bar, a
+vertical bar or a progression bar. Colours come from 16 presets served by the API, or from the
+colour picker. A value outside the range is clamped to the end of the bar **and says so** (`above
+10`), because a sensor pinned at the top of its scale otherwise looks exactly like a sensor at the
+top of its range. For a value that stays text, the alternative to a styling template is a list of
+regular expressions, each with a text and a background colour, first match wins, plus a default.
+The server decides where the value sits; the page only paints it, so an opened box, a grid cell and
+`box value` cannot disagree. ADR 22.
+
+**View ports** are the way to look at two boxes at once. A viewport box is never replaced by what
+you open in it: a *tiling* viewport splits its space into panes (split, drag the bar, close a pane
+and its sibling takes the room back — the last pane refuses), a *windowed* one floats windows you
+move, resize, raise and close — and a window can be minimized to its title, maximized over the whole
+board, and restored to the rectangle it had, which is kept rather than recomputed. A window fades to
+whatever the **transparency** slider says — **0 % is invisible, 100 % is solid**, and it starts at 0 —
+while the focused one stays solid either way, so the desk can show through the pile without the box you
+are reading going with it. The stored number is the same one an existing box already carried, so an old
+library opens looking the way you left it. Every pane and window brings its own gear: a box's settings row folds
+and unfolds inside the space it occupies, so changing a grid's columns does not unfold the checklist
+beside it, and the gear in the page's top line folds only the box on the main screen. What a viewport
+shows, it holds: those boxes are its children, so the tree view and the side list agree with the page.
+Opening a box **inside a pane stays inside that pane**, however deep it is embedded: a folder in a grid
+cell in a pane answers to that pane's path line, and the settings its own view writes land on the
+folder — not on the grid, and not on the viewport around it. Dragging a box onto another box **copies the link**
+(it is filed in both); **holding Shift moves it** (filed here, taken off where it came from, in one
+request so it is never nowhere). ADR 23.
+
+An MQTT box is the one kind that talks to something outside the machine: while
+its page is open the server subscribes to `mqtt://` or `mqtts://host[:port]/topic`
+and pushes every message to the page. `aiomqtt` ships with the install; if it is not there, the
+box type says *"not in this install"* while you are still choosing it, the dialog names the module
+and prints the command that repairs this particular install, and the opened box shows **"cannot
+listen"** with that sentence instead of a message about a dropped stream — a box that cannot
+work is refused, not retried forever. `box value NAME` reads one message and exits, for scripts,
+and reports the same way. ADR 18.
+
+`box serve` and `box tui` import their own framework when you ask for them, so `box --help`
+and every filing command work even in an install whose web or text UI library has gone missing;
+asking for one that cannot start prints the line that repairs it.
+
+The database lives at `$BOXGANIZER_DB`, else
+`$XDG_DATA_HOME/boxganizer/boxes.db`, else `~/.local/share/boxganizer/boxes.db`.
+Point at another file anywhere with `--db path/to/boxes.db`.
+
+Boxes whose words Boxganizer writes itself — a checklist — keep them next to that file, in
+`files/`, one file per box named after the box's uuid. They are markdown, they are indexed
+through a resource row like any other file, and they are not deleted when the box is: the
+row can be re-created, the words cannot.
+
+A **folder** marked for indexing is not read — there is nothing to read in a folder — it is
+walked, and every text file inside it becomes a resource of its own: its own modification
+time, its own entry in the index, its own answer to "has this changed". The folder keeps a
+link to each one it brought in, so a file deleted from the folder stops answering searches,
+and a file the library also holds directly is never discarded by the folder. Hidden entries,
+symlinks and files nothing can read words out of are left alone, and a hit inside a folder
+answers with the folder and names the file that spoke. ADR 16.

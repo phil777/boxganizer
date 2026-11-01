@@ -17,6 +17,7 @@ README = ROOT / "README.md"
 #: Where the markdown link syntax puts a target, and where an image puts its path.
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)")
 HEADING = re.compile(r"^#{1,6}\s+(.*)$", re.MULTILINE)
+SCHEME = "boxganizer"
 
 #: The screenshots the README is built around. `make shots` writes these names; the tour
 #: breaks visibly if one is missing, so the pairing is asserted in both directions.
@@ -44,7 +45,9 @@ def test_every_local_link_in_the_readme_resolves() -> None:
     perfectly ordinary in the editor.
     """
     targets = LINK.findall(README.read_text(encoding="utf-8"))
-    local = [t for t in targets if not t.startswith(("http://", "https://", "mailto:", "#"))]
+    # `boxganizer:` is the app's own scheme, quoted in prose as a literal the reader types.
+    external = ("http://", "https://", "mailto:", "#", f"{SCHEME}:")
+    local = [t for t in targets if not t.startswith(external)]
     assert local, "the README should link into doc/ at all"
     for target in local:
         path_part, _, fragment = target.partition("#")
@@ -70,6 +73,23 @@ def test_the_four_screenshots_exist_and_are_pictures_of_something() -> None:
             f"{name} is {shot.stat().st_size} bytes; that is not a screenshot"
         )
         assert shot.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", f"{name} is not a PNG"
+
+
+def test_the_readme_references_each_screenshot_once() -> None:
+    """An orphaned asset is a lie about the tour, and a missing one is a broken image.
+
+    Both directions are checked: all four pictures the script takes appear, and nothing else
+    from `doc/assets/` is referenced — so a picture that stops belonging to the tour is noticed
+    rather than left to age quietly.
+    """
+    text = README.read_text(encoding="utf-8")
+    referenced = re.findall(r"\((doc/assets/[^)]+)\)", text)
+    for name in SHOTS:
+        count = referenced.count(f"doc/assets/{name}")
+        assert count == 1, f"{name} should appear exactly once, saw {count}"
+    for target in referenced:
+        leaf = target.rsplit("/", 1)[-1]
+        assert leaf in SHOTS, f"{target} is not one of the four the script takes"
 
 
 def test_the_readme_keeps_the_three_disclosures_at_the_top() -> None:
