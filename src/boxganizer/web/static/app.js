@@ -75,7 +75,13 @@ function afterWrite(answer) {
 const api = {
   types: () => request("/api/types"),
   boxes: () => request("/api/boxes"),
-  search: (term) => request(`/api/search?q=${encodeURIComponent(term)}`),
+  // `under` narrows the same search to one box's subtree; left out, it searches the library.
+  // One wrapper for both, because a second function would drift from this one's escaping.
+  search: (term, under = null) =>
+    request(
+      `/api/search?q=${encodeURIComponent(term)}` +
+        (under ? `&under=${encodeURIComponent(under)}` : ""),
+    ),
   box: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}`),
   children: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/children`),
   create: (payload) =>
