@@ -442,6 +442,10 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 #context-menu li { padding: 0.3rem 0.5rem; border-radius: 0.2rem; cursor: pointer; }
 #context-menu li:hover { background: var(--accent); color: #fff; }
 #context-menu li[role="separator"] { height: 1px; padding: 0; background: var(--line); cursor: default; }
+/* The armed state is a question, so it is drawn as one: the entry that will destroy something
+   takes the destructive colour only once it has been asked, never before. */
+#context-menu li.armed { color: #b3261e; font-weight: 600; }
+#context-menu li.armed:hover { background: #b3261e; color: #fff; }
 
 /* Views added by later commits hang their styles off these names. */
 .child-grid { display: grid; gap: var(--gap); }

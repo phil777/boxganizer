@@ -299,7 +299,10 @@ box tag ls                             # the tree, with what each tag holds
 Right-clicking anywhere in a box's pane brings up that box's menu — including the empty part of
 a folder, the strip below a short list, or a background. A view that means something particular
 by the right-click keeps its own; highlighted text keeps the browser's menu, because that click
-was for copy.
+was for copy. The menu is also the only way to **delete** a box: it asks once, inside the menu, and
+the question states what survives — the links from the box go, what was filed inside stays in the
+library, and the words a note wrote for itself stay in their file (ADR 28, ADR 14). The root is
+never offered, because there would be nowhere left to file anything.
 
 Every box's own controls — a folder's search, a desktop's grid size, a note's format bar, a
 sensor's address — live in a row that is **hidden until you ask**. A ⚙ at the right end of the

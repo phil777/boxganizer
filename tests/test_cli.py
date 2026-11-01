@@ -85,6 +85,58 @@ def test_remove(db_path: Path) -> None:
         assert store.count() == 0
 
 
+def test_rm_says_what_survives(db_path: Path) -> None:
+    """The shell answer names what the delete did not touch: the boxes inside, and the words file.
+
+    `rm` deleting the contents of a folder as well would be unrecoverable from a confirmation nobody
+    reads carefully, and a note whose file silently vanishes is worse. Both are stated instead of
+    assumed — and the file is checked on disk, because a sentence is only worth reading if it is
+    true.
+    """
+    from boxganizer import authored
+
+    invoke(db_path, "add", "Drawer", "--type", "folder")
+    invoke(db_path, "add", "Sole")
+    invoke(db_path, "link", "Sole", "Drawer")
+    invoke(db_path, "add", "Scrap", "--type", "note")
+    with BoxStore(db_path) as store:
+        words = authored.path_for(db_path, store.get("Scrap").uuid)
+    words.parent.mkdir(parents=True, exist_ok=True)
+    words.write_text("keep this", encoding="utf-8")
+
+    result = invoke(db_path, "rm", "Drawer", "-y")
+    assert result.exit_code == 0, result.output
+    assert "1 filed inside stay in the library" in result.output
+    with BoxStore(db_path) as store:
+        assert store.get("Sole").name == "Sole", "the child outlived the box that held it"
+
+    gone = invoke(db_path, "rm", "Scrap", "-y")
+    assert "its own words are still in" in gone.output, gone.output
+    assert words.exists() and words.read_text(encoding="utf-8") == "keep this"
+
+
+def test_the_root_refuses_to_be_deleted_from_the_shell(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No traceback, one sentence, and the root still there afterwards.
+
+    Run through `main`, because that is the layer that turns a core error into a message; the bare
+    app would let the exception escape into a traceback nobody asked for.
+    """
+    invoke(db_path, "init")
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(sys, "argv", ["box", "--db", str(db_path), "rm", "root", "-y"])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+    assert exit_info.value.code == 1
+    # one line, then unwrapped: the terminal wraps a sentence, not the meaning
+    said = " ".join(capsys.readouterr().err.split())
+    assert "nowhere to file anything" in said, said
+    assert "Traceback" not in said
+    with BoxStore(db_path) as store:
+        assert store.get("root").box_type == "root"
+
+
 def test_bad_meta_is_rejected(db_path: Path) -> None:
     result = invoke(db_path, "add", "Box", "-m", "no-equals-sign")
     assert result.exit_code != 0

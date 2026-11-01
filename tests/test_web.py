@@ -324,6 +324,93 @@ def test_a_box_can_be_deleted_by_uuid(client: TestClient, populated: BoxStore) -
     assert client.get(f"/api/boxes/{uuid}").status_code == 404
 
 
+def test_deleting_a_box_takes_it_out_of_everything_that_listed_it(
+    client: TestClient, populated: BoxStore
+) -> None:
+    """The list, the search and a dynamic folder that was holding it.
+
+    A dynamic folder's members are computed from the graph rather than stored, so the box vanishes
+    from it with the link — but "so it should" is exactly the kind of claim a test exists to catch
+    being false, and the search is a second mechanism again.
+    """
+    passport = populated.get("Passport").uuid
+    kitchen = populated.get("Kitchen").uuid
+    assert client.post("/api/boxes", json={"name": "Tagged", "box_type": "dynamic-folder"})
+    client.put(
+        "/api/boxes/Tagged/config", json={"config": {"filter": {"name": "pass"}}}
+    )
+
+    assert [m["name"] for m in client.get("/api/boxes/Tagged/filter").json()["members"]] == [
+        "Passport"
+    ]
+    assert client.delete(f"/api/boxes/{passport}").status_code == 204
+
+    names = [box["name"] for box in client.get("/api/boxes").json()]
+    assert "Passport" not in names
+    assert [m["name"] for m in client.get("/api/boxes/Tagged/filter").json()["members"]] == []
+    assert [box["name"] for box in client.get(f"/api/boxes/{kitchen}/children").json()] == []
+    found = client.get("/api/search?q=Passport").json()
+    hits = found["boxes"] if isinstance(found, dict) else found
+    assert [hit["name"] for hit in hits] == [], "search cannot keep offering a box that is gone"
+
+
+def test_the_root_is_not_offered_for_deletion_and_the_server_refuses_it(
+    client: TestClient, populated: BoxStore
+) -> None:
+    """Two noes, because the page and the server answer to different readers.
+
+    The box is made here rather than assumed: this library has no root until something creates
+    one, and a test that quietly deletes a box that was never there would pass for the wrong reason.
+    """
+    made = client.post("/api/boxes", json={"name": "wayin", "box_type": "root"})
+    assert made.status_code == 201
+    response = client.delete(f"/api/boxes/{made.json()['uuid']}")
+    assert response.status_code == 409
+    assert "nowhere to file anything" in response.json()["detail"]["reason"]
+    assert client.get(f"/api/boxes/{made.json()['uuid']}").status_code == 200, "it is still there"
+
+    script = client.get("/static/app.js").text
+    menu = script[script.index("function boxMenuItems(") :]
+    menu = menu[: menu.index("/**\n * The menu's delete entry")]
+    assert 'if (box.box_type !== "root")' in menu
+    assert "deleteMenuItem(box)" in menu
+
+
+def test_the_menu_asks_before_it_destroys_and_says_what_survives(client: TestClient) -> None:
+    """Delete is offered on every surface, armed by the first click rather than a dialog.
+
+    The menu entry states the rule before anything is lost: the links from the box go, what was
+    filed inside stays in the library. The arming lives in `showMenu` rather than in each item, and
+    the menu is rebuilt on every open, so an armed entry that was not confirmed cannot linger.
+    """
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+
+    entry = script[script.index("function deleteMenuItem(box)") :]
+    entry = entry[: entry.index("async function deleteBox(")]
+    assert 'label: "Delete…"' in entry
+    assert "what was filed inside stays in the library" in entry
+    assert 'run: () => deleteBox(box)' in entry
+
+    menu = script[script.index("function showMenu(x, y, items)") :]
+    menu = menu[: menu.index("function hideMenu()")]
+    assert "if (item.arm && !entry.dataset.armed)" in menu
+    assert 'entry.dataset.armed = "1"' in menu
+    assert "entry.textContent = item.arm;" in menu
+    assert "hideMenu();" in menu and "item.run();" in menu
+
+    wire = script[script.index("async function deleteBox(box)") :]
+    wire = wire[: wire.index("function showMenu(")]
+    assert 'await api.deleteBox(box.uuid)' in wire
+    assert "await refreshSide();" in wire
+    assert "renderMain();" in wire
+    assert "wasCurrent" in wire, "a deleted box cannot stay the subject of the page"
+
+    assert 'deleteBox: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}`' in script
+    assert '{ method: "DELETE" })' in script
+    assert "#context-menu li.armed" in css
+
+
 # -- serving the file behind a box -----------------------------------------
 
 

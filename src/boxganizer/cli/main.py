@@ -821,12 +821,29 @@ def box_remove(
     name: str,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask.")] = False,
 ) -> None:
-    """Delete a box. Links to and from it disappear too."""
+    """Delete a box. Its links go; what was filed inside stays in the library.
+
+    The question says what survives before anything is lost, and the answer repeats it: a box is a
+    place a thing is filed, so emptying it is not the same act as deleting it, and a person who has
+    just typed `rm` should not have to read the source to find out whether their notes went too. The
+    file it wrote for itself is left where it is (ADR 14) — and named, so nobody hunts for it.
+    """
     with _open(ctx, _db_of(ctx)) as store:
-        if not yes and not typer.confirm(f"delete box {name!r}?"):
+        doomed = store.resolve(name)
+        asks = (
+            f"delete box {doomed.name!r}? its links go;"
+            " what is filed inside stays in the library"
+        )
+        if not yes and not typer.confirm(asks):
             raise typer.Abort
-        removed = store.remove(name)
-    say("deleted", removed.name, style="red")
+        gone = store.delete_box(doomed.uuid)
+    say("deleted", gone.box.name, style="red")
+    if gone.children:
+        lit(f"  {gone.children} filed inside stay in the library, unfiled from {gone.box.name}")
+    if gone.words_file:
+        lit(f"  its own words are still in {gone.words_file}")
+    elif gone.box.resource_uri:
+        lit(f"  the file it pointed at is untouched: {gone.box.resource_uri}")
 
 
 @app.command("link")

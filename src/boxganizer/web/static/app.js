@@ -165,6 +165,7 @@ const api = {
     request(`/api/boxes/${encodeURIComponent(ref)}/children/${encodeURIComponent(child)}`, {
       method: "DELETE",
     }),
+  deleteBox: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}`, { method: "DELETE" }),
   suggestType: (resourceUri, current) =>
     request(
       `/api/types/suggest?resource_uri=${encodeURIComponent(resourceUri)}&current=${encodeURIComponent(current || "box")}`
@@ -2243,12 +2244,67 @@ function markSelected() {
 
 /** The items every box gets, wherever it is shown, plus the caller's own. */
 function boxMenuItems(box, extra = []) {
-  return [
+  const items = [
     { label: "Open", run: () => openBox(box.uuid) },
     { separator: true },
     { label: "Modify…", run: () => openEditBoxModal(box) },
     ...extra,
   ];
+  // The root is where everything else is filed, so it is not offered for deletion at all: a control
+  // that can only be answered with "no" is worse than no control. The server refuses it anyway.
+  if (box.box_type !== "root") {
+    items.push({ separator: true }, deleteMenuItem(box));
+  }
+  return items;
+}
+
+/**
+ * The menu's delete entry, armed by the first click and fired by the second.
+ *
+ * The question is asked inside the menu rather than in a dialog because a dialog is dismissed
+ * reflexively — that is why it gets read least when it matters most — and because the answer can be
+ * the true sentence about what survives: the links from this box to what it held go, and the boxes
+ * inside stay in the library, filed wherever else they were. It says nothing about the words file,
+ * because the words are not touched (ADR 14) and the sentence after the delete names the file where
+ * they still are.
+ */
+function deleteMenuItem(box) {
+  return {
+    label: "Delete…",
+    arm: "Really delete — what was filed inside stays in the library",
+    title: `delete ${box.name} and the links from it to what it held`,
+    run: () => deleteBox(box),
+  };
+}
+
+async function deleteBox(box) {
+  const wasCurrent = state.current && state.current.uuid === box.uuid;
+  const into = (state.current && state.current.parents ? state.current.parents : [])[0];
+  try {
+    await api.deleteBox(box.uuid);
+    await refreshSide();
+    if (wasCurrent) {
+      // A deleted box cannot stay the subject of the page; its own parent is the way back out, and
+      // with no parent left there is nothing to look at, so the page says so rather than painting a
+      // name that resolves to nothing.
+      if (into) await openBox(into.uuid ?? into);
+      else {
+        state.current = null;
+        renderMain();
+      }
+    } else {
+      renderMain();
+    }
+    // 204 says nothing, deliberately, so the page repeats the rule it stated when it asked, and names
+    // the file the box pointed at because the box object in hand already carries that path.
+    status(
+      box.resource_uri
+        ? `deleted ${box.name}; what was filed inside stays in the library, and ${box.resource_uri} was left alone`
+        : `deleted ${box.name}; what was filed inside stays in the library`,
+    );
+  } catch (error) {
+    status(error.message, true);
+  }
 }
 
 /** Unlink a child from one parent. The box itself and its other parents survive. */
@@ -2274,7 +2330,19 @@ function showMenu(x, y, items) {
     } else {
       entry.setAttribute("role", "menuitem");
       entry.textContent = item.label;
-      entry.addEventListener("click", () => {
+      if (item.title) entry.title = item.title;
+      entry.addEventListener("click", (event) => {
+        if (item.arm && !entry.dataset.armed) {
+          // First click asks, second one does it. The menu is rebuilt every time it opens, so an
+          // armed entry that was not confirmed is gone rather than waiting for the next click.
+          // The bubble has to stop here: a document-level listener closes the menu on any click, and
+          // a question that closes the moment it is asked is a button that does nothing.
+          event.stopPropagation();
+          entry.dataset.armed = "1";
+          entry.classList.add("armed");
+          entry.textContent = item.arm;
+          return;
+        }
         hideMenu();
         item.run();
       });

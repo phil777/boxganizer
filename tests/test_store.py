@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from boxganizer import search as indexing
-from boxganizer.errors import BoxNotFound, DuplicateBoxName, HandFilingRefused
+from boxganizer.errors import BoxNotFound, DuplicateBoxName, HandFilingRefused, StoreError
 from boxganizer.models import Box
 from boxganizer.store import SCHEMA_VERSION, BoxStore
 
@@ -964,3 +964,99 @@ def test_a_file_inside_an_indexed_folder_is_named_by_its_folder(tmp_path: Path) 
         assert listed["one.md"]["fixable"] is True
     finally:
         store.close()
+
+
+def test_deleting_a_box_files_its_children_nowhere_new(store: BoxStore) -> None:
+    """A box is a place a thing is filed, not the thing: `rm` takes the place, not the contents.
+
+    The links *from* the deleted box are its own business and go with it. A child filed elsewhere
+    keeps that filing; a child filed nowhere is still in the library, just not inside anything. The
+    delete that emptied a folder onto the floor and burned the floor too would be unrecoverable from
+    a confirmation dialog nobody reads carefully.
+    """
+    store.add(Box(name="Kitchen"))
+    store.add(Box(name="Attic"))
+    store.add(Box(name="Drawer"))
+    store.add(Box(name="Passport"))
+    store.add(Box(name="Loose"))
+    store.link("Kitchen", "Drawer")
+    store.link("Attic", "Drawer")  # two parents: the other one must survive
+    store.link("Drawer", "Passport")
+    store.link("Drawer", "Loose")
+
+    gone = store.delete_box("Drawer")
+
+    assert (gone.box.name, gone.children, gone.parents) == ("Drawer", 2, 2)
+    assert [box.name for box in store.children("Kitchen")] == []
+    assert [box.name for box in store.children("Attic")] == [], "the deleted link was the Drawer's"
+    with pytest.raises(BoxNotFound):
+        store.get("Drawer")
+    # the children are untouched, in the library, and filed in nothing that did not hold them
+    assert {box.name for box in store.list_boxes()} >= {"Passport", "Loose"}
+    assert sorted(box.name for box in store.parents("Passport")) == []
+
+
+def test_the_root_box_cannot_be_deleted(store: BoxStore) -> None:
+    """Deleting the root is refused in a sentence, not performed.
+
+    The root is not a box that happens to hold everything: it is where everything else is filed, so
+    there is no state to arrive at afterwards. `RootCannotBeFiled` already refuses the other
+    direction, and the two need different words.
+    """
+    from boxganizer.bootstrap import bootstrap
+    from boxganizer.errors import RootCannotBeDeleted
+
+    bootstrap(store)
+    with pytest.raises(RootCannotBeDeleted, match="nowhere to file anything"):
+        store.delete_box("root")
+    assert store.get("root").box_type == "root"
+
+
+def test_a_half_failed_deletion_leaves_the_library_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row, its links and the indexed text are one decision or none.
+
+    `_execute` commits statement by statement, which is right for a single write and wrong here: a
+    box whose row is gone while its indexed text is still offered by search is a library that lies
+    about what it holds. So `delete_box` runs its statements on the connection and commits once —
+    and this forces the last one to fail to show that nothing half-happened.
+    """
+    book = tmp_path / "words.md"
+    book.write_text("a file two boxes point at", encoding="utf-8")
+    with BoxStore(tmp_path / "boxes.db", content_root=tmp_path) as store:
+        store.add(Box(name="Kitchen"))
+        store.add(Box(name="Passport"))
+        store.link("Kitchen", "Passport")
+        # The deleted box has to be the last one pointing at a resource, or there is no second
+        # statement to fail on — the failure must land after the box row is already gone.
+        holder = store.add(Box(name="Holder", resource_uri=str(book)))
+        assert holder.resource_id is not None
+        real = store._conn
+
+        class _FailingAtTheLastStep:
+            """Lets the box row go and refuses to let the resource row follow it."""
+
+            def __init__(self, inner: sqlite3.Connection) -> None:
+                self._inner = inner
+
+            def execute(self, sql: str, params: object = ()) -> object:
+                if "DELETE FROM resources" in sql:
+                    raise sqlite3.OperationalError("the disk stopped")
+                return self._inner.execute(sql, params)  # type: ignore[misc]
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+        monkeypatch.setattr(store, "_conn", _FailingAtTheLastStep(real))
+        try:
+            with pytest.raises(StoreError, match="write failed"):
+                store.delete_box("Holder")
+        finally:
+            monkeypatch.setattr(store, "_conn", real)
+
+        assert store.get("Holder").name == "Holder", "the row came back"
+        assert store.get("Passport").name == "Passport"
+        kids = [box.name for box in store.children("Kitchen")]
+        assert kids == ["Passport"], "and so did the link"
+        assert store.resource(book) is not None, "and so did the resource it was the last box on"

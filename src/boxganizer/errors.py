@@ -103,6 +103,21 @@ class RootCannotBeFiled(BoxganizerError):
         self.parent = parent
 
 
+class RootCannotBeDeleted(BoxganizerError):
+    """Something tried to delete the root box.
+
+    Separate from :class:`RootCannotBeFiled` because the two acts need different sentences: one is
+    "this cannot go inside anything", this is "this is where everything else is". A message that
+    fits both explains neither, and the person reading it has just asked to throw the library away.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"{name!r} is the root of the library; deleting it would leave nowhere to file anything"
+        )
+        self.name = name
+
+
 class GridError(BoxganizerError):
     """A cell reference or a placement that the grid cannot accept."""
 

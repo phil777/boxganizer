@@ -51,6 +51,15 @@ element's that drew it: a view that claims a drop stops the event, so the pane b
 told, and one drag cancelled with Escape never fires a drop at all. Every ending clears every zone
 (ADR 27), which is why a red outline no longer follows you into the next three boxes.
 
+**Deleting a box is on its right-click menu** and asks twice: the item rewrites itself into
+*Really delete — what was filed inside stays in the library*, and only the second click runs
+(ADR 28). What survives is stated rather than guessed at. The links from the box go with it; every
+box that was filed inside stays in the library, still filed wherever else it was; a file the box
+pointed at is untouched; and the words a note or checklist wrote for itself stay in their file
+beside the database, named in the sentence you get back (ADR 14). The **root** is never offered for
+deletion, and the server refuses it in the same words if asked by another route: deleting it would
+leave nowhere to file anything. `box rm` asks the same question and answers with the same facts.
+
 What each kind of box draws is set out in [What each box shows](#what-each-box-shows) — the four rows worth knowing before you open anything: a **note** is a sheet you can switch between editing and reading, a **folder** is a list or a set of icons, a **grid** is rows and columns you size, and a **viewport** lends its space to other boxes. Anything with no view of its own shows its icon and its detail panel.
 
 A box created **from** another box — "New box here" on a folder, "New box in X" in

@@ -15,18 +15,20 @@ import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from boxganizer import boxtypes, config, filters, paths, resources, tags
+from boxganizer import authored, boxtypes, config, filters, paths, resources, tags
 from boxganizer.errors import (
     BoxNotFound,
     ChildrenNotAllowed,
     DuplicateBoxName,
     HandFilingRefused,
     InvalidBoxContent,
+    RootCannotBeDeleted,
     RootCannotBeFiled,
     StoreError,
 )
@@ -291,6 +293,25 @@ def _as_json(value: dict[str, object]) -> str:
 
 def _like_escape(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+@dataclass(frozen=True)
+class BoxDeletion:
+    """What deleting one box actually took with it.
+
+    The sentence a person needs after a delete is not "ok". It is how many things were filed inside
+    (they are still in the library, just not in there), whether anything else was holding the box,
+    and where the words it wrote are still sitting. Both the page and ``box rm`` read this, so
+    neither invents its own reassurance.
+    """
+
+    box: Box
+    children: int
+    parents: int
+    #: True when this was the last box pointing at the resource, so its indexed text went too.
+    resource_released: bool
+    #: The file the box wrote for itself, when there is one. Kept, on purpose — see ADR 14.
+    words_file: Path | None
 
 
 class BoxStore:
@@ -635,17 +656,75 @@ class BoxStore:
 
     def remove(self, name: str) -> Box:
         """Delete the box named *name* and its links; return the deleted box."""
-        box = self.get(name)
+        return self.delete_box(name).box
+
+    def delete_box(self, ref: str) -> BoxDeletion:
+        """Delete one box — by name or uuid — and say what went with it.
+
+        **The links go, the children do not.** A box is a place a thing is filed, not the thing; the
+        rows that held it inside its parents and held its children inside it are its own business,
+        and they are gone by the foreign keys. A child filed anywhere else keeps that filing, and a
+        child filed nowhere is still in the library: `box rm` was never a way to empty a folder onto
+        the floor and burn the floor too. (The contract a person can act on is the one the dialog
+        states, so the page says exactly this before it asks.)
+
+        **One transaction, because a delete is several writes.** `_execute` commits each statement
+        on its own, which is right for one write and wrong for an operation whose half-way state
+        cannot be described: a box whose row is gone but whose indexed text is still offered by
+        search is a library that lies about what it holds. So the statements here run on the
+        connection directly and commit once, or roll back whole.
+
+        **The file it wrote stays** — ADR 14, deliberately: a row can be re-created by name and the
+        words cannot be re-created from nothing. The path comes back on the ``BoxDeletion`` so the
+        page can name the file rather than let someone hunt for a note they did not lose.
+        """
+        box = self.resolve(ref)
+        if box.box_type == "root":
+            raise RootCannotBeDeleted(box.name)
         assert box.id is not None
-        self._execute("DELETE FROM boxes WHERE id = ?", (box.id,))
-        # Links go with the row by the foreign keys. The resource does not: it may be
-        # what another box points at, and deleting the box was no word about the file.
-        # When this was the last box on it, the row and its indexed text go together —
-        # a search that keeps offering the file of a box that no longer exists is not a
-        # stale cache but a broken promise.
-        if box.resource_id is not None:
-            self._release_resource(int(box.resource_id))
-        return box
+        resource_id = box.resource_id
+        words = authored.path_for(self.path, box.uuid)
+        with self._lock:
+            conn = self._conn
+            try:
+                children = int(
+                    conn.execute(
+                        "SELECT count(*) FROM links WHERE parent_id = ?", (box.id,)
+                    ).fetchone()[0]
+                )
+                parents = int(
+                    conn.execute(
+                        "SELECT count(*) FROM links WHERE child_id = ?", (box.id,)
+                    ).fetchone()[0]
+                )
+                conn.execute("DELETE FROM boxes WHERE id = ?", (box.id,))
+                # Only the last reference is the last use: the indexed text goes on being useful to
+                # whoever else points at the same file. Same rule `_release_resource` applies.
+                released = False
+                if resource_id is not None:
+                    left = int(
+                        conn.execute(
+                            "SELECT count(*) FROM boxes WHERE resource_id = ?", (resource_id,)
+                        ).fetchone()[0]
+                    )
+                    if left == 0:
+                        conn.execute(_DELETE_DOC, (resource_id,))
+                        conn.execute("DELETE FROM resources WHERE id = ?", (resource_id,))
+                        released = True
+                conn.commit()
+            except sqlite3.Error as exc:
+                conn.rollback()
+                raise StoreError(f"write failed: {exc}") from exc
+            except BaseException:
+                conn.rollback()
+                raise
+        return BoxDeletion(
+            box=box,
+            children=children,
+            parents=parents,
+            resource_released=released,
+            words_file=words if words.is_file() else None,
+        )
 
     def list_boxes(self, *, limit: int | None = None, offset: int = 0) -> list[Box]:
         """Return every box, ordered by name."""

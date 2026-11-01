@@ -56,3 +56,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0025   | A folder that filters itself refuses the hand that files into it, and a tag move re-cuts it | accepted |
 | 0026   | The tag window is a tree, and the rules stay on the server | accepted |
 | 0027   | A drop zone belongs to the page, not to the element that painted it | accepted |
+| 0028   | A delete is asked inside the menu, and the question says what survives | accepted |

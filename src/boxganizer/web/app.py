@@ -56,6 +56,7 @@ from boxganizer.errors import (
     InvalidBoxName,
     MqttError,
     PlacementError,
+    RootCannotBeDeleted,
     RootCannotBeFiled,
     UnknownBoxType,
 )
@@ -615,6 +616,19 @@ def create_app(
     async def _filed_root(request: Request, exc: RootCannotBeFiled) -> JSONResponse:
         return JSONResponse(
             status_code=409, content={"detail": {"error": "root_cannot_be_filed", "name": exc.name}}
+        )
+
+    @app.exception_handler(RootCannotBeDeleted)
+    async def _deleted_root(request: Request, exc: RootCannotBeDeleted) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": {
+                    "error": "root_cannot_be_deleted",
+                    "name": exc.name,
+                    "reason": str(exc),
+                }
+            },
         )
 
     @app.exception_handler(GridError)
@@ -2292,6 +2306,15 @@ def create_app(
 
     @app.delete("/api/boxes/{ref}", status_code=204)
     def delete_box(ref: str, store: StoreDep) -> None:
+        """Delete one box, by name or uuid. Nothing comes back, because there is nothing to report.
+
+        The links from it to what it held go with the row; the boxes inside stay in the library,
+        filed wherever else they were. A file it pointed at is left alone, and so is the words file
+        it wrote for itself — ADR 14, on purpose. The page states all of that *before* it asks (its
+        menu entry is armed by the first click), which is the moment a person can still change their
+        mind; a response body after the fact is not. Deleting the root is refused instead: it is
+        where everything else is filed, so there is nowhere to arrive at afterwards.
+        """
         store.remove(store.resolve(ref).name)
 
     @app.post("/api/boxes/{ref}/children", status_code=201)
