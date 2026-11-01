@@ -1172,3 +1172,89 @@ def test_linking_a_resource_that_just_vanished_declines_quietly(tmp_path: Path) 
         assert store._rows("SELECT 1 FROM resource_link WHERE parent_id = ?", (parent_id,)) == []
     finally:
         store.close()
+
+
+def test_descendants_covers_the_whole_subtree_once_each(tmp_path: Path) -> None:
+    """Every box below a folder, each with the shortest path down to it.
+
+    The path is the point as much as the set is: it is what a crumb line is built from, and a box
+    filed in two places under the same root is one result on the shorter route, not two results.
+    """
+    store = BoxStore(tmp_path / "desc.db")
+    try:
+        for name in ["Root", "A", "B", "Deep", "Deeper", "Leaf", "Alone"]:
+            store.add(Box(name=name))
+        store.link("Root", "A")
+        store.link("Root", "B")
+        store.link("A", "Deep")
+        store.link("Deep", "Deeper")
+        store.link("Deeper", "Leaf")
+        store.link("B", "Leaf")  # reachable two ways: through B is the shorter route
+
+        found = store.descendants("Root")
+        assert {store.resolve(uuid).name for uuid in found} == {
+            "Root",
+            "A",
+            "B",
+            "Deep",
+            "Deeper",
+            "Leaf",
+        }, found
+        assert store.resolve("Alone").uuid not in found, "nothing outside the subtree leaks in"
+
+        leaf_path = [box.name for box in found[store.resolve("Leaf").uuid]]
+        assert leaf_path == ["Root", "B", "Leaf"], leaf_path
+        deeper = [box.name for box in found[store.resolve("Deeper").uuid]]
+        assert deeper == ["Root", "A", "Deep", "Deeper"], deeper
+        # the starting box is included: searching a folder means searching the folder too
+        assert [box.name for box in found[store.resolve("Root").uuid]] == ["Root"]
+    finally:
+        store.close()
+
+
+def test_descendants_survives_every_shape_of_cycle(tmp_path: Path) -> None:
+    """Cycles are legal in this graph, so a walk that trusted a tree would hang.
+
+    Three shapes, because they fail differently: a box filed inside itself, a two-box ring, and a
+    ring several levels down that only closes if you follow the wrong edge. Each must terminate with
+    the same set the acyclic graph would give.
+    """
+    store = BoxStore(tmp_path / "cycles.db")
+    try:
+        store.add(Box(name="Selfish"))
+        store.link("Selfish", "Selfish")
+        selfish = store.resolve("Selfish").uuid
+        assert [box.name for box in store.descendants("Selfish")[selfish]] == ["Selfish"]
+
+        for name in ["Left", "Right", "Trunk", "Branch", "Twig", "Nest"]:
+            store.add(Box(name=name))
+        store.link("Left", "Right")
+        store.link("Right", "Left")  # a two-box ring
+        assert {store.resolve(u).name for u in store.descendants("Left")} == {"Left", "Right"}
+
+        store.link("Trunk", "Branch")
+        store.link("Branch", "Twig")
+        store.link("Twig", "Trunk")  # closes three levels down
+        store.link("Twig", "Nest")
+        found = store.descendants("Trunk")
+        assert {store.resolve(u).name for u in found} == {"Trunk", "Branch", "Twig", "Nest"}
+        nest = [box.name for box in found[store.resolve("Nest").uuid]]
+        assert nest == ["Trunk", "Branch", "Twig", "Nest"], nest
+    finally:
+        store.close()
+
+
+def test_descendants_of_an_empty_box_is_just_the_box(tmp_path: Path) -> None:
+    """A leaf answers with itself, not with nothing.
+
+    The caller is asking "search here"; an empty answer would read as a search that found
+    nothing even when the box's own words say something.
+    """
+    store = BoxStore(tmp_path / "leaf.db")
+    try:
+        store.add(Box(name="Alone", description="a word worth finding"))
+        found = store.descendants("Alone")
+        assert list(found) == [store.resolve("Alone").uuid]
+        assert [box.name for box in found[store.resolve("Alone").uuid]] == ["Alone"]
+    finally:
+        store.close()

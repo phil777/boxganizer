@@ -1819,6 +1819,38 @@ class BoxStore:
             self._from_row(row) for row in self._rows(_SELECT_RELATED_PARENTS, (self._id_of(ref),))
         ]
 
+    def descendants(self, ref: str, *, max_depth: int = 25) -> dict[str, list[Box]]:
+        """Every box filed below *ref*, at any depth, each with the shortest path down to it.
+
+        The starting box is included, mapped to a path of one: asking a folder to search means
+        searching the folder too, not only what hangs under it.
+
+        **Shortest path, one entry per box.** A box filed in two places under the same root is
+        one result, not two, and the path kept is the shorter one — because that path is what a
+        crumb line is built from, and a person who clicked down two ways is looking at one of them.
+
+        **Cycles terminate.** The graph allows them (a box can be filed inside its own grandchild),
+        so a box already seen is never followed again; without that rule a walk is an infinite loop,
+        and the answer to a search would be a hung page rather than a wrong one. `max_depth` is the
+        second guard, for a very wide subtree; hitting it is not an error, it is just a shallower
+        answer than the whole tree.
+        """
+        start = self.resolve(ref)
+        paths: dict[str, list[Box]] = {start.uuid: [start]}
+        frontier: list[Box] = [start]
+        depth = 0
+        while frontier and depth < max_depth:
+            depth += 1
+            following: list[Box] = []
+            for box in frontier:
+                for child in self.children(box.uuid):
+                    if child.uuid in paths:
+                        continue  # seen by a shorter route, or a cycle back up: either way, stop
+                    paths[child.uuid] = [*paths[box.uuid], child]
+                    following.append(child)
+            frontier = following
+        return paths
+
     def tree(self, name: str, *, max_depth: int = 10) -> dict[str, object]:
         """Nested ``{"box", "depth", "children"}`` mapping.
 
