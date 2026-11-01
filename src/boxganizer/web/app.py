@@ -603,6 +603,15 @@ def create_app(
         path = paths.get(uuid)
         return [box.name for box in path] if path else []
 
+    def _path_refs(paths: dict[str, list[Box]], uuid: str) -> list[dict[str, str]]:
+        """The same route as `{uuid, name}` pairs, so a crumb can be clicked, not just admired.
+
+        Names are enough to draw a path and no use at all to navigate by: two boxes in one library
+        may share a name, and a crumb that opens the wrong one is worse than no crumb.
+        """
+        path = paths.get(uuid)
+        return [{"uuid": box.uuid, "name": box.name} for box in path] if path else []
+
     @app.exception_handler(BoxNotFound)
     async def _not_found(request: Request, exc: BoxNotFound) -> JSONResponse:
         return JSONResponse(
@@ -2567,7 +2576,11 @@ def create_app(
         named = store.search(q, limit=limit, within=scope)
         found: list[dict[str, object]] = [
             box.to_dict()
-            | {"match": {"how": "box", "passage": ""}, "path": _path_names(paths, str(box.uuid))}
+            | {
+                "match": {"how": "box", "passage": ""},
+                "path": _path_names(paths, str(box.uuid)),
+                "route": _path_refs(paths, str(box.uuid)),
+            }
             for box in named
         ]
         seen = {str(entry["uuid"]) for entry in found}
@@ -2601,6 +2614,7 @@ def create_app(
                             },
                             # how the reader reaches this hit from the box they searched in
                             "path": _path_names(paths, str(box.uuid)),
+                            "route": _path_refs(paths, str(box.uuid)),
                         }
                     )
                     if len(found) >= limit:

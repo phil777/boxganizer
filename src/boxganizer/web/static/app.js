@@ -870,7 +870,11 @@ const viewportView = {
         mountBoxSearch(
           searchSlot,
           () => trail[trail.length - 1] || shown,
-          (hit) => self.open(hit.uuid, { trail: [...trail, hit] })
+          // The route the server worked out, not the pane's history with the hit tacked on: the
+          // crumb line should read as though the person had clicked down child by child to reach
+          // this box. Their earlier wanderings in the pane are not part of how you get here from
+          // where the search was asked, and showing them would be a path nobody walked.
+          (hit) => self.open(hit.uuid, { trail: hit.route && hit.route.length ? hit.route : [...trail, hit] })
         );
       } else {
         searchSlot.remove(); // an empty pane has nothing to search inside yet
