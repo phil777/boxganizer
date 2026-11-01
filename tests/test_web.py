@@ -3886,6 +3886,55 @@ def test_dropping_a_box_copies_the_link_and_shift_moves_it(client: TestClient) -
     assert client.get(f"/api/boxes/{box['uuid']}").status_code == 200
 
 
+def test_a_landing_zone_clears_on_every_way_a_drag_can_end(client: TestClient) -> None:
+    """The red drop zone must not outlive the drag, whoever swallowed it.
+
+    Each view paints its own zone on `dragover` and takes it off on `dragleave` or on its own
+    `drop`. That fails the moment a view *claims* the drop: a mindmap tile, a checklist line, the
+    tag window's row and a viewport pane all call `stopPropagation()`, so the element behind them is
+    never told the drag ended — and `#canvas` outlives every box, which is how a zone stayed lit
+    while the reader opened other boxes. A cancelled drag or one led out of the window fires no
+    `drop` at all and leaves the same residue.
+
+    So the clearing lives in one function, reachable from every ending: a drop anywhere on the page,
+    `dragend` on the source, the next `dragstart`, and either re-render. The views that swallow the
+    event are asserted to still swallow it, because that is what makes the global clearing load-
+    bearing rather than belt-and-braces.
+    """
+    script = client.get("/static/app.js").text
+
+    where = script.index("const DROP_ZONE_CLASSES")
+    helper = script[where : script.index("function renderMain()", where)]
+    for painted in ("drop-target", "drop-refuse", "drop-refused", "is-target", "tag-target"):
+        assert f'"{painted}"' in helper, f"{painted} is painted as a zone but never cleared"
+    assert "node.classList.remove(...DROP_ZONE_CLASSES)" in helper
+    # All three endings, on the capture phase, or a view's stopPropagation outranks this.
+    wiring = helper[helper.index('for (const ending of [') :]
+    for ending in ("drop", "dragend", "dragstart"):
+        assert f'"{ending}"' in wiring, f"a drag ending {ending} in nothing that clears the zones"
+    assert "document.addEventListener(ending, clearDropZones, true)" in wiring
+    # `dragover` must stay out of the list: clearing while a drag is still over the page would
+    # take the zone off under the pointer and the pane would look dead.
+    opened = wiring.index("for (const ending of [")
+    loop = wiring[opened : wiring.index(", true);", opened)]
+    assert "dragover" not in loop
+
+    # Both re-render entry points clear, because a drag whose source this render destroys reports
+    # nothing back: a detached element does not bubble, so no listener above can be relied on.
+    main = script[script.index("function renderMain()") :]
+    side = script[script.index("function renderSide()") :]
+    assert "clearDropZones();" in main[: main.index("canvas.replaceChildren()")]
+    assert "clearDropZones();" in side[: side.index("list.replaceChildren()")]
+
+    # The swallowing views still swallow — the reason the clearing is not left to them.
+    swallowed = sum(
+        1
+        for match in re.finditer(re.escape('addEventListener("drop"'), script)
+        if "stopPropagation()" in script[match.start() : match.start() + 700]
+    )
+    assert swallowed >= 3, f"only {swallowed} drop handlers claim the event exclusively"
+
+
 def test_the_page_draws_the_owners_scale_and_offers_the_controls_for_it(client: TestClient) -> None:
     """Four pictures, sixteen presets and a picker — and the server, not the page, decides where
     the value sits on the scale.

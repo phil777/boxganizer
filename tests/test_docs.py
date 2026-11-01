@@ -59,6 +59,32 @@ def test_every_local_link_in_the_readme_resolves() -> None:
             )
 
 
+def test_every_local_link_in_the_docs_resolves() -> None:
+    """The same mechanic for the files the README hands the reader off to.
+
+    Relative links inside `doc/` are resolved from the file they are written in, which is the
+    mistake this catches: a link to `doc/web-app.md#…` copied into `doc/web-app.md` itself points at
+    `doc/doc/`, looks fine in the editor, and 404s for the reader.
+    """
+    checked = 0
+    for page in sorted((ROOT / "doc").rglob("*.md")):
+        for target in LINK.findall(page.read_text(encoding="utf-8")):
+            if target.startswith(("http://", "https://", "mailto:", "#", f"{SCHEME}:")):
+                continue
+            path_part, _, fragment = target.partition("#")
+            resolved = (page.parent / path_part).resolve()
+            assert resolved.exists(), (
+                f"{page.relative_to(ROOT)} links a file that is not there: {target}"
+            )
+            if fragment:
+                assert fragment in anchors_of(resolved), (
+                    f"{page.relative_to(ROOT)} links #{fragment} in {path_part}, "
+                    "which has no such heading"
+                )
+            checked += 1
+    assert checked, "no local links found anywhere under doc/ — the check would be vacuous"
+
+
 def test_the_four_screenshots_exist_and_are_pictures_of_something() -> None:
     """A committed PNG that is a few kilobytes is a broken capture, not a screenshot.
 

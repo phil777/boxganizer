@@ -440,6 +440,40 @@ function dragBox(event, uuid, fromUuid) {
 }
 
 /**
+ * The classes that mean "a drop is landing here", and the one place that takes them off.
+ *
+ * Each view paints one on `dragover` and takes it off on `dragleave` or on its own `drop`. That
+ * holds until a view *claims* the drop: a grid cell, a checklist line, a desktop tile and a mindmap
+ * node all call `stopPropagation()`, so the pane behind them is never told the drag ended, and a
+ * pane that is never told stays outlined. `#canvas` and the folder's list outlive the box they were
+ * painted for, which is why the landing zone was still glowing after opening other boxes. A drag
+ * cancelled with Escape, or led out of the window, fires no `drop` anywhere and leaves the same
+ * residue.
+ *
+ * So clearing does not belong to the element that painted it. Every path that can end a drag — a
+ * drop on the page, `dragend` on the source, the start of the next drag, and any re-render — reaches
+ * this one function. Only *invitations* are listed: a class a view paints to answer "what just
+ * happened" — a status sentence, a box that appears in a list after the server files it — is not a
+ * landing zone, and because the clearing runs before the view's own handler, anything a drop paints
+ * afterwards is untouched by it. That ordering is what makes this safe rather than merely convenient.
+ */
+const DROP_ZONE_CLASSES = ["drop-target", "drop-refuse", "drop-refused", "is-target", "tag-target"];
+const DROP_ZONE_SELECTOR = DROP_ZONE_CLASSES.map((name) => `.${name}`).join(",");
+
+function clearDropZones() {
+  for (const node of document.querySelectorAll(DROP_ZONE_SELECTOR)) {
+    node.classList.remove(...DROP_ZONE_CLASSES);
+  }
+}
+
+// Capture phase on the document, so a `stopPropagation()` in a view cannot keep the event from
+// reaching this. The view that takes the drop paints its own feedback afterwards, which is why
+// clearing first is safe rather than merely tolerable.
+for (const ending of ["drop", "dragend", "dragstart"]) {
+  document.addEventListener(ending, clearDropZones, true);
+}
+
+/**
  * A box was dropped on something that can hold it.
  *
  * **A plain drop copies the link**: the box is filed where it landed and stays where it came from.
@@ -1960,6 +1994,11 @@ function toggleConfigHeader() {
 
 function renderMain() {
   const canvas = el("canvas");
+  // A drag whose source this render destroys never reports back: a detached element does not bubble,
+  // so neither `dragend` nor a `drop` reaches the listeners above. Anything still painted would
+  // otherwise stay painted on the pane, which outlives every box. This is also what clears a zone
+  // that some view painted and then forgot, whatever the reason.
+  clearDropZones();
   canvas.replaceChildren();
   // Whatever the box that was on screen had open, it is not on screen now.
   releaseLive();
@@ -2143,6 +2182,7 @@ function orderedForSide(boxes) {
 
 function renderSide() {
   const list = el("box-list");
+  clearDropZones(); // the folder's own list is a drop zone that outlives every re-render of it
   list.replaceChildren();
   orderedForSide(state.boxes).forEach((box) => {
     const item = document.createElement("li");

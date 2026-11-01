@@ -46,9 +46,12 @@ to one box: **About**, **Check the library**, and the two index passes. Along th
 in front of the box count, the index reports itself all the time — `75 indexed`, or `2 out
 of date`, or `indexing…` — with the detail on hover, including which files hold nothing to
 read. A drop that no view claimed files the box into the box you are looking at, so the
-whole pane takes it.
+whole pane takes it. The outline that says *drop here* is the page's to take away, not the
+element's that drew it: a view that claims a drop stops the event, so the pane behind it is never
+told, and one drag cancelled with Escape never fires a drop at all. Every ending clears every zone
+(ADR 27), which is why a red outline no longer follows you into the next three boxes.
 
-What each kind of box draws is set out in [doc/web-app.md](doc/web-app.md#what-each-box-shows) — the four rows worth knowing before you open anything: a **note** is a sheet you can switch between editing and reading, a **folder** is a list or a set of icons, a **grid** is rows and columns you size, and a **viewport** lends its space to other boxes. Anything with no view of its own shows its icon and its detail panel.
+What each kind of box draws is set out in [What each box shows](#what-each-box-shows) — the four rows worth knowing before you open anything: a **note** is a sheet you can switch between editing and reading, a **folder** is a list or a set of icons, a **grid** is rows and columns you size, and a **viewport** lends its space to other boxes. Anything with no view of its own shows its icon and its detail panel.
 
 A box created **from** another box — "New box here" on a folder, "New box in X" in
 a right-click menu, a cell of a grid — has that box already chosen as its parent,
