@@ -64,6 +64,22 @@ beside the database, named in the sentence you get back (ADR 14). The **root** i
 deletion, and the server refuses it in the same words if asked by another route: deleting it would
 leave nowhere to file anything. `box rm` asks the same question and answers with the same facts.
 
+**Every box has a search of its own**, on the tag line: the field sits on the left and the tags stay
+right of centre. It asks the library's existing full-text question restricted to that box and whatever
+is filed below it — same ranking, same passage, same widening, one extra set clause — so nothing is
+re-read to answer it, and a cycle in the graph terminates instead of looping (ADR 33). A window unrolls
+under the field as results arrive: each row says *via* which boxes you would reach it, and a row that
+matched inside a file names the file and quotes the words. Escape closes it, clicking away closes it,
+and the rows are reachable with the arrow keys and **Enter**.
+
+Where a result opens depends on where you asked. From the library, it becomes the current box and the
+box you searched from stays in the crumb line. Inside a viewport, it replaces that pane's box and the
+crumb line shows the route down to it, each crumb clickable — as if you had clicked through the
+children yourself, and never the pane's earlier wanderings. A search in one pane never moves another.
+When the match is a file rather than a box, the box that holds it opens, the field is already filled
+with the word, and the window is already unrolled on it, because you wanted the file, not a box you
+must now search again.
+
 What each kind of box draws is set out in [What each box shows](#what-each-box-shows) — the four rows worth knowing before you open anything: a **note** is a sheet you can switch between editing and reading, a **folder** is a list or a set of icons, a **grid** is rows and columns you size, and a **viewport** lends its space to other boxes. Anything with no view of its own shows its icon and its detail panel.
 
 A box created **from** another box — "New box here" on a folder, "New box in X" in
