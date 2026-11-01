@@ -504,7 +504,7 @@ def test_the_root_view_shows_its_one_child_content(client: TestClient) -> None:
     # the brief of a child is not enough to be the subject of the page: it carries
     # nothing the child itself contains, so the one box on screen is fetched whole
     assert "child = await api.box(child.uuid);" in script
-    assert "renderContent(block, child, { depth: 1, embedded: false })" in script
+    assert "renderContent(block, child, ctx, { depth: 1, embedded: false })" in script
     assert "Drag a box here from the panel on the left" in script
     assert ".root-empty" in client.get("/static/app.css").text
 
@@ -638,7 +638,7 @@ def test_grid_cells_render_child_content_to_a_bounded_depth(client: TestClient) 
     script = client.get("/static/app.js").text
     assert "MAX_EMBED_DEPTH" in script
     assert "class" in script and 'cell.classList.add("occupied")' in script
-    assert "renderContent(content, child, { depth: childDepth, cell: true })" in script
+    assert "renderContent(content, child, ctx, { depth: childDepth, cell: true })" in script
     assert ".cell-content" in client.get("/static/app.css").text
 
 
@@ -1756,7 +1756,7 @@ def test_the_sensor_view_holds_the_password_back_and_the_connection_short(
     # renderContent, or a wall of sensors becomes a wall of subscriptions.
     assert "if (opts.cell) {" in script
     assert 'chip.textContent = info.reading ? "last value" : "no value yet";' in script
-    assert "renderContent(content, child, { depth: childDepth, cell: true })" in script
+    assert "renderContent(content, child, ctx, { depth: childDepth, cell: true })" in script
     assert "{ embedded, depth, cell }" in script
     # A dropped connection carries no body, and is a retry rather than a refusal.
     assert 'typeof event.data !== "string"' in script
@@ -1807,7 +1807,7 @@ def test_the_root_shows_the_child_itself_and_keeps_what_a_child_took(
     script = client.get("/static/app.js").text
     # Asked as the subject of the page, not as a tile: a plain box answers an
     # embedded call with its icon, and a desktop with no toolbar of its own.
-    assert "renderContent(block, child, { depth: 1, embedded: false })" in script
+    assert "renderContent(block, child, ctx, { depth: 1, embedded: false })" in script
     # A drop the child's own view already took is not the root's to answer, or
     # dropping an icon on the desktop shown by the root would replace that desktop.
     assert "if (event.defaultPrevented) return;" in script
@@ -2672,7 +2672,9 @@ def test_a_box_named_in_a_note_is_inert_until_the_page_wires_it(client: TestClie
     wiring = script[start : script.index("\n  // -- writing", start)]
     assert 'a[href^="' in wiring
     assert "anchorEl.removeAttribute(" in wiring
-    assert "openBox(uuid)" in wiring
+    # and the click opens the box *in the space the note is being read* — a pane, or the page —
+    # rather than over the top of whatever is holding the note
+    assert "ctx.open(uuid, { trail: ctx.trail() });" in wiring
 
 
 def test_the_vnc_view_asks_before_it_draws_and_never_holds_a_socket(client: TestClient) -> None:
@@ -3214,6 +3216,49 @@ def test_the_tag_window_asks_for_no_endpoint_that_does_not_exist(
         ("put", "/api/boxes/{ref}/tags"),
         ("delete", "/api/boxes/{ref}/tags/{name}"),
     }, routes
+
+
+def test_a_box_drawn_inside_another_keeps_the_navigation_of_the_space_it_is_in(
+    client: TestClient,
+) -> None:
+    """Where a click takes you belongs to the space; what a setting writes belongs to the box.
+
+    A viewport pane drew its own box with the pane's context and then, one level down, handed the
+    page's context to everything embedded — a folder in a grid cell, a child under the root. Double-
+    clicking that folder's child asked the *page* to navigate, so it replaced the viewport that was
+    holding the whole thing and the pane's path never grew. The write side was wrong the other way:
+    an embedded desktop saved its magnet onto the grid box, because `saveSetting` reads
+    `state.current` rather than the box it is drawing.
+
+    Both are fixed at the one place every view is entered through, because a rule applied per view
+    is a rule each new view gets to forget.
+    """
+    script = client.get("/static/app.js").text
+
+    enter = script[script.index("async function renderContentIn(") :]
+    enter = enter[: enter.index("function contextFor(box, ctx)")]
+    assert "contextFor(box, ctx)" in enter
+
+    derive = script[script.index("function contextFor(box, ctx)") :]
+    derive = derive[: derive.index("function renderBreadcrumb()")]
+    assert "if (!owner || owner.uuid === box.uuid) return ctx;" in derive
+    assert "saveSettingFor(box, key, value, { onSaved: () => ctx.reload() }, options)" in derive
+    assert "saveSectionFor(box, section, patch, { onSaved: () => ctx.reload() }, options)" in derive
+
+    # a context says which box it is about, on both surfaces
+    assert "owner: () => state.current," in script
+    assert "owner: () => target," in script
+
+    # nothing substitutes the page's context for the caller's any more
+    assert "async function renderContent(container, box, ctx," in script
+    assert "renderContentIn(container, box, context," not in script
+    assert "renderContent(content, child, ctx," in script  # a grid cell
+    assert "renderContent(block, child, ctx," in script  # the root's child
+
+    # and a box named inside a note or a checklist opens where it was read
+    assert script.count("ctx.open(uuid, { trail: ctx.trail() })") >= 1
+    assert script.count("ctx.open(child.uuid, { trail: ctx.trail() })") >= 7
+    assert "if (!gone) openBox(child.uuid);" not in script
 
 
 def test_a_dialog_reports_its_own_refusal(client: TestClient) -> None:

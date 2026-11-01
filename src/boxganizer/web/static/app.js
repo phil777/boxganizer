@@ -413,6 +413,19 @@ async function saveSetting(key, value, { rerender = true } = {}) {
 }
 
 
+/** Merge one patch into one config section of a box that is not the one the page is centred on. */
+async function saveSectionFor(box, section, patch, { onSaved } = {}, options = {}) {
+  const current = { ...(box.config || {}) };
+  current[section] = { ...(current[section] || {}), ...patch };
+  box.config = current;
+  try {
+    await api.setConfig(box.uuid, current);
+    if (onSaved) await onSaved();
+  } catch (error) {
+    status(`could not save ${section}: ${error.message}`, true);
+  }
+}
+
 /**
  * Say what is being dragged, and where it came from.
  *
@@ -471,6 +484,9 @@ async function dropBox(event, ctx, targetUuid, { after = null, label = null } = 
 /* ------------------------------------------------------------ main pane ---- */
 
 const context = {
+  // Which box this context is *about*. A view asked to draw a box it is not tells the difference
+  // below and aims its writes at the box it was handed instead.
+  owner: () => state.current,
   open: openBox,
   status,
   saveSetting,
@@ -617,6 +633,7 @@ const viewportView = {
       function paneContext(target) {
         return {
           ...context,
+          owner: () => target,
           open: (ref, options = {}) => self.open(ref, options),
           trail: () => trail,
           reload: () => self.reload(),
@@ -1961,14 +1978,42 @@ const MAX_EMBED_DEPTH = 2;
  * because a wall of twelve live boxes would otherwise be twelve subscriptions.
  * The root view shows its one child at full size, so it does not set the flag.
  */
-async function renderContent(container, box, { depth, embedded = true, cell = false }) {
-  await renderContentIn(container, box, context, { depth, embedded, cell });
+async function renderContent(container, box, ctx, { depth, embedded = true, cell = false }) {
+  await renderContentIn(container, box, ctx, { depth, embedded, cell });
 }
 
 /** The same, with a caller's context — which is how a viewport pane gets its own navigation. */
 async function renderContentIn(container, box, ctx, { depth = 0, embedded = true, cell = false } = {}) {
   const view = viewFor(box) || views.get("*");
-  await view.render(container, box, ctx, "content", { embedded, depth, cell });
+  await view.render(container, box, contextFor(box, ctx), "content", { embedded, depth, cell });
+}
+
+/** The context a box is drawn with, when it is drawn inside a space that is not about it.
+
+    Two things travel together in a context and they are not the same thing. **Where a click takes
+    you** — the trail, the status line, reload — belongs to the space the box is drawn in: the page,
+    or one pane of a viewport. **What a setting writes** belongs to the box whose view is writing it.
+
+    Only one of those was ever passed down. `renderContent` handed embedded boxes the page's own
+    context, so a folder drawn inside a grid cell inside a viewport pane asked the *page* to navigate:
+    double-clicking its child replaced the viewport that was holding all of it, and the pane's path
+    never grew. The write side was wrong in the other direction on the main screen — a desktop
+    embedded in a grid cell saved its magnet onto the grid box, because `saveSetting` reads
+    `state.current` and not the box it was drawing.
+
+    So the pair is split here, at the one place every view is entered through: navigation stays the
+    space's, and the writes are aimed at the box in hand.
+*/
+function contextFor(box, ctx) {
+  const owner = ctx && ctx.owner ? ctx.owner() : null;
+  if (!owner || owner.uuid === box.uuid) return ctx;
+  return {
+    ...ctx,
+    saveSetting: (key, value, options = {}) =>
+      saveSettingFor(box, key, value, { onSaved: () => ctx.reload() }, options),
+    saveSection: (section, patch, options = {}) =>
+      saveSectionFor(box, section, patch, { onSaved: () => ctx.reload() }, options),
+  };
 }
 
 function emptyMessage(text) {
@@ -3947,7 +3992,12 @@ function chipFor(child, ctx, fromUuid) {
   chip.draggable = true;
   chip.append(iconElement(child), document.createTextNode(` ${child.name}`));
   chip.addEventListener("dragstart", (event) => dragBox(event, child.uuid, chip.dataset.from));
-  chip.addEventListener("dblclick", () => ctx.open(child.uuid, { trail: ctx.trail() }));
+  chip.addEventListener("dblclick", (event) => {
+    // The chip is inside a cell, and the cell answers double-click too. Without this the one
+    // gesture opens the box you pointed at *and* the box around it: two navigations, one dblclick.
+    event.stopPropagation();
+    ctx.open(child.uuid, { trail: ctx.trail() });
+  });
   return chip;
 }
 
@@ -4044,7 +4094,7 @@ function gridCell(box, ctx, row, column, child, depth) {
     cell.append(content);
     const childDepth = depth + 1;
     if (childDepth <= MAX_EMBED_DEPTH) {
-      renderContent(content, child, { depth: childDepth, cell: true }).catch((error) => {
+      renderContent(content, child, ctx, { depth: childDepth, cell: true }).catch((error) => {
         content.replaceChildren(emptyMessage(error.message));
       });
     } else {
@@ -4618,9 +4668,10 @@ function desktopIcon(box, child, rect, options, ctx) {
       .querySelectorAll(".desktop-icon")
       .forEach((other) => other.classList.toggle("selected", other === tile));
   });
-  tile.addEventListener("dblclick", () =>
-    ctx.open(child.uuid, { trail: ctx.trail() })
-  );
+  tile.addEventListener("dblclick", (event) => {
+    event.stopPropagation(); // a desktop sitting in a grid cell is two claimers of one dblclick
+    ctx.open(child.uuid, { trail: ctx.trail() });
+  });
   tile.addEventListener("keydown", (event) => {
     const cell = Number(options.grid) || DESKTOP_DEFAULTS.grid;
     const step = {
@@ -4747,7 +4798,7 @@ registerView("root", {
       // Not embedded: the root's child is the subject of the page, not a tile in
       // somebody else's layout. Asking it the way a cell does makes a plain box
       // answer with its icon and a desktop answer without its toolbar.
-      renderContent(block, child, { depth: 1, embedded: false }).catch((error) => {
+      renderContent(block, child, ctx, { depth: 1, embedded: false }).catch((error) => {
         block.replaceChildren(emptyMessage(error.message));
       });
     } else {
@@ -5412,9 +5463,10 @@ function childTile(child, parent, ctx) {
       .querySelectorAll(".child")
       .forEach((other) => other.classList.toggle("selected", other === item));
   });
-  item.addEventListener("dblclick", () =>
-    ctx.open(child.uuid, { trail: ctx.trail() })
-  );
+  item.addEventListener("dblclick", (event) => {
+    event.stopPropagation(); // claimed: nothing outside this row also opens a box
+    ctx.open(child.uuid, { trail: ctx.trail() });
+  });
   item.addEventListener("dragstart", (event) => dragBox(event, child.uuid, parent.uuid));
   item.addEventListener("contextmenu", (event) => {
     event.preventDefault();
@@ -5669,7 +5721,11 @@ const directoryView = {
         size.className = "fs-size muted";
         size.textContent = entry.kind === "dir" ? "" : formatSize(entry.size);
         row.append(glyph, name, kind, size);
-        row.addEventListener("dblclick", () => (entry.kind === "dir" ? enter(entry) : openEntry(entry)));
+        row.addEventListener("dblclick", (event) => {
+          event.stopPropagation();
+          if (entry.kind === "dir") enter(entry);
+          else openEntry(entry);
+        });
         row.addEventListener("click", () => {
           pane.querySelectorAll(".fs-row").forEach((other) => other.classList.toggle("selected", other === row));
         });
@@ -8024,7 +8080,8 @@ async function noteView(canvas, box, ctx, opts = {}) {
           : `open ${known ? known.name : uuid}`;
       anchorEl.addEventListener("click", (event) => {
         event.preventDefault();
-        if (!(known && known.gone)) openBox(uuid);
+        event.stopPropagation();
+        if (!(known && known.gone)) ctx.open(uuid, { trail: ctx.trail() });
       });
     });
   }
@@ -8416,7 +8473,8 @@ async function checklistView(canvas, box, ctx, opts = {}) {
     tag.textContent = gone ? "\u2753 missing" : `${child.icon || "\u{1f4e6}"} ${child.name}`;
     tag.addEventListener("click", (event) => {
       event.preventDefault();
-      if (!gone) openBox(child.uuid);
+      event.stopPropagation();
+      if (!gone) ctx.open(child.uuid, { trail: ctx.trail() });
     });
     if (!gone) {
       tag.draggable = true;

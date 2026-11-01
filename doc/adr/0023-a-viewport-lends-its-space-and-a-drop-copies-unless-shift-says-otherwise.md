@@ -204,3 +204,34 @@ you acted on could finish underneath everything. Now the frame listens in the ca
 the window above its siblings immediately, buttons are excluded from that path because the actions that
 come with them raise the window server-side (maximize and minimize that stay buried do neither job), and
 a maximized window's title does not drag — it is the board.
+
+---
+
+## Amendment (2026-11-11): a context is two things, and an embedded box needs both halves
+
+A pane renders its box with a context of its own — its trail, its status line, its reload. Only its
+*own* box. Everything the view embedded (a folder inside a grid cell, the child under the root view)
+was drawn through `renderContent`, which handed over the page's context. So the deepest box asked the
+page to navigate, and a double-click on a grandchild replaced the viewport that was holding it. The
+write side was wrong in the other direction: `saveSetting`/`saveSection` read `state.current`, so a
+folder embedded in a grid cell saved its layout onto the grid, and on the root view the root box
+accumulated its child's settings.
+
+The fix splits the pair at the one place every view is entered from — `renderContentIn` — rather than
+in each view, because a rule every view has to remember is a rule one view will forget:
+
+* **Where a click goes** belongs to the space the box is drawn in: the page, or one pane. That is the
+  caller's context, now threaded through `renderContent` instead of replaced by the page's.
+* **What a setting writes** belongs to the box whose view is writing it. `contextFor(box, ctx)` aims
+  `saveSetting` and `saveSection` at the box in hand when the context is about a different box, and
+  leaves it alone otherwise — so nothing changes for the depth-zero case that was already right.
+
+For a context to know what it is about, both surfaces say so: `owner: () => state.current` on the
+page, `owner: () => target` on a pane.
+
+One consequence measured rather than assumed: a gesture that a nested view claims must stop bubbling,
+or one double-click performs two navigations — the embedded row *and* the cell around it. Folder rows,
+grid chips, desktop tiles, directory rows, note mentions and checklist chips now say so.
+
+The root view is the case where the two halves disagree in the open: it is the main screen, so
+navigation there *should* replace the page — and its child's settings still belong to the child.

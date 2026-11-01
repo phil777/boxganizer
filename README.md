@@ -285,8 +285,10 @@ whatever the **windows** slider says; the focused one stays solid, so the desk c
 pile without the box you are reading going with it. Every pane and window brings its own gear: a box's settings row folds
 and unfolds inside the space it occupies, so changing a grid's columns does not unfold the checklist
 beside it, and the gear in the page's top line folds only the box on the main screen. What a viewport
-shows, it holds: those boxes are its children, so the
-tree view and the side list agree with the page. Dragging a box onto another box **copies the link**
+shows, it holds: those boxes are its children, so the tree view and the side list agree with the page.
+Opening a box **inside a pane stays inside that pane**, however deep it is embedded: a folder in a grid
+cell in a pane answers to that pane's path line, and the settings its own view writes land on the
+folder — not on the grid, and not on the viewport around it. Dragging a box onto another box **copies the link**
 (it is filed in both); **holding Shift moves it** (filed here, taken off where it came from, in one
 request so it is never nowhere). ADR 23.
 
