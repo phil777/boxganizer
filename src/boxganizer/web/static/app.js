@@ -1346,6 +1346,166 @@ async function saveSettingFor(box, key, value, { onSaved }, options = {}) {
  * mean is how tags get invented, and sending someone to a manage window first is a rule about
  * the schema rather than about their filing.
  */
+/**
+ * The search field that belongs to one box, and the window that unrolls under it.
+ *
+ * One function for every surface that has a line of its own, because a copy per view is a bug per
+ * view: the folder would gain keyboard navigation and the grid would not, and someone would file
+ * that as two tickets. It is handed the box whose subtree it searches (`owner`) and what to do with
+ * a chosen hit (`open`), so a pane searches its own box and opens inside itself without knowing it
+ * is a pane.
+ *
+ * The search is the ordinary one with a scope attached (`api.search(term, owner.uuid)`), so results
+ * arrive ranked and with a passage of the words that matched, and no file is read to work out what
+ * is inside. `path` is the box's route down from `owner`, which is how the window can show *how you
+ * would get there* for a hit three levels deep that the reader never clicked through.
+ */
+function mountBoxSearch(mount, owner, open) {
+  const form = document.createElement("form");
+  form.className = "box-search";
+  form.setAttribute("role", "search");
+
+  const field = document.createElement("input");
+  field.type = "search";
+  field.className = "box-search-field";
+  field.placeholder = `search inside ${owner.name}`;
+  field.setAttribute("aria-label", `search boxes and files inside ${owner.name}`);
+  field.setAttribute("aria-expanded", "false");
+  field.autocomplete = "off";
+
+  const results = document.createElement("ul");
+  results.className = "box-search-results";
+  results.setAttribute("role", "listbox");
+  results.hidden = true;
+
+  form.append(field, results);
+  mount.append(form);
+  form.addEventListener("submit", (event) => event.preventDefault());
+
+  let hits = [];
+  let active = -1;
+  let token = 0;
+  const generation = paneGeneration; // which box this widget was mounted for
+
+  const close = () => {
+    results.hidden = true;
+    results.textContent = "";
+    field.setAttribute("aria-expanded", "false");
+    active = -1;
+  };
+
+  const paint = () => {
+    results.textContent = "";
+    hits.forEach((hit, index) => {
+      const row = document.createElement("li");
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(index === active));
+      const icon = iconElement(hit);
+      const name = document.createElement("span");
+      name.className = "box-search-name";
+      name.textContent = hit.name;
+      row.append(icon, name);
+
+      // Where the hit sits under the box being searched, when it is not the box itself.
+      const routes = (hit.path || []).slice(1, -1);
+      if (routes.length) {
+        const via = document.createElement("span");
+        via.className = "box-search-via muted";
+        via.textContent = routes.join(" › ");
+        row.append(via);
+      }
+      if (hit.match && hit.match.how === "content") {
+        const why = document.createElement("span");
+        why.className = "box-search-why muted";
+        // The words that matched are already bracketed by the snippet, so the reader sees why this
+        // one came up rather than having to open it to find out.
+        why.textContent = (hit.match.in_file || (hit.match.passage || "").replace(/\s+/g, " ").trim()).slice(0, 90);
+        row.append(why);
+      }
+      row.addEventListener("mousedown", (event) => {
+        // before blur, or the window closes on the way to the click that would have used it
+        event.preventDefault();
+        choose(hit);
+      });
+      results.append(row);
+    });
+    if (!hits.length) {
+      const none = document.createElement("li");
+      none.className = "box-search-none muted";
+      none.textContent = field.value.trim() ? "nothing in here matches" : "";
+      if (!field.value.trim()) {
+        close();
+        return;
+      }
+      results.append(none);
+    }
+    results.hidden = false;
+    field.setAttribute("aria-expanded", "true");
+  };
+
+  function choose(hit) {
+    close();
+    field.value = "";
+    open(hit);
+  }
+
+  let timer = null;
+  field.addEventListener("input", () => {
+    const term = field.value.trim();
+    if (timer) clearTimeout(timer);
+    if (!term) {
+      close();
+      return;
+    }
+    const mine = ++token;
+    timer = setTimeout(async () => {
+      let answer;
+      try {
+        answer = await api.search(term, owner.uuid);
+      } catch (error) {
+        status(error.message, true);
+        return;
+      }
+      // A reply to an older keystroke must not overwrite the newer one it already answered, and a
+      // reply for a box that has left the screen must not paint on this one at all.
+      if (mine !== token || !stillOnScreen(generation)) return;
+      hits = answer;
+      active = hits.length ? 0 : -1;
+      paint();
+    }, 180);
+  });
+
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation(); // the pane, the modal and the page all listen for this key
+      close();
+      return;
+    }
+    if (results.hidden || !hits.length) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      active = (active + step + hits.length) % hits.length;
+      paint();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (active >= 0 && hits[active]) choose(hits[active]);
+    }
+  });
+
+  // Blur closes it, but not when the focus moved into the window itself: the rows are reachable by
+  // keyboard, and a window that vanished on the way to them could never be read that way.
+  field.addEventListener("blur", () => {
+    setTimeout(() => {
+      if (!form.contains(document.activeElement)) close();
+    }, 120);
+  });
+
+  return { close };
+}
+
 async function renderTagLine(box) {
   const token = paneGeneration; // a reply for the box before this one must not paint this one
   const line = el("tagline");
@@ -1362,6 +1522,9 @@ async function renderTagLine(box) {
   const tags = document.createElement("span");
   tags.className = "tagline-tags";
   line.append(slot, tags);
+  // Search belongs to the box on screen, and opens where the page opens boxes today: as the
+  // current box, with this box kept as a crumb to come back by.
+  mountBoxSearch(slot, box, (hit) => openBox(hit.uuid, { trail: [...state.trail, box] }));
   let held;
   try {
     held = await api.boxTags(box.uuid);

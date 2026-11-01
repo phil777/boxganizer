@@ -4789,3 +4789,30 @@ def test_an_unknown_box_in_a_scoped_search_is_a_404_and_a_sentence(client: TestC
     response = client.get("/api/search", params={"q": "anything", "under": "Ghost"})
     assert response.status_code == 404
     assert response.json()["detail"]["error"] == "no_such_box"
+
+
+def test_the_box_search_widget_is_one_function_mounted_per_line(client: TestClient) -> None:
+    """One widget for every surface, scoped to the box it was mounted for.
+
+    Asserted as a shape rather than twelve copies: the widget takes its owner and its "open"
+    from the mount, so a pane searches its own box and opens inside itself without knowing it is
+    a pane — and the scope travels as `under` on the ordinary search call.
+    """
+    script = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+
+    widget = script[script.index("function mountBoxSearch(mount, owner, open) {") :]
+    widget = widget[: widget.index("async function renderTagLine(")]
+    # the scope is one argument on the search that already exists
+    assert "api.search(term, owner.uuid)" in widget
+    assert "field.placeholder = `search inside ${owner.name}`" in widget
+    assert 'if (event.key === "Escape")' in widget
+    assert "event.stopPropagation();" in widget, "Escape would otherwise close the pane too"
+    assert 'event.key === "ArrowDown"' in widget
+    assert "!form.contains(document.activeElement)" in widget, "blur must not eat a keyboard visit"
+    assert "if (mine !== token || !stillOnScreen(generation)) return;" in widget
+    assert "box-search-via" in widget, "the route down is shown, not just the hit"
+
+    assert "mountBoxSearch(slot, box," in script[script.index("async function renderTagLine(") :]
+    assert ".box-search-results {" in css and "position: absolute;" in css
+    assert ".tagline-search" in css

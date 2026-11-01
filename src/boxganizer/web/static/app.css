@@ -2828,6 +2828,58 @@ pre.text {
    that is left over — which puts them right of the line's centre without pinning them to the edge.
    The search part keeps its share when it holds nothing, so a tag line does not slide sideways
    the moment a box grows a field. */
+/* The in-box search: a field in the line, and a window that unrolls under it without
+   pushing the page about. `position: relative` on the form is what anchors the window to
+   the field it belongs to, so a pane's results open under that pane. */
+.box-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.box-search-field {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.12rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  width: min(20rem, 100%);
+  min-width: 7rem;
+}
+.box-search-results {
+  position: absolute;
+  top: calc(100% + 0.2rem);
+  left: 0;
+  z-index: 15;
+  min-width: 20rem;
+  max-width: min(34rem, 80vw);
+  max-height: 22rem;
+  overflow: auto;
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  background: Canvas;
+  color: CanvasText;
+  box-shadow: 0 8px 22px rgb(0 0 0 / 22%);
+}
+.box-search-results li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.22rem 0.4rem;
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+.box-search-results li[aria-selected="true"] { background: var(--accent); color: #fff; }
+.box-search-results li[aria-selected="true"] .muted { color: rgb(255 255 255 / 80%); }
+.box-search-via,
+.box-search-why { font-size: 0.72rem; }
+.box-search-why { overflow-wrap: anywhere; }
+.box-search-none { cursor: default; }
+
 .tagline-search {
   display: flex;
   align-items: center;
