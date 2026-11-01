@@ -3036,28 +3036,37 @@ def test_splitting_a_window_gives_the_same_verb_a_different_meaning(client: Test
     assert "drag its corner out first" in refused.json()["detail"]["reason"]
 
 
-def test_a_windowed_viewport_refuses_a_transparency_it_cannot_draw(client: TestClient) -> None:
-    """The floor is where the box inside stops being readable.
+def test_a_windowed_viewport_refuses_a_transparency_outside_itself(client: TestClient) -> None:
+    """0 is solid and 1 is invisible; both ends are allowed, and nothing beyond them is.
 
     Written through the ordinary config endpoint, so the rule lives on the type and not in one
     route: `box edit`, a raw config write and the slider all pass the same door.
     """
     client.post("/api/boxes", json={"name": "Glass", "box_type": "windowed-viewport"})
-    ok = client.put("/api/boxes/Glass/config", json={"config": {"windowed": {"opacity": 0.45}}})
-    assert ok.status_code == 200
-    assert client.get("/api/boxes/Glass/viewports").json()["opacity"] == 0.45
+    for value in (0, 0.4, 1):
+        ok = client.put(
+            "/api/boxes/Glass/config", json={"config": {"windowed": {"opacity": value}}}
+        )
+        assert ok.status_code == 200, value
+        assert client.get("/api/boxes/Glass/viewports").json()["opacity"] == value
 
-    refused = client.put(
-        "/api/boxes/Glass/config", json={"config": {"windowed": {"opacity": 0.02}}}
-    )
+    # a box that never set it is invisible, which is what the control's own default says
+    client.post("/api/boxes", json={"name": "Fresh", "box_type": "windowed-viewport"})
+    assert client.get("/api/boxes/Fresh/viewports").json()["opacity"] == 0
+
+    refused = client.put("/api/boxes/Glass/config", json={"config": {"windowed": {"opacity": 1.4}}})
     assert refused.status_code == 422
-    assert "opacity must be between" in refused.json()["detail"]["reason"]
+    assert "transparency must be between 0 and 1" in refused.json()["detail"]["reason"]
+    refused_low = client.put(
+        "/api/boxes/Glass/config", json={"config": {"windowed": {"opacity": -1}}}
+    )
+    assert refused_low.status_code == 422
     # the box still carries the value it had, not the one that was refused
-    assert client.get("/api/boxes/Glass").json()["config"]["windowed"]["opacity"] == 0.45
+    assert client.get("/api/boxes/Glass").json()["config"]["windowed"]["opacity"] == 1
 
     # a tiling viewport has no windows to fade and does not grow the rule
     client.post("/api/boxes", json={"name": "Tiles", "box_type": "tiling-viewport"})
-    tiles = client.put("/api/boxes/Tiles/config", json={"config": {"windowed": {"opacity": 0.02}}})
+    tiles = client.put("/api/boxes/Tiles/config", json={"config": {"windowed": {"opacity": 7}}})
     assert tiles.status_code == 200
 
 
@@ -3082,6 +3091,17 @@ def test_the_window_controls_are_drawn_not_typed_and_the_chosen_window_is_on_top
     assert 'frame.dataset.state = state;' in frame
     assert 'stateButton("minimize", "vp-minimize"' in frame
     assert 'state === "maximized"' in frame and '"vp-restore"' in frame and '"vp-maximize"' in frame
+    # put in *before* the close button, which keeps the corner to itself
+    assert """controls.querySelector('[data-action="vp-close"]')""" in frame
+    assert "controls.insertBefore(" in frame
+    assert "controls.append(" not in frame
+
+    shell = script[script.index("function paneShell(node, shown)") :]
+    shell = shell[: shell.index('pane.addEventListener("dragover"')]
+    assert "buttons.append(gear);" in shell
+    assert 'if (layout.kind !== "windowed") {' in shell
+    closer = 'buttons.append(button("\u00d7", "Close this viewport", "vp-close"));'
+    assert closer in shell
 
     drag = script[script.index("function dragWindow(frame, grab, entry, kind)") :]
     drag = drag[: drag.index("let briefs")]
@@ -3091,6 +3111,12 @@ def test_the_window_controls_are_drawn_not_typed_and_the_chosen_window_is_on_top
     for glyph in ("vp-icon-minimize", "vp-icon-maximize", "vp-icon-restore"):
         assert f".{glyph}::after" in css, glyph
     assert 'opacity: var(--vp-window-opacity, 1);' in css
+    # a window is painted on a surface you cannot see through, or "solid" would be a lie
+    assert "background: var(--surface);" in css[css.index(".vp-window {") :]
+    flush = css[css.index('.vp-window .vp-btn[data-action="vp-close"] {') :]
+    assert "margin: -1px -1px 0 0;" in flush[:120]
+    assert "border-radius: 0;" in flush[:160]
+
     solid = css[css.index('.vp-window[data-focused="true"] {') :]
     assert "opacity: 1;" in solid[:260]
     assert css.count('.vp-window[data-focused="true"] {') == 1, "one rule per selector"
@@ -3102,7 +3128,16 @@ def test_the_window_controls_are_drawn_not_typed_and_the_chosen_window_is_on_top
     toolbar = script[script.index('bar.className = "vp-toolbar box-config";') :]
     toolbar = toolbar[: toolbar.index("wrap.append(bar);")]
     assert 'slider.type = "range";' in toolbar
-    assert 'slider.min = "20";' in toolbar
+    assert 'slider.min = "0";' in toolbar
+    assert 'slider.max = "100";' in toolbar
+    assert 'word.textContent = "transparency";' in toolbar
+    assert "layout.opacity ?? 0" in toolbar  # the default end: invisible
+    assert "opacity: Number(slider.value) / 100" in toolbar  # one number, stored as itself
+    assert "String(Number(slider.value) / 100)" in toolbar  # and it paints what it stores
+    assert "0 % is invisible, 100 % is solid" in toolbar
+    # one number answers the one question: the stored key is not renamed, so an old box needs no
+    # repair and a library written yesterday opens looking the way it was left
+    assert "windowed.transparency" not in toolbar
     assert 'wrap.style.setProperty("--vp-window-opacity"' in toolbar
     assert 'saveSettingFor(box, "windowed"' in toolbar
 

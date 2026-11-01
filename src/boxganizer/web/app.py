@@ -2533,9 +2533,10 @@ def _viewport_body(store: BoxStore, box: Box) -> dict[str, object]:
         "problems": list(layout.problems),
         # The page disables the button rather than explaining afterwards why nothing happened.
         "closable": len(layout.panes()) > 1,
-        # How solid the windows are drawn. Read from its own config section rather than the layout
-        # one, which is rewritten wholesale on every layout save (see `viewports.opacity_of`).
-        "opacity": viewports.opacity_of(box.config) if layout.kind == "windowed" else 1.0,
+        # How solid the windows are: 0 invisible, 1 solid — the number the **transparency** slider
+        # shows as a percentage. Read from its own config section rather than the layout one,
+        # which is rewritten wholesale on every layout save (see `viewports.opacity_of`).
+        "opacity": viewports.opacity_of(box.config),
     }
 
 

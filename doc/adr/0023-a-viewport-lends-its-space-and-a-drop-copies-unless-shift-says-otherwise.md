@@ -235,3 +235,34 @@ grid chips, desktop tiles, directory rows, note mentions and checklist chips now
 
 The root view is the case where the two halves disagree in the open: it is the main screen, so
 navigation there *should* replace the page — and its child's settings still belong to the child.
+
+---
+
+## Amendment (2026-11-11): transparency goes all the way, a window is not split, and close keeps the corner
+
+Three changes to the windowed viewport, two of them corrections to this ADR's own first judgement.
+
+**Transparency runs the whole way, and it starts at invisible.** The control stopped at 0.2 solid with
+a default of 1, on the grounds that a window you cannot read is no use. That was the wrong lesson: the
+window you *are* reading is the focused one, and it is drawn solid whatever the slider says — so the
+rest of the pile is allowed to recede entirely, which is what the control is for. It is now named
+**transparency**, runs from 0 % (invisible) to 100 % (solid), and **defaults to 0**: opening a windowed
+box shows one solid window on the desk and the others as titles and edges until you touch them. The
+type refuses only what falls outside 0…1.
+
+**One number, one key, no migration.** The value stored is still `windowed.opacity`, meaning exactly
+what it meant before: the proportion of the window that is painted. Renaming a stored key to match a
+control's label is how a library ends up with two answers to one question, and the direction the
+control reads in (0 invisible → 100 solid) is the same direction the number already went in, so a box
+written yesterday keeps its look untouched and needs no repair pass. The label and its tooltip say
+which way is which; the title spells it out because the word "transparency" is honestly ambiguous
+about it.
+
+**A window is not divided, so it is not offered dividing.** Tiling panes keep both split buttons;
+windows lost them. A window floats — the person already knows where its edges are, and the split that
+would mean something there cuts *that window* in two, which the button used to promise and the API used
+to refuse.
+
+**Close lives in the corner.** The `×` is the last control in a window's path line and flush to the
+frame's top-right border, because that is where a hand already goes. The state buttons are inserted
+before it, so a window growing a button does not move the one thing people look for.

@@ -614,18 +614,32 @@ def test_window_states_survive_the_config_round_trip() -> None:
     assert plain.problems == ()
 
 
-def test_a_windowed_viewports_opacity_is_clamped_on_read_and_refused_on_write() -> None:
-    """Silence is solid, a stored value is clamped, and a new one outside the range is refused.
+def test_transparency_runs_from_invisible_to_solid_and_old_numbers_mean_what_they_did() -> None:
+    """0 is invisible, 1 is solid, and nothing is the same as 0.
 
-    The clamp is for something already written; the refusal is `BoxType.check`, which is the only
-    place a value can be turned away before it becomes a box's own words.
+    The setting used to stop at 0.2 solid on the grounds that a window you cannot read is no use.
+    That was the wrong lesson: the window you read is the focused one, which CSS keeps solid
+    whatever the number says, so the rest of the pile may recede all the way out — that is what the
+    control is for. The stored number is the same `windowed.opacity` an existing box already
+    carries, so opening an old library neither flips its windows nor needs a repair pass.
     """
-    assert viewports.opacity_of(None) == 1.0
-    assert viewports.opacity_of({"windowed": {"opacity": "not a number"}}) == 1.0
-    assert viewports.opacity_of({"windowed": {"opacity": 0.01}}) == viewports.MIN_OPACITY
-    assert viewports.opacity_of({"windowed": {"opacity": 0.62}}) == 0.62
-    assert viewports.opacity_problem({}) == ""
-    assert viewports.opacity_problem({"windowed": {}}) == ""
-    assert "between" in viewports.opacity_problem({"windowed": {"opacity": 0.05}})
-    assert "a number" in viewports.opacity_problem({"windowed": {"opacity": "solid"}})
-    assert viewports.opacity_problem({"windowed": 3}) == "'windowed' must hold a settings block"
+    assert viewports.opacity_of(None) == 0.0
+    assert viewports.opacity_of({"windowed": {}}) == 0.0
+    assert viewports.opacity_of({"windowed": {"opacity": "not a number"}}) == 0.0
+    assert viewports.opacity_of({"windowed": {"opacity": 0}}) == 0.0
+    assert viewports.opacity_of({"windowed": {"opacity": 0.4}}) == 0.4  # an old box, unchanged
+    assert viewports.opacity_of({"windowed": {"opacity": 1}}) == 1.0
+    assert viewports.opacity_of({"windowed": {"opacity": -3}}) == 0.0
+    assert viewports.opacity_of({"windowed": {"opacity": 9}}) == 1.0
+
+    assert viewports.transparency_problem({}) == ""
+    assert viewports.transparency_problem({"windowed": {}}) == ""
+    assert viewports.transparency_problem({"windowed": {"opacity": 0}}) == ""
+    assert viewports.transparency_problem({"windowed": {"opacity": 1}}) == ""
+    assert "between 0 and 1" in viewports.transparency_problem({"windowed": {"opacity": 1.4}})
+    assert "between 0 and 1" in viewports.transparency_problem({"windowed": {"opacity": -0.2}})
+    assert "a number" in viewports.transparency_problem({"windowed": {"opacity": "solid"}})
+    assert viewports.transparency_problem({"windowed": 3}) == (
+        "'windowed' must hold a settings block"
+    )
+

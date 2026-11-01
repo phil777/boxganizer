@@ -80,14 +80,16 @@ class WindowedViewport(ViewportBox):
 
     @classmethod
     def check(cls, box: Box) -> None:
-        """The layout, and how see-through the windows are asked to be.
+        """The layout, and the one number about how the windows are drawn.
 
-        A transparency that hides the box inside is not a window; the floor is where the contents
-        stop being readable. It lives here rather than in the layout because the layout is rewritten
-        on every split, move and resize, and this is not part of where the windows are.
+        Transparency runs the whole way from invisible to solid, because the window you are
+        reading is the focused one and it stays solid whatever the number says: a control that stops
+        short of invisible stops short of what the desk behind the pile needs. It is checked here
+        rather than in the layout because the layout is rewritten on every split, move and resize,
+        and this is not part of where the windows are.
         """
         problem = viewports.check(
             box.config, None, cls.viewport_layout
-        ) or viewports.opacity_problem(box.config)
+        ) or viewports.transparency_problem(box.config)
         if problem:
             cls._reject(box, problem)

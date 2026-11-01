@@ -6,6 +6,9 @@
   --line: color-mix(in srgb, currentColor 18%, transparent);
   --accent: #d0021b;
   --panel: color-mix(in srgb, currentColor 4%, transparent);
+  /* A surface you cannot see through. Windows need one: a "solid" window painted with the translucent
+     panel colour is a window that lies about what the slider just did. */
+  --surface: color-mix(in srgb, Canvas 96%, currentColor);
 }
 
 * { box-sizing: border-box; }
@@ -1029,7 +1032,7 @@ pre.text {
   display: flex;
   min-width: 120px;
   min-height: 60px;
-  background: color-mix(in srgb, currentColor 2%, transparent);
+  background: var(--surface);
   box-shadow: 0 2px 8px color-mix(in srgb, currentColor 25%, transparent);
 }
 
@@ -1045,6 +1048,7 @@ pre.text {
 .vp-window .vp-pane {
   border: 0;
   flex: 1 1 auto;
+  background: transparent;
 }
 
 .vp-resize {
@@ -1163,21 +1167,35 @@ pre.text {
   display: none;
 }
 
-.vp-opacity {
+.vp-transparency {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
   font-size: 0.78rem;
 }
 
-.vp-opacity input[type="range"] {
+.vp-transparency input[type="range"] {
   width: 7rem;
   accent-color: var(--accent);
 }
 
-.vp-opacity-value {
+.vp-transparency-value {
   font-variant-numeric: tabular-nums;
   min-width: 3ch;
+}
+
+/* Closing lives in the top-right corner, so it goes there: last in the row, and flush to the frame's
+   border rather than floating a button's width inside it. The other buttons in the corner keep their
+   own padding — this is one control that should sit where a person already reaches for it. */
+.vp-window > .vp-pane > .vp-path {
+  padding-right: 0;
+}
+
+.vp-window .vp-btn[data-action="vp-close"] {
+  margin: -1px -1px 0 0;
+  border-radius: 0;
+  border-top: 0;
+  border-right: 0;
 }
 
 /* The three state buttons and the two split buttons, drawn rather than typed: geometric Unicode is

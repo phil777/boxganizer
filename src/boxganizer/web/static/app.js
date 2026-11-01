@@ -705,12 +705,18 @@ const viewportView = {
         gear.title = open ? "Hide this viewport's settings" : "Show this viewport's settings";
         foldPaneRows(pane);
       });
-      buttons.append(
-        gear,
-        split("horizontal", "Split this viewport side by side"),
-        split("vertical", "Split this viewport above and below"),
-        button("×", "Close this viewport", "vp-close"),
-      );
+      // A tiling pane is divided, so it offers the dividing. A window is not: it floats, and the
+      // person already knows where its edges are — the split that matters there cuts *that window* in
+      // two, which the split buttons used to promise and the API used to refuse.
+      buttons.append(gear);
+      if (layout.kind !== "windowed") {
+        buttons.append(
+          split("horizontal", "Split this viewport side by side"),
+          split("vertical", "Split this viewport above and below"),
+        );
+      }
+      // Close goes on last, so it is the right-most thing in the corner where closing lives.
+      buttons.append(button("×", "Close this viewport", "vp-close"));
       buttons.querySelectorAll("button").forEach((entry) => {
         entry.dataset.node = node;
       });
@@ -939,11 +945,18 @@ const viewportView = {
           item.setAttribute("aria-label", `${title} (viewport ${entry.node})`);
           return item;
         };
-        controls.append(
+        // Inserted before the close button rather than appended after it: closing belongs at the
+        // right-hand end of the corner, and it does not move because a window grew a button.
+        const closer = controls.querySelector('[data-action="vp-close"]');
+        controls.insertBefore(
           stateButton("minimize", "vp-minimize", "Minimize this window to its title"),
+          closer,
+        );
+        controls.insertBefore(
           state === "maximized"
             ? stateButton("restore", "vp-restore", "Restore this window to its own size")
             : stateButton("maximize", "vp-maximize", "Maximize this window over the board"),
+          closer,
         );
       }
 
@@ -1079,34 +1092,40 @@ const viewportView = {
         // windowed board — the thing underneath is the reason you are looking at it — and the number
         // beside it is what the pointer is on, because "0.62" is not a thing anyone can judge by eye
         // while "you can read the box behind" is.
+        // How transparent the windows are: **0 % invisible, 100 % solid**, and the default is 0 — so
+        // a windowed box shows you the window you last touched and lets the rest of the pile recede.
+        // The focused window is exempt from the number (CSS, not here): the box you are reading is
+        // never the one you cannot see.
         const label = document.createElement("label");
-        label.className = "vp-opacity";
+        label.className = "vp-transparency";
         const word = document.createElement("span");
-        word.textContent = "windows";
+        word.textContent = "transparency";
         const slider = document.createElement("input");
         slider.type = "range";
-        slider.min = "20";
+        slider.min = "0";
         slider.max = "100";
         slider.step = "5";
-        slider.value = String(Math.round((layout.opacity ?? 1) * 100));
-        slider.dataset.action = "vp-opacity";
-        slider.setAttribute("aria-label", "how solid the windows are");
+        slider.value = String(Math.round((layout.opacity ?? 0) * 100));
+        slider.dataset.action = "vp-transparency";
+        slider.title = "0 % is invisible, 100 % is solid. The window you click stays solid either way.";
+        slider.setAttribute("aria-label", "transparency — 0 invisible, 100 solid");
         const readout = document.createElement("span");
-        readout.className = "vp-opacity-value";
-        readout.textContent = `${slider.value}%`;
-        const paintOpacity = () => {
+        readout.className = "vp-transparency-value";
+        const paintTransparency = () => {
           wrap.style.setProperty("--vp-window-opacity", String(Number(slider.value) / 100));
           readout.textContent = `${slider.value}%`;
         };
-        paintOpacity();
-        slider.addEventListener("input", paintOpacity);
+        paintTransparency();
+        slider.addEventListener("input", paintTransparency);
         slider.addEventListener("change", () => {
           // Written to its own config section, not to the layout: every split, move and resize
-          // rewrites the layout wholesale, and this is not part of where the windows are.
+          // rewrites the layout wholesale, and this is not part of where the windows are. One key for
+          // one question — the number a box already carried means the same thing it always did, so
+          // opening an old library does not change how its windows look (ADR 23).
           saveSettingFor(box, "windowed", { ...(box.config || {}).windowed, opacity: Number(slider.value) / 100 }, {
             onSaved: async () => {
               apply(await api.viewports(box.uuid));
-              ctx.status(`windows at ${slider.value}% solid`);
+              ctx.status(`windows ${slider.value}% transparent`);
             },
           });
         });

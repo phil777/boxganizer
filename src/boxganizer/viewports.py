@@ -197,10 +197,18 @@ MIN_WINDOW = 120
 MINIMIZED_HEIGHT = 34
 #: The three a window can be in. A fourth would be a state the buttons cannot reach.
 WINDOW_STATES = ("normal", "maximized", "minimized")
-#: How transparent a windowed viewport may be made before its contents stop being readable.
-MIN_OPACITY = 0.2
+#: How solid the windows of a windowed viewport are drawn, 0 (invisible) to 1 (solid). The
+#: control beside it is called **transparency** and reads this number as a percentage: 0 % is
+#: invisible, 100 % is solid, and the window under the pointer is drawn solid whatever it says —
+#: which is what makes letting the rest of the pile disappear a kindness rather than a fault.
+#:
+#: One key, `windowed.opacity`, for one question. It was introduced with a floor of 0.2 and a
+#: default of 1; both ends moved, and a box written then carries a number that still means the
+#: same thing, so nothing in an existing library is repaired or gets a surprise look.
+MIN_OPACITY = 0.0
 MAX_OPACITY = 1.0
-OPACITY_SECTION = "windowed"
+WINDOW_SETTINGS_SECTION = "windowed"
+OPACITY_KEY = "opacity"
 
 
 @dataclass(frozen=True)
@@ -820,44 +828,42 @@ def _splits(tree: Node | None) -> int:
 
 
 def opacity_of(config: dict[str, Any] | None) -> float:
-    """How solid the windows of a windowed viewport are drawn, 0.2 to 1.
+    """How solid a windowed viewport's windows are drawn, 0 (invisible) to 1 (solid).
 
     Kept out of the viewport section on purpose: that one is rewritten wholesale every time the
-    layout is saved, and a person's transparency choice is not part of the layout. Absent or
-    unreadable is solid, which is what a window was before this existed.
+    layout is saved, and a person's transparency choice is not part of where the windows are.
+    Absent, unreadable, or an empty section all mean invisible — the default of the control that
+    sets it, so a box nobody has adjusted behaves like the slider has never been touched.
     """
-    section = (config or {}).get(OPACITY_SECTION)
+    section = (config or {}).get(WINDOW_SETTINGS_SECTION)
     if not isinstance(section, dict):
-        return 1.0
+        return MIN_OPACITY
     try:
-        value = float(section.get("opacity", 1.0))
+        value = float(section.get(OPACITY_KEY, MIN_OPACITY))
     except (TypeError, ValueError):
-        return 1.0
+        return MIN_OPACITY
     return min(MAX_OPACITY, max(MIN_OPACITY, value))
 
 
-def opacity_problem(config: dict[str, Any] | None) -> str:
-    """Why a stored opacity is not a legal one, or empty when it is.
+def transparency_problem(config: dict[str, Any] | None) -> str:
+    """Why the stored transparency is not a legal one, or empty when it is.
 
     The clamping above is for reading a value someone else wrote; this is for refusing one on
-    the way in, which is what `BoxType.check` is for. Silence and 1.0 are not the same answer, so
+    the way in, which is what `BoxType.check` is for. Silence and 0 are not the same answer, so
     the section is looked at directly rather than through `opacity_of`.
     """
-    section = (config or {}).get(OPACITY_SECTION)
+    section = (config or {}).get(WINDOW_SETTINGS_SECTION)
     if section is None:
         return ""
     if not isinstance(section, dict):
-        return f"{OPACITY_SECTION!r} must hold a settings block"
-    if "opacity" not in section:
+        return f"{WINDOW_SETTINGS_SECTION!r} must hold a settings block"
+    if OPACITY_KEY not in section:
         return ""
-    raw = section.get("opacity")
+    raw = section.get(OPACITY_KEY)
     try:
         value = float(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return f"opacity must be a number between {MIN_OPACITY} and {MAX_OPACITY}"
+        return "transparency must be a number between 0 and 1"
     if not MIN_OPACITY <= value <= MAX_OPACITY:
-        return (
-            f"opacity must be between {MIN_OPACITY} and {MAX_OPACITY}; below that the windows "
-            "are too faint to read"
-        )
+        return "transparency must be between 0 and 1 — 0 is invisible, 1 is solid"
     return ""
