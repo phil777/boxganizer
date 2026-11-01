@@ -234,6 +234,41 @@ SELECT resource_id, bm25(resource_text) AS score,
   FROM resource_text WHERE resource_text MATCH ? ORDER BY score LIMIT ?
 """
 
+# The same match, the same ranking and the same snippet, restricted to the resources a set of boxes
+# answers for. `UNION`, because "in this box" means the file it points at and the files an indexed
+# folder of its set brought in — the latter have no box of their own (ADR 13).
+# The same five columns and the same matching, with the scope as its own conjunct. Written out
+# rather than spliced onto `_SEARCH_SQL`, because appending `AND b.uuid IN (…)` to a chain of `OR`s
+# binds it to the last term only — which leaks rows the scope was there to exclude.
+_SEARCH_SCOPED_SQL = (
+    f"{_BOX_COLUMNS} {_BOX_FROM}"
+    + r"""
+ WHERE b.uuid IN ({marks})
+   AND (
+        b.key LIKE ? ESCAPE '\'
+     OR lower(b.description) LIKE ? ESCAPE '\'
+     OR lower(coalesce(r.reference, '')) LIKE ? ESCAPE '\'
+     OR lower(b.metadata) LIKE ? ESCAPE '\'
+     OR lower(b.config) LIKE ? ESCAPE '\'
+   )
+ ORDER BY b.key
+ LIMIT ?
+"""
+)
+
+_SEARCH_DOCS_WITHIN = """
+SELECT resource_id, bm25(resource_text) AS score,
+       snippet(resource_text, 1, '[', ']', ' \u2026 ', 12) AS passage
+  FROM resource_text WHERE resource_text MATCH ?
+   AND resource_id IN (
+        SELECT b.resource_id FROM boxes b WHERE b.uuid IN ({marks}) AND b.resource_id IS NOT NULL
+        UNION
+        SELECT rl.child_id FROM resource_link rl JOIN boxes b ON b.id = rl.parent_id
+         WHERE b.uuid IN ({marks})
+   )
+ ORDER BY score LIMIT ?
+"""
+
 _VOCAB_BY_PREFIX = "SELECT term FROM resource_text_vocab WHERE term GLOB ? LIMIT 4000"
 
 _COUNT_DOCS = "SELECT count(*) AS n FROM resource_text"
@@ -749,13 +784,40 @@ class BoxStore:
                 params.append(offset)
         return [self._from_row(row) for row in self._rows(sql, params)]
 
-    def search(self, term: str, *, limit: int = 100) -> list[Box]:
-        """Return boxes whose name, description, resource or metadata contain *term*."""
+    def search(
+        self, term: str, *, limit: int = 100, within: Iterable[str] | None = None
+    ) -> list[Box]:
+        """Return boxes whose name, description, resource or metadata contain *term*.
+
+        `within` narrows the answer to a set of box uuids — the descendants of one box,
+        normally. It is one more clause on the query that already runs, not a second search: same
+        matching, same order, fewer rows allowed through. An empty set is an honest empty answer
+        rather than "no restriction"; reading it the other way would make a search inside an empty
+        folder return the whole library.
+        """
         cleaned = term.strip()
+        allowed = None if within is None else sorted(set(within))
+        if allowed is not None and not allowed:
+            return []
         if not cleaned:
-            return self.list_boxes(limit=limit)
+            if allowed is None:
+                return self.list_boxes(limit=limit)
+            marks = ",".join("?" for _ in allowed)
+            rows = self._rows(
+                f"{_SELECT_BOX} WHERE b.uuid IN ({marks}) ORDER BY b.key LIMIT ?",
+                (*allowed, limit),
+            )
+            return [self._from_row(row) for row in rows]
         needle = f"%{_like_escape(cleaned.casefold())}%"
-        rows = self._rows(_SEARCH_SQL, (needle, needle, needle, needle, needle, limit))
+        params: list[object] = [needle, needle, needle, needle, needle]
+        if allowed is None:
+            return [self._from_row(row) for row in self._rows(_SEARCH_SQL, (*params, limit))]
+        # In SQL, not in Python: the limit is applied by the database, so filtering afterwards
+        # could throw away every row it was willing to return and still call that the answer. On
+        # its own statement too, because splicing `AND b.uuid IN (…)` onto a chain of `OR`s binds
+        # it to the last term only — which answers a scoped search with excluded boxes.
+        marks = ",".join("?" for _ in allowed)
+        rows = self._rows(_SEARCH_SCOPED_SQL.format(marks=marks), (*allowed, *params, limit))
         return [self._from_row(row) for row in rows]
 
     def count(self) -> int:
@@ -1675,15 +1737,35 @@ class BoxStore:
     # boxes may point at one file. Which boxes to show for a hit is answered by
     # `boxes_by_resources`, so the mapping back is the store's job too.
 
-    def content_search(self, match: str, *, limit: int = 100) -> list[tuple[int, float, str]]:
+    def content_search(
+        self, match: str, *, limit: int = 100, within: Iterable[str] | None = None
+    ) -> list[tuple[int, float, str]]:
         """Resources whose indexed text answers *match*, best first.
 
         Returns ``(resource_id, score, passage)``. A malformed expression — a stray
         quote in what someone typed — is not an error to show them: it answers with
         nothing, and the name search still runs.
+
+        `within` is a set of box uuids to answer from. It is a clause on the same FTS query — the
+        index is still what answers, and no file is opened to decide membership — because a search
+        inside a box has to cost the same as a search of the library, not the price of re-reading
+        everything under the cursor. A resource counts as inside the set when a box in it points at
+        the file **or** when the file was brought in by a folder in the set being indexed. The
+        second half is what lets a search inside an indexed folder find the words in that
+        folder's files, which belong to no box of their own.
         """
+        allowed = None if within is None else sorted(set(within))
+        if allowed is not None and not allowed:
+            return []
         try:
-            rows = self._rows(_SEARCH_DOCS, (match, limit))
+            if allowed is None:
+                rows = self._rows(_SEARCH_DOCS, (match, limit))
+            else:
+                marks = ",".join("?" for _ in allowed)
+                rows = self._rows(
+                    # MATCH comes first in the statement, then the two uuid sets in the subqueries
+                    _SEARCH_DOCS_WITHIN.format(marks=marks), (match, *allowed, *allowed, limit)
+                )
         except StoreError:
             return []
         return [(int(row["resource_id"]), float(row["score"]), str(row["passage"])) for row in rows]

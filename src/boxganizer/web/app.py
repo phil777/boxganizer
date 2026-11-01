@@ -594,6 +594,15 @@ def create_app(
     app.state.mqtt_events = mqtt_events or mqtt.aiomqtt_events
     app.state.mqtt_latest = mqtt.Latest()
 
+    def _path_names(paths: dict[str, list[Box]], uuid: str) -> list[str]:
+        """The names down the tree to one hit, for the crumb line the results window draws.
+
+        Empty when the search covered the whole library: there is no "how you got here" to show
+        for a search that started everywhere.
+        """
+        path = paths.get(uuid)
+        return [box.name for box in path] if path else []
+
     @app.exception_handler(BoxNotFound)
     async def _not_found(request: Request, exc: BoxNotFound) -> JSONResponse:
         return JSONResponse(
@@ -2525,6 +2534,10 @@ def create_app(
         q: Annotated[str, Query(min_length=1)],
         response: Response,
         limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+        under: Annotated[
+            str | None,
+            Query(description="Only answer from this box and what is filed under it."),
+        ] = None,
     ) -> list[dict[str, object]]:
         """Find boxes: by their own fields first, then by what their files say.
 
@@ -2533,10 +2546,29 @@ def create_app(
         the screen instead of being a guess. What the words were widened to (synonyms,
         near-misses) comes back in the `X-Search-Expanded` header, because it belongs
         to the query as a whole and not to any one box.
+
+        `under` narrows that same search to one box's subtree: the same expression, the same
+        ranking, the same passages, the same widening — one extra restriction to a set, not a second
+        search that re-reads resources to answer (ADR 33). Each hit then carries `path`, the names
+        down from the box that was searched, so the page can draw the crumb line as though the
+        reader had clicked down child by child.
         """
-        named = store.search(q, limit=limit)
+        scope: set[str] | None = None
+        paths: dict[str, list[Box]] = {}
+        if under is not None:
+            try:
+                paths = store.descendants(under)
+            except BoxNotFound:
+                raise HTTPException(
+                    status_code=404, detail={"error": "no_such_box", "ref": under}
+                ) from None
+            scope = set(paths)
+
+        named = store.search(q, limit=limit, within=scope)
         found: list[dict[str, object]] = [
-            box.to_dict() | {"match": {"how": "box", "passage": ""}} for box in named
+            box.to_dict()
+            | {"match": {"how": "box", "passage": ""}, "path": _path_names(paths, str(box.uuid))}
+            for box in named
         ]
         seen = {str(entry["uuid"]) for entry in found}
 
@@ -2546,7 +2578,7 @@ def create_app(
         if planned.expanded:
             response.headers["X-Search-Expanded"] = text_search.explain(planned)
         if planned.worth_asking:
-            hits = store.content_search(planned.content_match, limit=limit * 2)
+            hits = store.content_search(planned.content_match, limit=limit * 2, within=scope)
             # The index answers with the *file* that matched; what a person wants is the
             # box. One file can be pointed at by several boxes, and every one of them is
             # a true answer, so each is offered with the same passage and the same
@@ -2566,7 +2598,9 @@ def create_app(
                                 # which file inside the folder answered, when the box is a
                                 # folder and the words came from one of its files
                                 "in_file": inside,
-                            }
+                            },
+                            # how the reader reaches this hit from the box they searched in
+                            "path": _path_names(paths, str(box.uuid)),
                         }
                     )
                     if len(found) >= limit:

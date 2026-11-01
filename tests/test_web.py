@@ -4639,3 +4639,153 @@ def test_the_bar_counts_files_not_queue_items(
         queue = app_client.get("/api/index/status").json()["queue"]
         assert queue["done"] == queue["total"], queue
         assert queue["total"] >= 6, f"the denominator hid the walk: {queue}"
+
+
+# -- searching inside one box, on the index that already exists --------------
+
+
+def test_search_under_a_box_is_the_same_search_restricted(
+    populated: BoxStore, tmp_path: Path
+) -> None:
+    """`under=` subtracts hits from the ordinary search; it does not replace the search.
+
+    The two answers are compared entry by entry — same order, same `how`, same passage — because the
+    requirement is that a search inside a box is the *normal* full-text search limited to a set of
+    boxes, not a second kind of search that could quietly rank, widen or snippet differently.
+    """
+    inside = tmp_path / "inside"
+    inside.mkdir()
+    kettle_file = inside / "kettle.md"
+    kettle_file.write_text("the kettle whistles at ninety eight degrees\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    far_file = elsewhere / "other.md"
+    far_file.write_text("a different kettle, colder: ninety eight too\n", encoding="utf-8")
+
+    with TestClient(create_app(populated)) as app_client:
+        def folder_box(name: str) -> str:
+            answer = app_client.post("/api/boxes", json={"name": name, "box_type": "folder"})
+            return answer.json()["uuid"]
+
+        def note_box(name: str, target: Path) -> str:
+            answer = app_client.post(
+                "/api/boxes",
+                json={"name": name, "box_type": "markdown", "resource_uri": str(target)},
+            )
+            return answer.json()["uuid"]
+
+        subtree = folder_box("Sub")
+        deep = folder_box("Deep")
+        app_client.post(f"/api/boxes/{subtree}/children", json={"child": deep})
+        kettle = note_box("Kettle note", inside / "kettle.md")
+        app_client.post(f"/api/boxes/{deep}/children", json={"child": kettle})
+
+        # a second subtree elsewhere in the library, holding a note with the same words in it
+        other = folder_box("Other")
+        far = note_box("Far note", elsewhere / "other.md")
+        app_client.post(f"/api/boxes/{other}/children", json={"child": far})
+        wait_for_index(app_client)
+
+        everything = app_client.get("/api/search", params={"q": "ninety eight"}).json()
+        assert len(everything) >= 2, everything  # both notes answer, by their content
+
+        params = {"q": "ninety eight", "under": subtree}
+        scoped = app_client.get("/api/search", params=params).json()
+        assert [hit["name"] for hit in scoped] == ["Kettle note"], scoped
+        assert scoped[0]["match"]["how"] == "content"
+
+        # the restricted answer is the unrestricted one with the out-of-set hits taken away, in the
+        # same order and with the same words quoted back
+        allowed = set(populated.descendants(subtree))
+        expected = [hit for hit in everything if hit["uuid"] in allowed]
+        assert [hit["uuid"] for hit in scoped] == [hit["uuid"] for hit in expected]
+        passages = [hit["match"]["passage"] for hit in scoped]
+        assert passages == [hit["match"]["passage"] for hit in expected]
+        assert scoped[0]["path"] == ["Sub", "Deep", "Kettle note"], scoped[0]["path"]
+
+        # an empty box answers empty. Reading "no boxes in scope" as "no restriction" would make a
+        # search inside an empty folder return the whole library, which is the opposite of asked.
+        empty = folder_box("Hollow")
+        at_empty = app_client.get("/api/search", params={"q": "ninety eight", "under": empty})
+        assert at_empty.json() == []
+
+        # a box whose type holds no indexed text still answers with itself if its words match
+        hollow_words = {"description": "ninety eight degrees of hollow"}
+        app_client.put(f"/api/boxes/{empty}", json=hollow_words)
+        hollow = app_client.get("/api/search", params={"q": "hollow", "under": empty}).json()
+        assert [hit["name"] for hit in hollow] == ["Hollow"], hollow
+
+        # and the box itself is in scope: searching a folder searches the folder too
+        app_client.put(f"/api/boxes/{subtree}", json={"description": "kettle storage"})
+        by_field = app_client.get("/api/search", params={"q": "storage", "under": subtree}).json()
+        assert [hit["name"] for hit in by_field] == ["Sub"], by_field
+
+
+def test_a_scoped_search_never_opens_a_file_to_answer(
+    populated: BoxStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The index answers; nothing is re-read to work out what is inside.
+
+    This is the clause that decides whether the feature is affordable on a big library, so it is
+    asserted by making file extraction explode on contact: a search that tried to re-scan would fail
+    the test rather than merely being slow.
+    """
+    from boxganizer import search as indexing
+
+    def never(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a scoped search must not read resource files")
+
+    monkeypatch.setattr(indexing, "extract_resource", never)
+
+    tree = tmp_path / "vault"
+    tree.mkdir()
+    one = tree / "one.md"
+    one.write_text("the archive smells of camphor and old paper\n", encoding="utf-8")
+    with TestClient(create_app(populated)) as app_client:
+        vault = {"name": "Vault", "box_type": "folder"}
+        folder = app_client.post("/api/boxes", json=vault).json()["uuid"]
+        note = app_client.post(
+            "/api/boxes",
+            json={"name": "Camphor", "box_type": "markdown", "resource_uri": str(one)},
+        ).json()["uuid"]
+        app_client.post(f"/api/boxes/{folder}/children", json={"child": note})
+        # the words land in the index from the write above; the patch is for the search
+        monkeypatch.undo()
+        wait_for_index(app_client)
+        monkeypatch.setattr(indexing, "extract_resource", never)
+
+        hits = app_client.get("/api/search", params={"q": "camphor", "under": folder}).json()
+        assert [hit["name"] for hit in hits] == ["Camphor"], hits
+
+
+def test_a_scoped_search_terminates_when_the_graph_has_a_ring(
+    populated: BoxStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A box filed inside its own descendant must not turn a search into a hang.
+
+    The graph allows cycles, so the scope walk is the first thing that meets them on this path; the
+    answer is a set and a fast one, not an infinite loop through the same two boxes.
+    """
+    with TestClient(create_app(populated)) as app_client:
+        left = app_client.post("/api/boxes", json={"name": "Left", "box_type": "folder"})
+        left = left.json()["uuid"]
+        right = app_client.post("/api/boxes", json={"name": "Right", "box_type": "folder"})
+        right = right.json()["uuid"]
+        app_client.post(f"/api/boxes/{left}/children", json={"child": right})
+        app_client.post(f"/api/boxes/{right}/children", json={"child": left})  # closes the ring
+        ringed = {"description": "a ring holding the word marmalade"}
+        app_client.put(f"/api/boxes/{right}", json=ringed)
+
+        began = monotonic()
+        hits = app_client.get("/api/search", params={"q": "marmalade", "under": left}).json()
+        assert monotonic() - began < 5.0
+        assert [hit["name"] for hit in hits] == ["Right"], hits
+        # one entry per box, whichever way round the ring was entered
+        both = app_client.get("/api/search", params={"q": "marmalade", "under": right}).json()
+        assert [hit["name"] for hit in both] == ["Right"], both
+
+
+def test_an_unknown_box_in_a_scoped_search_is_a_404_and_a_sentence(client: TestClient) -> None:
+    response = client.get("/api/search", params={"q": "anything", "under": "Ghost"})
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "no_such_box"
