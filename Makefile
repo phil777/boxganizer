@@ -17,6 +17,7 @@ help:
 	echo "run-cli    ARGS=\"box list\""
 	echo "run-web    serve on 127.0.0.1:8000"
 	echo "run-tui    open the terminal UI"
+	echo "shots      retake the README's screenshots (needs a browser)"
 	echo "clean      remove build and tool caches"
 
 install: $(VENV)/bin/python
@@ -50,8 +51,11 @@ run-web:
 run-tui:
 	$(VENV)/bin/box tui
 
+shots:
+	$(PY) tools/shot_docs.py
+
 clean:
 	rm -rf build dist *.egg-info .pytest_cache .ruff_cache .mypy_cache htmlcov .coverage coverage.xml
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 
-.PHONY: help install test lint format typecheck check run-cli run-web run-tui clean
+.PHONY: help install test lint format typecheck check run-cli run-web run-tui shots clean

@@ -1,3 +1,7 @@
+- *Warning*: 100% vibe-coded
+- *Warning*: access to web app = shell with web server uid
+- *Disclaimer*: Works-for-me^TM
+
 # Boxganizer
 
 Personal knowledge management where **everything is a box**.
