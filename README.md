@@ -224,8 +224,9 @@ things widen a query, and all three are reported rather than done quietly —
 | Near-miss spellings | compared only against words your library already contains | "cellrr" finds "cellar" |
 
 A name is never widened — a box called *Cellar Plans* should not turn up just because
-you asked for a basement. Nothing outside the content confine is read (see
-`BOXGANIZER_CONTENT_ROOT` below), files over 2 MB are left alone as are the last pages
+you asked for a basement. By default anything this account can read is indexable; start the server
+`--confined` (or set `BOXGANIZER_CONTENT_ROOT`) and nothing outside that root is read (ADR 30).
+Files over 2 MB are left alone as are the last pages
 of a PDF past page 200, and a scan with no text layer is reported as such.
 
 `thesaurus.json` sits next to the database and is plain JSON, a list of lists or a
@@ -250,7 +251,8 @@ box check --fix-stale                        # and read again whatever has chang
 ```
 
 `box check` is the one command that asks whether the library's promises still hold: is
-each box's file where it said, of the kind the type expects, inside the content confine,
+each box's file where it said, of the kind the type expects, up to date in the index —
+and, when a root was named, inside it?
 and up to date in the index? It also names the files Boxganizer wrote for boxes that no
 longer exist (ADR 14 keeps them on purpose) and the notes that link to a box that is not
 here. Every finding prints the command that repairs it, unwrapped so it can be copied, and
@@ -346,8 +348,18 @@ in [doc/box-types.md](doc/box-types.md#the-hierarchy).
 
 ```bash
 box serve --port 8000                        # UI on /, API on /api, docs on /docs
+box serve --confined                         # keep it inside the content root: no filing,
+                                             # browsing or indexing beyond it
 box tui                                      # browse, filter (type), drill in (enter), new (n)
 ```
+
+Nothing is confined by default. The server reads, files and indexes whatever its own account can
+reach, which is what a personal library on your own machine needs — the photos are on another mount
+and the code is one directory up. `--confined` asks for a boundary: it gates what may be filed, how
+far the file picker walks, and what the indexer reads, while boxes you already stored stay readable.
+It is not a sandbox — the second warning at the top of this file is the honest statement of what the
+page can do — and `BOXGANIZER_CONTENT_ROOT` turns the same boundary on for every interface.
+ADR 30.
 
 
 ## Layout

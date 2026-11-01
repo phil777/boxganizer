@@ -137,6 +137,25 @@ def test_the_root_refuses_to_be_deleted_from_the_shell(
         assert store.get("root").box_type == "root"
 
 
+def test_the_shell_files_any_path_without_asking_about_confines(
+    db_path: Path, tmp_path: Path
+) -> None:
+    """`box add -r` files any path: the confine belongs to a started server, not to the store.
+
+    The CLI is where the reader already *is* this user, with a terminal. A flag on a web server has
+    no business reaching into it, and a `--confined` server refusing a write must not read as though
+    the library itself had lost the path.
+    """
+    far = tmp_path / "mount"
+    far.mkdir()
+    target = far / "thing.txt"
+    target.write_text("anything at all\n", encoding="utf-8")
+    result = invoke(db_path, "add", "Far away", "--resource", str(target))
+    assert result.exit_code == 0, result.output
+    with BoxStore(db_path) as store:
+        assert store.get("Far away").resource_uri == str(target)
+
+
 def test_bad_meta_is_rejected(db_path: Path) -> None:
     result = invoke(db_path, "add", "Box", "-m", "no-equals-sign")
     assert result.exit_code != 0
@@ -170,7 +189,27 @@ def test_serve_hands_the_options_to_the_web_runner(
     assert result.exit_code == 0
     assert callable(calls["on_start"]), "the runner must be told how to announce itself"
     del calls["on_start"]
-    assert calls == {"host": "127.0.0.1", "port": 9123, "db": db_path, "reload": False}
+    assert calls == {
+        "host": "127.0.0.1",
+        "port": 9123,
+        "db": db_path,
+        "reload": False,
+        # off unless asked for: a server that confines paths is a server you started on purpose
+        "confined": False,
+    }
+
+
+def test_serve_confined_reaches_the_web_runner(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--confined` is one flag with one destination; a fourth place to set it would drift."""
+    import boxganizer.web.server as web_server
+
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(web_server, "run", lambda **kwargs: calls.update(kwargs))
+    result = invoke(db_path, "serve", "--confined")
+    assert result.exit_code == 0
+    assert calls["confined"] is True
 
 
 def test_serve_accepts_host_and_reload(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

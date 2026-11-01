@@ -246,8 +246,8 @@ def extract_resource(
     # routinely names one project directory; holding it over the library's own files
     # would quietly make every note unindexable.
     if where != address.GENERATED:
-        confine = paths.content_root(root)
-        if not paths.inside(target, confine):
+        confine = paths.confine(root)
+        if confine is not None and not paths.inside(target, confine):
             return Extracted(note=f"{target} is outside {confine}")
     try:
         if not target.is_file():

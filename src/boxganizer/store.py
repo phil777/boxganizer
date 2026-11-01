@@ -331,7 +331,7 @@ class BoxStore:
     ) -> None:
         """Open (and if needed create or upgrade) the database at *path*.
 
-        `content_root` is the directory the index is allowed to read inside, and it is
+        `content_root` is the directory the index is allowed to read inside (None: any), and it is
         kept here rather than passed to each call because the box that is created does
         not know who created it: the page has one confine, `box index --root` names
         another, and the default is the one from the environment. Nothing else about the
@@ -339,7 +339,11 @@ class BoxStore:
         the index in the same breath, and that needs to know where reading is allowed.
         """
         self.path = Path(path) if path is not None else config.default_db_path()
-        self.content_root = paths.content_root(content_root)
+        # None means *nothing is confined*: the store reads wherever the account can. A confine is
+        # named — by the caller, by `$BOXGANIZER_CONTENT_ROOT`, or by `box serve --confined` — and
+        # one library then has one answer, because a box filed on another mount has to be readable
+        # and indexable by every route that shows it.
+        self.content_root = paths.confine(content_root)
         if str(self.path) != ":memory:":
             config.ensure_parent(self.path)
         self._lock = threading.RLock()

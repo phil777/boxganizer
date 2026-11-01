@@ -476,9 +476,14 @@ def test_svg_is_sandboxed(client: TestClient, populated: BoxStore, tmp_path: Pat
     assert "sandbox" in response.headers["content-security-policy"]
 
 
-def test_a_confined_server_refuses_files_outside_its_root(
+def test_a_confined_server_still_shows_what_it_already_holds(
     populated: BoxStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Confinement is about what may be filed from now on, not what may be looked at.
+
+    A box you filed is your box. A server that goes dark on it because of how it was started today
+    turns a safety flag into a data-access bug, and the reader has no way to tell the two apart.
+    """
     root = tmp_path / "library"
     root.mkdir()
     good = _write(root, "ok.png")
@@ -491,9 +496,105 @@ def test_a_confined_server_refuses_files_outside_its_root(
         box_in = populated.add(Box(name="Inside", box_type="image", resource_uri=str(good)))
         box_out = populated.add(Box(name="Outside", box_type="image", resource_uri=str(outside)))
         assert confined.get(f"/api/boxes/{box_in.uuid}/raw").status_code == 200
-        refused = confined.get(f"/api/boxes/{box_out.uuid}/raw")
+        assert confined.get(f"/api/boxes/{box_out.uuid}/raw").status_code == 200
+
+
+def test_by_default_a_box_points_anywhere_the_account_can_read(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """No flag, no `$BOXGANIZER_CONTENT_ROOT`: a far path is filed, shown and indexed.
+
+    The default is what makes the app usable on a real machine, where the photos are on another
+    mount and the code is one directory up. "Indexable" is asserted by searching for a word in the
+    file, not by trusting that indexing was attempted.
+    """
+    far = tmp_path / "elsewhere"
+    far.mkdir()
+    words = far / "notes.md"
+    words.write_text("the kettle boils at ninety eight degrees\n", encoding="utf-8")
+
+    response = client.post(
+        "/api/boxes",
+        json={"name": "Far note", "box_type": "markdown", "resource_uri": str(words)},
+    )
+    assert response.status_code == 201, response.text
+    uuid = response.json()["uuid"]
+    assert client.get(f"/api/boxes/{uuid}/raw").status_code == 200
+    assert "ninety eight" in client.get(f"/api/boxes/{uuid}/raw").text
+    found = client.get("/api/search?q=ninety").json()
+    hits = found["boxes"] if isinstance(found, dict) else found
+    assert "Far note" in [hit.get("name") for hit in hits], found
+
+    moved = tmp_path / "elsewhere2"
+    moved.mkdir()
+    second = moved / "more.md"
+    second.write_text("a second place, also readable\n", encoding="utf-8")
+    changed = client.put(f"/api/boxes/{uuid}", json={"resource_uri": str(second)})
+    assert changed.status_code == 200, changed.text
+
+
+def test_a_confined_server_refuses_to_start_pointing_outside_its_root(
+    populated: BoxStore, tmp_path: Path
+) -> None:
+    """Both write paths, with the flag on: a new address outside the root is refused, in a sentence.
+
+    The refusal carries a `reason`, because the page shows that word and a bare error code is not
+    something a reader can act on. A path *inside* the root still works, so the flag is not an
+    outage.
+    """
+    import boxganizer.web.app as web_app
+
+    root = tmp_path / "library"
+    root.mkdir()
+    inside = _write(root, "fine.md")
+    outside = _write(tmp_path, "beyond.md")
+    with TestClient(web_app.create_app(populated, content_root=root, confined=True)) as confined:
+        refused = confined.post(
+            "/api/boxes",
+            json={"name": "Beyond", "box_type": "markdown", "resource_uri": str(outside)},
+        )
         assert refused.status_code == 403
-        assert refused.json()["detail"]["error"] == "resource_out_of_range"
+        detail = refused.json()["detail"]
+        assert detail["error"] == "resource_out_of_range"
+        assert "is outside" in detail["reason"] and "--confined" in detail["reason"]
+        assert [b["name"] for b in confined.get("/api/boxes").json()] == [
+            "Books",
+            "Garage",
+            "House",
+            "Kitchen",
+            "Passport",
+        ], "nothing was half-created"
+
+        kept = confined.post(
+            "/api/boxes", json={"name": "Fine", "box_type": "markdown", "resource_uri": str(inside)}
+        )
+        assert kept.status_code == 201
+        uuid = kept.json()["uuid"]
+        moved_out = confined.put(f"/api/boxes/{uuid}", json={"resource_uri": str(outside)})
+        assert moved_out.status_code == 403
+        assert confined.get(f"/api/boxes/{uuid}").json()["resource_uri"] == str(inside)
+
+
+def test_confinement_does_not_lock_a_box_inside_its_own_name(
+    populated: BoxStore, tmp_path: Path
+) -> None:
+    """An out-of-range box stays editable while confined: renaming it points at nothing new.
+
+    Refusing the write because the box's *existing* address is out of range would make such a box
+    permanent — unfixable from the very interface that holds it.
+    """
+    import boxganizer.web.app as web_app
+
+    root = tmp_path / "library"
+    root.mkdir()
+    stray = _write(tmp_path, "stray.md")
+    stored = populated.add(Box(name="Stray", box_type="markdown", resource_uri=str(stray)))
+    with TestClient(web_app.create_app(populated, content_root=root, confined=True)) as confined:
+        renamed = confined.put(f"/api/boxes/{stored.uuid}", json={"name": "Renamed"})
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["name"] == "Renamed"
+        assert confined.get(f"/api/boxes/{stored.uuid}/raw").status_code == 200
+
 
 
 # -- the text view's rules travel with the assets ---------------------------
@@ -1342,11 +1443,11 @@ def test_a_folder_child_can_be_removed_from_its_folder(client: TestClient) -> No
 # -- the resource file selector (UI 2) ---------------------------------------
 
 
-def test_the_file_selector_starts_at_home_when_unconfined(client: TestClient) -> None:
+def test_the_file_selector_opens_at_home_when_unconfined(client: TestClient) -> None:
     payload = client.get("/api/fs/browse").json()
     assert Path(payload["path"]) == Path.home()
-    assert payload["parent"] is None  # nothing above the confine
-    assert payload["root"] == str(Path.home())
+    assert payload["root"] == str(Path("/")), "unconfined: the boundary is the filesystem"
+    assert payload["parent"] is not None, "home is not a ceiling any more"
 
 
 @pytest.fixture
@@ -1383,11 +1484,28 @@ def test_the_file_selector_hides_dot_files_unless_asked(
     assert ".hidden" in shown
 
 
-def test_the_file_selector_refuses_to_climb_above_its_confine(client: TestClient) -> None:
+def test_the_file_selector_refuses_to_climb_above_its_confine(picker_client: TestClient) -> None:
+    """Confined, the picker is a wall. `picker_client` names a content root, which is the opt-in."""
     for attempt in ("/etc", "../../etc", str(Path.home().parent)):
-        response = client.get("/api/fs/browse", params={"path": attempt})
+        response = picker_client.get("/api/fs/browse", params={"path": attempt})
         assert response.status_code == 403, attempt
         assert response.json()["detail"]["error"] == "path_out_of_range"
+
+
+def test_an_unconfined_picker_opens_at_home_and_walks_above_it(client: TestClient) -> None:
+    """Unconfined, where it *opens* stays friendly and how far it may go stops being a bound.
+
+    The two were one value, which is why a picker that opened on home also refused the directory
+    above it: the friendliness and the wall came from the same line. `/etc` is the plain case that
+    matters — a file outside the home directory that the account can read.
+    """
+    above = client.get("/api/fs/browse", params={"path": str(Path.home().parent)})
+    assert above.status_code == 200, above.text
+    etc = client.get("/api/fs/browse", params={"path": "/etc"})
+    assert etc.status_code == 200
+    assert "hostname" in [entry["name"] for entry in etc.json()["entries"]] or etc.json()["entries"]
+    opened = client.get("/api/fs/browse").json()
+    assert Path(opened["path"]) == Path.home() and opened["root"] == str(Path("/"))
 
 
 def test_the_file_selector_reads_tilde_and_relative_paths_against_the_confine(

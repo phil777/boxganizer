@@ -117,7 +117,7 @@ def run(store: BoxStore, *, confine: Path | str | None = None) -> list[Finding]:
     """
     # One library, one confine: what the store was opened with is what its boxes are
     # judged against, so a check agrees with the index about what could have been read.
-    root = paths.content_root(Path(confine) if confine is not None else store.content_root)
+    root = paths.confine(Path(confine) if confine is not None else store.content_root)
     found: list[Finding] = []
     for box in store.list_boxes():
         found.extend(check_box(store, box, root=root))
@@ -127,8 +127,11 @@ def run(store: BoxStore, *, confine: Path | str | None = None) -> list[Finding]:
     return found
 
 
-def check_box(store: BoxStore, box: Box, *, root: Path) -> list[Finding]:
-    """What is wrong with this box's promise about the thing it points at."""
+def check_box(store: BoxStore, box: Box, *, root: Path | None) -> list[Finding]:
+    """What is wrong with this box's promise about the thing it points at.
+
+    `root` is the confine, and None is a real answer: with no confine nothing is out of range.
+    """
     kind = _kind_of(box)
     reference = (box.resource_uri or "").strip()
     findings: list[Finding] = []
@@ -179,7 +182,8 @@ def check_box(store: BoxStore, box: Box, *, root: Path) -> list[Finding]:
     elif not os_readable(target):
         add("unreadable", f"{target} is there but cannot be opened", [RELOCATE], severity="watch")
 
-    if not paths.inside(target, root) and where == address.LOCAL:
+    # Only a named confine can put a file out of range: with no confine there is no "outside".
+    if root is not None and not paths.inside(target, root) and where == address.LOCAL:
         add(
             "out_of_range",
             f"{target} is outside {root}, so its words cannot be indexed from here",

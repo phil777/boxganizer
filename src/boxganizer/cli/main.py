@@ -691,7 +691,7 @@ def box_index(
     alone. --add and --drop are the same decision the dialog's checkbox makes, from the
     terminal, for a file whose type did not guess right.
     """
-    confine = paths.content_root(root)
+    confine = paths.confine(root)
     wanted_in = add or []
     wanted_out = drop or []
     with _open(ctx, _db_of(ctx)) as store:
@@ -718,7 +718,8 @@ def box_index(
 
         report = text_search.rebuild(store, root=confine, only_stale=only_stale)
         say("indexed", report.summary())
-        lit(f"  reading inside {confine}")
+        where = "anywhere this account can" if confine is None else f"inside {confine}"
+        lit(f"  reading {where}")
         for name, note in report.skipped[:show_skipped]:
             lit(f"  {name}: {note}")
         if len(report.skipped) > show_skipped:
@@ -757,7 +758,7 @@ def box_check(
 
     The same findings, with the same repairs, are the page's Check the library action.
     """
-    confine = paths.content_root(root)
+    confine = paths.confine(root)
     with _open(ctx, _db_of(ctx)) as store:
         findings = checker.run(store, confine=confine)
         if as_json:
@@ -765,7 +766,7 @@ def box_check(
                 json.dumps(
                     {
                         "summary": checker.summary(findings),
-                        "confine": str(confine),
+                        "confine": str(confine) if confine else None,
                         "findings": [item.as_dict() for item in findings],
                     },
                     indent=2,
@@ -801,7 +802,7 @@ def box_check(
                 lit("      no automatic fix — the words around it are yours to change")
 
 
-def _opt_in_out(store: BoxStore, name: str, wanted: bool, confine: Path) -> None:
+def _opt_in_out(store: BoxStore, name: str, wanted: bool, confine: Path | None) -> None:
     """Set one box's file wishing to be in the index, and act on it now."""
     box = store.get(name)
     changed = store.set_index_flag(box, wanted)
@@ -1045,9 +1046,23 @@ def serve(
     host: Annotated[str, typer.Option("--host", help="Bind address.")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p", min=1, max=65535)] = 8000,
     reload: Annotated[bool, typer.Option("--reload", help="Restart on code changes.")] = False,
+    confined: Annotated[
+        bool,
+        typer.Option(
+            "--confined",
+            help="Keep this server inside its content root: no box pointed outside it, no reading "
+            "or indexing anything beyond it, no file picker above it.",
+        ),
+    ] = False,
     db: DbOption = None,
 ) -> None:
-    """Start the web app: page on /, JSON API on /api, docs on /docs."""
+    """Start the web app: page on /, JSON API on /api, docs on /docs.
+
+    By default nothing is confined: any path this account can read can be filed, shown and indexed.
+    `--confined` (or `$BOXGANIZER_CONTENT_ROOT`, which has always meant the same) keeps it inside
+    the content root instead. The page is a shell as this user either way — see the README's
+    disclosure — so the flag is about accidents, and about a machine serving more than you.
+    """
     path = db or _db_of(ctx) or config.default_db_path()
     try:
         from boxganizer.web.server import run
@@ -1062,9 +1077,14 @@ def serve(
                 f" on http://{bound_host}:{bound_port} — Ctrl-C to stop",
             )
         )
+        if confined:
+            from boxganizer import paths as path_tools
+
+            root = path_tools.content_root(None)
+            console.print(Text(f"  confined to {root}", style="yellow"))
 
     try:
-        run(host=host, port=port, db=path, reload=reload, on_start=announce)
+        run(host=host, port=port, db=path, reload=reload, confined=confined, on_start=announce)
     except ModuleNotFoundError as exc:  # pragma: no cover - only without the extra
         raise MissingDependency("web") from exc
 

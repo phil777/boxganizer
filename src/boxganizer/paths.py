@@ -36,13 +36,32 @@ def local_path(resource_uri: str) -> Path:
     return Path(path).expanduser()
 
 
+def confine(explicit: Path | str | None = None) -> Path | None:
+    """The directory reads are confined to, **or None when nothing is confined**.
+
+    First match wins: the root a caller was configured with, then ``$BOXGANIZER_CONTENT_ROOT``,
+    then nothing. Naming a directory *is* the opt-in — `box serve --confined`, `box index --root`,
+    the environment variable — because a personal library on a real machine keeps its photos on
+    another mount and its code one directory up, and quietly refusing those is a bug the reader
+    discovers by their notes not being searchable (ADR 30).
+
+    Where a *directory* is wanted rather than a boundary — the place the file selector opens on —
+    use :func:`content_root`.
+    """
+    if explicit is not None and str(explicit).strip():
+        return Path(str(explicit)).expanduser()
+    from_env = os.environ.get(CONTENT_ROOT_ENV, "").strip()
+    if from_env:
+        return Path(from_env).expanduser()
+    return None
+
+
 def content_root(explicit: Path | str | None = None) -> Path:
-    """The directory file resources are confined to.
+    """Where the file selector opens, and what `--confined` confines to by default.
 
     First match wins: the root a caller was configured with, then
-    ``$BOXGANIZER_CONTENT_ROOT``, then the user's home directory — which is what the
-    file selector has always opened on. Nothing is read outside the answer, whether
-    the reader is the page, the terminal or the search index.
+    ``$BOXGANIZER_CONTENT_ROOT``, then the user's home directory. **This is a starting place, not
+    a boundary** — see :func:`confine` for the boundary, which is None unless one was named.
     """
     if explicit is not None and str(explicit).strip():
         return Path(str(explicit)).expanduser()

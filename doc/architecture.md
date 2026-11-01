@@ -131,9 +131,10 @@ previews are confined to the box's own resource directory first, so a `directory
 box can browse freely inside itself and nowhere else: `boxganizer/fslist.py`
 resolves every client path and refuses anything that climbs out, symlinks
 included. Only types whose `serves_content` is true — from
-`FileResource` down — are readable, only regular files, only under 32 MiB, and
-only inside `$BOXGANIZER_CONTENT_ROOT` when that is set (symlinks resolved
-first). Responses carry `X-Content-Type-Options: nosniff`, and SVG gets a
+`FileResource` down — are readable, only regular files, only under 32 MiB.
+**Reading a box that is already stored is never confined**; what `$BOXGANIZER_CONTENT_ROOT`
+or `box serve --confined` gates is what may be *filed*, what the file picker may walk,
+and what the indexer may read (ADR 30). Responses carry `X-Content-Type-Options: nosniff`, and SVG gets a
 sandboxing CSP header because an SVG can carry script. Text is put on the page
 with `textContent`, never as HTML.
 

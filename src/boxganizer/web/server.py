@@ -21,9 +21,15 @@ def run(
     port: int = 8000,
     db: Path | None = None,
     reload: bool = False,
+    confined: bool = False,
     on_start: Callable[[str, int], None] | None = None,
 ) -> None:
     """Serve the web app until interrupted.
+
+    *confined* keeps the server inside its content root — the directory named by
+    `$BOXGANIZER_CONTENT_ROOT`, or the default one. Left off, which is the default, the server
+    reads and files any path this account can reach: confinement is something you ask for, not
+    something you have to switch off (ADR 30).
 
     *on_start* runs once the app exists and immediately before uvicorn takes
     over, so a caller can announce the address without lying when the ``web``
@@ -37,7 +43,7 @@ def run(
 
     store: BoxStore = BoxStore(db)
     try:
-        asgi = create_app(store)
+        asgi = create_app(store, confined=confined)
         if on_start is not None:
             on_start(host, port)
         uvicorn.run(asgi, host=host, port=port, reload=reload)

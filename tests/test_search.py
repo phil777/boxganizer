@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from boxganizer import search
+from boxganizer import paths, search
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
 
@@ -538,3 +538,76 @@ def test_the_command_line_reports_a_file_it_could_not_read(
     # (rich wraps the summary line at the terminal width, so only the parts of it that
     # fit on one line are looked for)
     assert "1 nothing" in rebuilt.output
+
+
+# -- a confine is something you name ----------------------------------------
+
+
+def test_a_named_confine_is_the_only_kind_of_confine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`paths.confine` answers None when nothing was named: no boundary is the default.
+
+    The old default was the home directory, which read as safety but behaved as a bug — a photo on
+    another mount could be filed, shown, and quietly never indexed. Naming a root (by argument, by
+    `box serve --confined`, or by `$BOXGANIZER_CONTENT_ROOT`) is the opt-in. ADR 30.
+    """
+    monkeypatch.delenv("BOXGANIZER_CONTENT_ROOT", raising=False)
+    assert paths.confine(None) is None
+    assert paths.confine("") is None
+    assert paths.confine(tmp_path) == tmp_path
+    monkeypatch.setenv("BOXGANIZER_CONTENT_ROOT", str(tmp_path / "from-env"))
+    assert paths.confine(None) == tmp_path / "from-env"
+    # and the *starting place* keeps its home fallback: opening somewhere friendly is not a boundary
+    assert paths.content_root(None) == tmp_path / "from-env"
+
+
+def test_a_file_outside_home_is_indexed_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The word in a file on another mount reaches the ordinary content search.
+
+    Asserted through the index rather than through the read path: `/raw` serving a file proves only
+    that the file is openable, and the bug this replaces was exactly a file that was served and
+    never searchable, with nothing saying so. `tmp_path` sits under /tmp: outside any home.
+    """
+    monkeypatch.delenv("BOXGANIZER_CONTENT_ROOT", raising=False)
+    elsewhere = tmp_path / "mount"
+    elsewhere.mkdir()
+    kettle = elsewhere / "kettle.md"
+    kettle.write_text("the kettle boils at ninety eight degrees\n", encoding="utf-8")
+
+    with BoxStore(tmp_path / "free.db") as store:
+        assert store.content_root is None, "the store carries no confine unless one is named"
+        store.add(Box(name="Kettle", box_type="markdown", resource_uri=str(kettle)))
+        hits = store.content_search(search.plan("kettle").content_match, limit=5)
+        assert hits, "a filed file that never reaches the index is a search that lies"
+        assert "ninety eight" in hits[0][2]
+
+
+def test_a_named_confine_still_declines_to_read_outside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confined means confined: a file outside the root stays out of the index.
+
+    It is *named* in the outstanding list, which is what the reader has to go on. What it is not
+    today is explained: the resource is marked read with nothing in it, so the list calls it "has
+    bytes but gave up no text to index" rather than "outside /…". Recorded rather than fixed here,
+    because the sentence belongs with the index work that follows this item.
+    """
+    monkeypatch.delenv("BOXGANIZER_CONTENT_ROOT", raising=False)
+    inside = tmp_path / "library"
+    inside.mkdir()
+    (inside / "in.md").write_text("the boiler ticks at night\n", encoding="utf-8")
+    (tmp_path / "out.md").write_text("the turbine hums at dawn\n", encoding="utf-8")
+
+    with BoxStore(tmp_path / "wall.db", content_root=inside) as store:
+        store.add(Box(name="In", box_type="markdown", resource_uri=str(inside / "in.md")))
+        store.add(Box(name="Out", box_type="markdown", resource_uri=str(tmp_path / "out.md")))
+        search.rebuild(store, root=inside)
+        assert store.content_search(search.plan("turbine").content_match, limit=5) == []
+        assert store.content_search(search.plan("boiler").content_match, limit=5)
+        named = {item["reference"]: item for item in store.needing_index()}
+        assert "out.md" in named, named
+        # the file the confine declined is still pointed at, and still called what it is not
+        assert named["out.md"]["boxes"][0]["name"] == "Out"

@@ -551,12 +551,17 @@ def create_app(
     store: BoxStore | None = None,
     *,
     content_root: Path | str | None = None,
+    confined: bool = False,
     mqtt_events: mqtt.EventStream | None = None,
 ) -> FastAPI:
     """Build the web app. Pass a store to reuse one (tests, embedding).
 
-    `content_root` overrides `$BOXGANIZER_CONTENT_ROOT`, the directory every file
-    read and every picker browse is confined to.
+    **Confinement is opt-in.** `confined` is `box serve --confined`; `content_root` overrides
+    `$BOXGANIZER_CONTENT_ROOT`, the directory to confine to. Naming a directory — by flag, by
+    argument or by the environment variable — *is* the opt-in: the variable has always meant "stay
+    inside this", and a reader who set it as a safeguard must not find it quietly lifted. With none
+    of the three, nothing here refuses a path, because the library is the reader's own machine and
+    their notes are not all on one mount. ADR 30.
 
     `mqtt_events` replaces how an MQTT box is read. It is there for tests, which
     feed the page a story instead of a broker; production leaves it alone.
@@ -568,15 +573,22 @@ def create_app(
         lifespan=_lifespan,
     )
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-    effective_root = content_root if content_root is not None else os.environ.get(CONTENT_ROOT_ENV)
-    app.state.content_root = Path(effective_root).expanduser() if effective_root else None
+    env_root = os.environ.get(CONTENT_ROOT_ENV)
+    named = content_root if content_root is not None else env_root
+    wants_confinement = bool(confined) or bool(env_root) or content_root is not None
+    root = Path(named).expanduser() if named else paths.content_root(None)
+    app.state.confined = wants_confinement
+    # Every guard in this file reads `content_root` and steps aside when it is None: that is what
+    # "not confined" means, and it means it in one place rather than in each route.
+    app.state.content_root = root if wants_confinement else None
     app.state.store = store if store is not None else BoxStore()
     app.state.owns_store = store is None
     # The store reads a file when a box is added or changed, so it has to be told the
     # same confine the page browses inside: a box made here would otherwise index
-    # nothing at all, and the search would quietly never find it.
-    if app.state.content_root is not None:
-        app.state.store.content_root = app.state.content_root
+    # nothing at all, and the search would quietly never find it. Unconfined, the confine
+    # is the whole filesystem rather than no confine — every reader of this value asks
+    # "is it inside?", and `/` is the honest answer to that question when nothing is excluded.
+    app.state.store.content_root = app.state.content_root
     app.state.mqtt_events = mqtt_events or mqtt.aiomqtt_events
     app.state.mqtt_latest = mqtt.Latest()
 
@@ -735,8 +747,9 @@ def create_app(
     def read_raw(ref: str, request: Request, store: StoreDep) -> Response:
         """The bytes behind a file box, for `<img>` and for the text view.
 
-        Only types that say they serve content, only real regular files, and only
-        inside `BOXGANIZER_CONTENT_ROOT` when that is set.
+        Only types that say they serve content, and only real regular files. **Not confined:** a box
+        you filed is your box, and a server started `--confined` refuses to *start* pointing at
+        something outside its root rather than going dark on what is already stored (ADR 30).
         """
         box = store.resolve(ref)
         kind = boxtypes.get(box.box_type)
@@ -751,12 +764,6 @@ def create_app(
                 detail={"error": "resource_missing", "name": box.name},
             )
         path = _local_path(box.resource_uri)
-        root = getattr(request.app.state, "content_root", None)
-        if root is not None and not _inside(path, root):
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "resource_out_of_range", "root": str(root)},
-            )
         if not path.is_file():
             raise HTTPException(
                 status_code=404,
@@ -1416,7 +1423,7 @@ def create_app(
             _root, inside = _box_file(store, request, ref, sub, need_list=True)
             found = text_search.extract_resource(
                 str(inside),
-                root=getattr(request.app.state, "content_root", None),
+                root=_read_root(request),
                 pdf=False,
             )
             if not found.usable:
@@ -1426,7 +1433,7 @@ def create_app(
             return {"html": "", "source": "", "note": "the box points at no file"}
         found = text_search.extract_resource(
             box.resource_uri,
-            root=getattr(request.app.state, "content_root", None),
+            root=_read_root(request),
             pdf=False,
         )
         if not found.usable:
@@ -1504,7 +1511,7 @@ def create_app(
                 detail={"error": "index_running", "scope": job["scope"]},
             )
         scope = body.scope if body.scope in ("outstanding", "everything") else "outstanding"
-        root = getattr(request.app.state, "content_root", None)
+        root = _read_root(request)
 
         async def pass_() -> None:
             job["running"] = True
@@ -1557,7 +1564,7 @@ def create_app(
         """
         from boxganizer import check as checker
 
-        confine = getattr(request.app.state, "content_root", None)
+        confine = _read_root(request)
         found = checker.run(store, confine=confine)
         return {
             "summary": checker.summary(found),
@@ -1570,7 +1577,7 @@ def create_app(
         """Do one repair the check offered, and say what happened."""
         from boxganizer import check as checker
 
-        confine = getattr(request.app.state, "content_root", None)
+        confine = _read_root(request)
         wanted = (ref_body.kind, ref_body.box, ref_body.path)
         match = next(
             (
@@ -1738,7 +1745,7 @@ def create_app(
         kind = payload.box_type or mindmap.NODE_TYPE
         saved = _add_unique(store, Box(name=mindmap.NEW_NODE_NAME, box_type=kind), payload.name)
         store.link(parent.uuid, saved.uuid)
-        text_search.sync(store, saved, root=getattr(request.app.state, "content_root", None))
+        text_search.sync(store, saved, root=_read_root(request))
         line = [child.uuid for child in mindmap.children_of(store, parent, box.config)]
         if saved.uuid in line:
             line.remove(saved.uuid)
@@ -1818,16 +1825,16 @@ def create_app(
         """A file selector for the resource field.
 
         Browsers will not hand out real paths from `<input type=file>`, so the
-        picker walks the server's filesystem. What it may walk is the same rule
-        as everywhere else: `$BOXGANIZER_CONTENT_ROOT` when set, otherwise the
-        user's home directory, and never above that.
+        picker walks the server's filesystem. Where it *opens* is `$BOXGANIZER_CONTENT_ROOT`
+        when set, otherwise the home directory; how far it may go is the confine — the content
+        root when this server was started `--confined`, and the whole filesystem otherwise.
         """
         confine = _browse_root(request)
-        # A relative path or a leading `~` is read against the confine, never
-        # against the process working directory, and the resolved result must
-        # still be inside it.
-        requested = Path(path).expanduser() if path else confine
-        target = (requested if requested.is_absolute() else confine / requested).resolve()
+        # Opening somewhere friendly is not the same promise as never leaving it. A relative path
+        # or a leading `~` is read against that opening directory, not the process working one.
+        start = paths.content_root(None)
+        requested = Path(path).expanduser() if path else start
+        target = (requested if requested.is_absolute() else start / requested).resolve()
         if not _inside(target, confine):
             raise HTTPException(
                 status_code=403,
@@ -2226,6 +2233,7 @@ def create_app(
 
     @app.post("/api/boxes", status_code=201)
     def create_box(request: Request, payload: BoxCreate, store: StoreDep) -> dict[str, object]:
+        _refuse_out_of_range(request, payload.resource_uri)
         box = Box(
             name=payload.name,
             description=payload.description,
@@ -2249,7 +2257,7 @@ def create_app(
         saved = store.add(box, index_it=payload.index_resource)
         # A text or PDF box goes into the full-text index the moment it exists, so it
         # is findable by what it says without anyone remembering to rebuild anything.
-        text_search.sync(store, saved, root=getattr(request.app.state, "content_root", None))
+        text_search.sync(store, saved, root=_read_root(request))
         if payload.parent:
             store.link(payload.parent, saved.uuid)
             if payload.cell is not None:
@@ -2278,6 +2286,7 @@ def create_app(
         """
         box = store.resolve(ref)
         data = payload.model_dump(exclude_unset=True)
+        pointed_at_before = box.resource_uri
         for field in ("name", "description", "icon", "box_type", "resource_uri"):
             if data.get(field) is None:
                 continue
@@ -2293,6 +2302,10 @@ def create_app(
                 box.icon = value or boxtypes.get(box.box_type).icon or DEFAULT_ICON
             else:
                 setattr(box, field, value or None)
+        if str(box.resource_uri or "") != str(pointed_at_before or ""):
+            # A box whose address did not move is not being pointed anywhere new, so editing its
+            # name or its tags still works on a server that confines writes.
+            _refuse_out_of_range(request, box.resource_uri)
         if "metadata" in data and data["metadata"] is not None:
             box.metadata = dict(data["metadata"])
         if "config" in data and data["config"] is not None:
@@ -2301,7 +2314,7 @@ def create_app(
         saved = store.update(box, index_it=payload.index_resource)
         # The same rule as on creation, in both directions: a box retyped away from
         # text, or pointed at another file, has its indexed text replaced or removed.
-        text_search.sync(store, saved, root=getattr(request.app.state, "content_root", None))
+        text_search.sync(store, saved, root=_read_root(request))
         return saved.to_dict()
 
     @app.delete("/api/boxes/{ref}", status_code=204)
@@ -2913,9 +2926,56 @@ def _with_rect(store: BoxStore, box: Box, child_uuid: str) -> dict[str, object]:
 
 
 def _browse_root(request: Request) -> Path:
-    """How far the file selector may wander."""
+    """How far the file selector may wander.
+
+    Unconfined — the default — the answer is the filesystem root, because a selector that stops at
+    the home directory *is* the confinement rather than a convenience: the photo on another mount,
+    the tree under `/mnt`, the file one level above where the library lives. When confinement is on,
+    this is the wall and nothing above it is listed or read.
+    """
     confine = getattr(request.app.state, "content_root", None)
-    return Path(confine) if confine is not None else Path.home()
+    return Path(confine) if confine is not None else Path("/")
+
+
+def _read_root(request: Request) -> Path | None:
+    """Where the indexer and the checker may read — None when nothing is confined.
+
+    The page, the store and the index pass have to agree, or a box filed on another mount is
+    accepted by the page, served by the page, and quietly never indexed: the worst of both, because
+    search misses it and nothing says why.
+    """
+    confine = getattr(request.app.state, "content_root", None)
+    return Path(confine) if confine is not None else None
+
+
+def _refuse_out_of_range(request: Request, resource_uri: str | None) -> None:
+    """Refuse to *start* pointing a box outside the confine, when this server has one.
+
+    Only a new or changed address is asked about, and only a local one: `ssh:`, `mqtt:` and the rest
+    are read by the box that carries them, and a box already stored out of range stays readable
+    and stays renameable: a library that begins refusing its own contents teaches the reader that
+    their files are unreliable. The flag is about what may be filed from now on.
+    """
+    confine = getattr(request.app.state, "content_root", None)
+    if confine is None or not resource_uri:
+        return
+    scheme, _ = paths.split_resource(str(resource_uri))
+    if scheme not in ("", "file"):
+        return
+    target = paths.local_path(str(resource_uri))
+    if _inside(target, Path(confine)):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "resource_out_of_range",
+            "root": str(confine),
+            "reason": (
+                f"{target} is outside {confine}, which this server writes inside; "
+                "run `box serve` without --confined to file anything"
+            ),
+        },
+    )
 
 
 def _box_file(
@@ -2928,8 +2988,10 @@ def _box_file(
 ) -> tuple[Path, Path]:
     """Resolve `ref` + `sub` to a real file inside the box's own directory.
 
-    The sub-path can never leave the box's resource directory, and the whole
-    directory must still be inside `$BOXGANIZER_CONTENT_ROOT` when that is set.
+    The sub-path can never leave the box's resource directory — that is a traversal guard, and it
+    holds whatever the server was started with. The directory itself is not confined: `--confined`
+    refuses to *file* something outside its root, it does not hide what the library already holds
+    (ADR 30).
     """
     box = store.resolve(ref)
     if need_list and not boxtypes.get(box.box_type).lists_files:
@@ -2940,11 +3002,6 @@ def _box_file(
     if not box.resource_uri:
         raise HTTPException(status_code=404, detail={"error": "resource_missing", "name": box.name})
     root = _local_path(box.resource_uri)
-    confine = getattr(request.app.state, "content_root", None)
-    if confine is not None and not _inside(root, confine):
-        raise HTTPException(
-            status_code=403, detail={"error": "resource_out_of_range", "root": str(confine)}
-        )
     try:
         target = fslist.safe_join(root, sub)
     except fslist.OutsideRoot as exc:
