@@ -610,7 +610,12 @@ def create_app(
         may share a name, and a crumb that opens the wrong one is worse than no crumb.
         """
         path = paths.get(uuid)
-        return [{"uuid": box.uuid, "name": box.name} for box in path] if path else []
+        # icon and box_type come along because a crumb draws them: without them the line reads
+        # "undefined R-Deep", which is the whole benefit of the crumb line lost.
+        return [
+            {"uuid": box.uuid, "name": box.name, "icon": box.icon, "box_type": box.box_type}
+            for box in path
+        ] if path else []
 
     @app.exception_handler(BoxNotFound)
     async def _not_found(request: Request, exc: BoxNotFound) -> JSONResponse:

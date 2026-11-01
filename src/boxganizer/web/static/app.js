@@ -874,7 +874,12 @@ const viewportView = {
           // crumb line should read as though the person had clicked down child by child to reach
           // this box. Their earlier wanderings in the pane are not part of how you get here from
           // where the search was asked, and showing them would be a path nobody walked.
-          (hit) => self.open(hit.uuid, { trail: hit.route && hit.route.length ? hit.route : [...trail, hit] })
+          // `route` ends at the hit itself and open() adds the box it opens, so the route is
+          // handed over without its last entry — passing it whole drew the hit twice.
+          (hit) =>
+            self.open(hit.uuid, {
+              trail: hit.route && hit.route.length > 1 ? hit.route.slice(0, -1) : [trail[trail.length - 1]].filter(Boolean),
+            })
         );
       } else {
         searchSlot.remove(); // an empty pane has nothing to search inside yet
