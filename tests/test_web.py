@@ -4803,9 +4803,11 @@ def test_the_box_search_widget_is_one_function_mounted_per_line(client: TestClie
 
     widget = script[script.index("function mountBoxSearch(mount, owner, open) {") :]
     widget = widget[: widget.index("async function renderTagLine(")]
-    # the scope is one argument on the search that already exists
-    assert "api.search(term, owner.uuid)" in widget
-    assert "field.placeholder = `search inside ${owner.name}`" in widget
+    # the scope is one argument on the search that already exists, read through a getter so a
+    # pane's widget follows the pane as it walks deeper
+    assert "api.search(term, ownerOf().uuid)" in widget
+    assert "const ownerOf = () => (typeof owner === \"function\" ? owner() : owner);" in widget
+    assert "field.placeholder = `search inside ${ownerOf().name}`" in widget
     assert 'if (event.key === "Escape")' in widget
     assert "event.stopPropagation();" in widget, "Escape would otherwise close the pane too"
     assert 'event.key === "ArrowDown"' in widget
@@ -4814,5 +4816,9 @@ def test_the_box_search_widget_is_one_function_mounted_per_line(client: TestClie
     assert "box-search-via" in widget, "the route down is shown, not just the hit"
 
     assert "mountBoxSearch(slot, box," in script[script.index("async function renderTagLine(") :]
+    pane = script[script.index("function paneShell(node, shown)") :]
+    pane = pane[: pane.index("function renderNode(")]
+    assert "mountBoxSearch(" in pane, "the same widget, mounted per pane"
+    assert "searchSlot.remove(); // an empty pane has nothing to search inside yet" in pane
     assert ".box-search-results {" in css and "position: absolute;" in css
     assert ".tagline-search" in css

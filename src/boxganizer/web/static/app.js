@@ -708,7 +708,9 @@ const viewportView = {
       crumbs.className = "vp-crumbs";
       const buttons = document.createElement("div");
       buttons.className = "vp-buttons";
-      path.append(crumbs, buttons);
+      const searchSlot = document.createElement("span");
+      searchSlot.className = "tagline-search vp-search";
+      path.append(searchSlot, crumbs, buttons);
 
       const body = document.createElement("div");
       body.className = "vp-body";
@@ -861,6 +863,19 @@ const viewportView = {
       // Views repaint their controls in place — a grid that changes its column count, a folder that
       // switches layout — and a row drawn after the pane's last render would arrive unfolded.
       new MutationObserver(() => foldPaneRows(pane)).observe(body, { childList: true, subtree: true });
+      // The same widget, scoped to this pane alone: its results open under this pane and a search
+      // here never moves a neighbour. The owner is read each time, so walking deeper in the pane
+      // narrows the search to where the pane now stands.
+      if (shown) {
+        mountBoxSearch(
+          searchSlot,
+          () => trail[trail.length - 1] || shown,
+          (hit) => self.open(hit.uuid, { trail: [...trail, hit] })
+        );
+      } else {
+        searchSlot.remove(); // an empty pane has nothing to search inside yet
+      }
+
       // What goes on the screen is the end of the walk, not necessarily the box the layout names —
       // that is where the walk started. The end is read afresh so a rename shows, and a box deleted
       // since the last look is forgotten rather than painted as an error where content used to be.
@@ -1361,6 +1376,11 @@ async function saveSettingFor(box, key, value, { onSaved }, options = {}) {
  * would get there* for a hit three levels deep that the reader never clicked through.
  */
 function mountBoxSearch(mount, owner, open) {
+  // A pane hands over a function, because the box it is showing changes under it: searching a pane
+  // the moment after you walked two levels deeper means searching *there*, not the box the pane was
+  // opened with. The main line passes the box itself and never notices the difference.
+  const ownerOf = () => (typeof owner === "function" ? owner() : owner);
+
   const form = document.createElement("form");
   form.className = "box-search";
   form.setAttribute("role", "search");
@@ -1368,8 +1388,8 @@ function mountBoxSearch(mount, owner, open) {
   const field = document.createElement("input");
   field.type = "search";
   field.className = "box-search-field";
-  field.placeholder = `search inside ${owner.name}`;
-  field.setAttribute("aria-label", `search boxes and files inside ${owner.name}`);
+  field.placeholder = `search inside ${ownerOf().name}`;
+  field.setAttribute("aria-label", `search boxes and files inside ${ownerOf().name}`);
   field.setAttribute("aria-expanded", "false");
   field.autocomplete = "off";
 
@@ -1450,6 +1470,12 @@ function mountBoxSearch(mount, owner, open) {
   }
 
   let timer = null;
+  field.addEventListener("focus", () => {
+    // re-worded on the way in, because for a pane the owner may have moved since it was mounted
+    const here = ownerOf();
+    field.placeholder = `search inside ${here.name}`;
+    field.setAttribute("aria-label", `search boxes and files inside ${here.name}`);
+  });
   field.addEventListener("input", () => {
     const term = field.value.trim();
     if (timer) clearTimeout(timer);
@@ -1461,7 +1487,7 @@ function mountBoxSearch(mount, owner, open) {
     timer = setTimeout(async () => {
       let answer;
       try {
-        answer = await api.search(term, owner.uuid);
+        answer = await api.search(term, ownerOf().uuid);
       } catch (error) {
         status(error.message, true);
         return;

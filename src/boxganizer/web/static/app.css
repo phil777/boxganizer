@@ -2880,6 +2880,11 @@ pre.text {
 .box-search-why { overflow-wrap: anywhere; }
 .box-search-none { cursor: default; }
 
+/* A pane's search sits in the pane's own path line, and its window opens under that
+   pane: a search in one pane must not move or cover a neighbour. */
+.vp-search { flex: 0 0 auto; }
+.vp-search .box-search-field { width: min(13rem, 34vw); font-size: 0.72rem; }
+
 .tagline-search {
   display: flex;
   align-items: center;
