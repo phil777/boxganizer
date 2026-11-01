@@ -59,13 +59,27 @@ async function request(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
+/**
+ * A box was just written, so the index may have work to do that this page caused.
+ *
+ * Ask once, immediately: the line at the bottom of the panel starts on "reading 1 of 3" the moment the
+ * save lands rather than waiting for a poll that has not begun, because polling only starts while the
+ * server already says it is busy. One extra GET after a write is nothing, and a bar that appears a
+ * second and a half late looks like a bar that missed the work.
+ */
+function afterWrite(answer) {
+  refreshIndexStatus();
+  return answer;
+}
+
 const api = {
   types: () => request("/api/types"),
   boxes: () => request("/api/boxes"),
   search: (term) => request(`/api/search?q=${encodeURIComponent(term)}`),
   box: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}`),
   children: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}/children`),
-  create: (payload) => request("/api/boxes", { method: "POST", body: JSON.stringify(payload) }),
+  create: (payload) =>
+    request("/api/boxes", { method: "POST", body: JSON.stringify(payload) }).then(afterWrite),
   setConfig: (ref, config) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/config`, {
       method: "PUT",
@@ -160,7 +174,7 @@ const api = {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
-    }),
+    }).then(afterWrite),
   unlink: (ref, child) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/children/${encodeURIComponent(child)}`, {
       method: "DELETE",
@@ -3379,12 +3393,26 @@ async function sendFix(finding, action, value) {
  */
 
 /** How many resources a pass would take another look at, and so what to call them. */
+function indexQueue(status_) {
+  return status_.queue || { waiting: 0, reading: false, done: 0, total: 0, errors: [] };
+}
+
 function indexWaiting(status_) {
   return (status_.stale || 0) + (status_.untouched || 0);
 }
 
 function indexWords(status_) {
+  const queue = indexQueue(status_);
+  if (queue.reading || queue.waiting) {
+    // The denominator is the point. "indexing…" says something is happening; "reading 3 of 12" says
+    // whether to wait for it, and a bar with no total is a promise nobody can check.
+    return `reading ${queue.done} of ${queue.total}…`;
+  }
   if (status_.running) return "indexing…";
+  if (queue.errors.length) {
+    // Refused, not stalled: the work finished and one file was not readable.
+    return `index refused ${queue.errors.length} file${queue.errors.length === 1 ? "" : "s"}`;
+  }
   const waiting = indexWaiting(status_);
   // "reindex" only when something was read and has since changed; a file the index has never
   // opened is not being re-read, and a line that says otherwise teaches people to distrust it.
@@ -3395,10 +3423,18 @@ function indexWords(status_) {
 }
 
 function indexDetail(status_) {
+  const queue = indexQueue(status_);
   const parts = [
     `${status_.wanted} file${status_.wanted === 1 ? "" : "s"} wanted in the index`,
     `${status_.indexed} read into it`,
   ];
+  if (queue.reading || queue.waiting) {
+    parts.push(`${queue.done} of ${queue.total} read since this page last looked`);
+  }
+  for (const failure of queue.errors.slice(-3)) {
+    // Named rather than counted: "1 refused" is a riddle, the file and the reason are the answer.
+    parts.push(`${failure.name}: ${failure.note}`);
+  }
   if (status_.stale) parts.push(`${status_.stale} changed since they were read`);
   if (status_.outstanding) parts.push(`${status_.outstanding} not read yet`);
   const last = status_.last;
@@ -3422,6 +3458,28 @@ function indexDetail(status_) {
 
 let indexTimer = null;
 
+/**
+ * The bar beside the words: how much of the reading this save caused is done.
+ *
+ * It is drawn from the same answer as the words, so the two cannot tell different stories, and it is
+ * hidden rather than parked at full when the queue empties — a full bar that never goes away is the
+ * stalled bar people stop believing. `aria-live` is on the words, not the bar, because the count
+ * reading "3 of 12" is the thing worth hearing.
+ */
+function drawIndexProgress(status_) {
+  const bar = el("index-progress");
+  const queue = indexQueue(status_);
+  const busy = queue.reading || queue.waiting;
+  bar.hidden = !busy;
+  if (!busy) {
+    bar.removeAttribute("value");
+    return;
+  }
+  bar.max = String(Math.max(queue.total, 1));
+  bar.value = String(queue.done);
+  bar.setAttribute("aria-label", `reading ${queue.done} of ${queue.total} files for the index`);
+}
+
 async function refreshIndexStatus({ check = false } = {}) {
   const spot = el("index-status");
   let status_;
@@ -3436,6 +3494,7 @@ async function refreshIndexStatus({ check = false } = {}) {
   }
   spot.textContent = indexWords(status_);
   spot.title = indexDetail(status_);
+  drawIndexProgress(status_);
   // A number with nothing behind it should not invite a click, and should not pretend to be
   // a control to a keyboard either.
   const waiting = indexWaiting(status_);

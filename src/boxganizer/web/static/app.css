@@ -2346,6 +2346,17 @@ pre.text {
   gap: 0.5rem;
 }
 
+/* The index bar sits in the same line as the words it belongs to, and takes no more room than
+   a long word would: the bottom of the left pane is one line, and it must stay that way. */
+#index-progress {
+  width: 4.5rem;
+  height: 0.45rem;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+  accent-color: var(--accent);
+}
+#index-progress[hidden] { display: none; }
+
 .index-status {
   /* it looks like the sentence it has always been, and it is a button: the difference is
      that it now answers when clicked */

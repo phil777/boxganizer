@@ -44,8 +44,12 @@ choose the type (the list is searchable, because there are 39 of them) and confi
 it. ☰ beside the name at the top of that panel is what belongs to the library rather than
 to one box: **About**, **Check the library**, and the two index passes. Along the bottom,
 in front of the box count, the index reports itself all the time — `75 indexed`, or `2 out
-of date`, or `indexing…` — with the detail on hover, including which files hold nothing to
-read. A drop that no view claimed files the box into the box you are looking at, so the
+of date`, or `reading 12 of 80…` — with the detail on hover, including which files hold nothing to
+read. **Saving a box does not wait for its file to be read**: the rows are written, the answer comes
+back, and the reading happens behind that line with a bar that counts **files**, so you can see how
+much of the folder you just pointed at has been gone through. Taking a box *out* of the index is
+immediate — a stale document staying findable is a wrong answer, not a slow one. A file the index
+refuses is named there rather than left as a stalled bar (ADR 32). A drop that no view claimed files the box into the box you are looking at, so the
 whole pane takes it. The outline that says *drop here* is the page's to take away, not the
 element's that drew it: a view that claims a drop stops the event, so the pane behind it is never
 told, and one drag cancelled with Escape never fires a drop at all. Every ending clears every zone

@@ -13,6 +13,7 @@ import json
 import mimetypes
 import os
 import tarfile
+import threading
 import zipfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -1456,6 +1457,122 @@ def create_app(
             return {"html": "", "source": "", "note": found.note}
         return {"html": markdown.render(found.text), "source": found.text, "note": ""}
 
+    # -- background indexing -------------------------------------------------
+    #
+    # A save used to read the file before it answered. For a note that is nothing; for a box pointed
+    # at a big folder it is the whole walk, held inside the request, with the page showing nothing
+    # until it finished. So reading moves to one worker thread and the request answers at once — the
+    # line at the bottom of the left pane says how far the reading has got, and a box that has not
+    # been read yet is still perfectly usable the moment it is saved (ADR 32).
+
+    def _index_state() -> dict[str, Any]:
+        """The queue this process is keeping: what is waiting, what is read, what refused.
+
+        On the app rather than in the database, like the pass job: it describes work happening
+        now, in this process. After a restart the counts are the truth and the queue is legitimately
+        empty — anything still unread is listed as outstanding by `index_counts`.
+        """
+        state = getattr(app.state, "index_queue", None)
+        if state is None:
+            state = {
+                "todo": [],
+                "live": False,
+                # Files read, not queue items: a folder is one item and eighty files, and the
+                # denominator a person is watching is the files. `base_*` is what the finished items
+                # contributed, so a walk can publish its own (done, total) as an absolute number.
+                "done": 0,
+                "total": 0,
+                "base_done": 0,
+                "base_total": 0,
+                "errors": [],
+                "lock": threading.Lock(),
+            }
+            app.state.index_queue = state
+        return state
+
+    def _pump_index(store: BoxStore, state: dict[str, Any]) -> None:
+        """Read what was queued, one file at a time, until nothing is waiting.
+
+        Never a second thread on the same queue: two readers of one folder would court again the
+        race ADR 31 had to close, for no gain. A refusal on one file is recorded in that file's
+        words and the queue carries on — a bar that stops moving because one PDF is broken is
+        worse than a bar that finishes and says one file was refused.
+        """
+        while True:
+            with state["lock"]:
+                if not state["todo"]:
+                    state["live"] = False
+                    return
+                resource_id, root, label = state["todo"].pop(0)
+                # 0/1 rather than bools so the dict has one value type: the flag and the file count
+                # travel together out of the callback, and mypy should be able to see that.
+                seen: dict[str, int] = {"walked": 0, "total": 0}
+
+            def report(done: int, total: int, _seen: dict[str, int] = seen) -> None:
+                # The item was estimated as one file when it was queued; a walk replaces that
+                # estimate with what it is actually holding, so the denominator never lies.
+                with state["lock"]:
+                    _seen["walked"] = 1
+                    _seen["total"] = total
+                    state["done"] = int(state["base_done"]) + done
+                    state["total"] = max(int(state["base_total"]) - 1 + total, state["done"])
+
+            try:
+                note = text_search.sync_resource(store, resource_id, root=root, on_progress=report)
+            except Exception as exc:  # one bad file must not end the queue
+                note = f"{type(exc).__name__}: {exc}"
+            with state["lock"]:
+                walked = bool(seen["walked"])
+                counted = int(seen["total"]) if walked else 1
+                state["base_done"] = int(state["base_done"]) + counted
+                state["base_total"] = int(state["base_total"]) - 1 + counted
+                state["done"] = state["base_done"]
+                state["total"] = state["base_total"]
+                if note:
+                    state["errors"] = (state["errors"] + [{"name": label, "note": note}])[-5:]
+
+    def _queue_index(request: Request, resource_id: int, *, root: Path | None, label: str) -> None:
+        """Put one resource in line for reading, and start the reader if it is idle."""
+        state = _index_state()
+        with state["lock"]:
+            if any(item[0] == resource_id for item in state["todo"]):
+                return  # already on its way; a double save is one read
+            state["todo"].append((resource_id, root, label))
+            # one file, until a walk says otherwise — so the bar has a denominator before it starts
+            state["total"] += 1
+            state["base_total"] += 1
+            start = not state["live"]
+            state["live"] = True
+        if start:
+            threading.Thread(
+                target=_pump_index,
+                args=(request.app.state.store, state),
+                name="boxganizer-index",
+                daemon=True,
+            ).start()
+
+    def _sync_index(request: Request, box: Box) -> None:
+        """Bring one saved box's text up to date: queued when there is reading to do.
+
+        The other direction stays synchronous on purpose. Taking a box *out* of the index, or
+        moving it off a file, reads nothing — and a document that outlives the box that owned it
+        is findable, and wrong, until something else notices.
+        """
+        app_store = request.app.state.store
+        root = _read_root(request)
+        # The box handed back by `add`/`update` carries the resource *id* but not the row, so the
+        # wish is read from the store: asking the box alone would send every save down the
+        # synchronous path and leave this whole queue empty, which is how the race was found.
+        resource_id = box.resource_id if box.resource is None else box.resource.id
+        if resource_id is None:
+            text_search.sync(app_store, box, root=root)
+            return
+        record = box.resource or app_store.resource(int(resource_id))
+        if record is None or not record.index_it:
+            text_search.sync(app_store, box, root=root)
+            return
+        _queue_index(request, int(resource_id), root=root, label=box.name)
+
     def _index_job(request: Request) -> dict[str, Any]:
         """The running or last indexation, as this process remembers it.
 
@@ -1497,7 +1614,24 @@ def create_app(
             # Named, because "1 could not be read" is a riddle: the useful part is which.
             body["unreadable_examples"] = store.unreadable_references(limit=3)
         job = _index_job(request)
-        return {**body, "running": job["running"], "scope": job["scope"], "last": job["last"]}
+        queue = _index_state()
+        with queue["lock"]:
+            progress = {
+                "waiting": len(queue["todo"]),
+                "reading": queue["live"],
+                "done": queue["done"],
+                "total": queue["total"],
+                "errors": list(queue["errors"]),
+            }
+        return {
+            **body,
+            # "running" means either kind of work: a pass over the library, or the queue reading
+            # what people just saved. The page polls on this one flag and asks again.
+            "running": bool(job["running"] or progress["reading"]),
+            "scope": job["scope"] or ("queued" if progress["reading"] else ""),
+            "last": job["last"],
+            "queue": progress,
+        }
 
     @app.get("/api/index/pending")
     def index_pending(
@@ -1759,9 +1893,11 @@ def create_app(
         box = _mindmap_box(store, ref)
         parent = store.resolve(payload.parent) if payload.parent else box
         kind = payload.box_type or mindmap.NODE_TYPE
-        saved = _add_unique(store, Box(name=mindmap.NEW_NODE_NAME, box_type=kind), payload.name)
+        saved = _add_unique(
+            store, Box(name=mindmap.NEW_NODE_NAME, box_type=kind), payload.name, read_now=False
+        )
         store.link(parent.uuid, saved.uuid)
-        text_search.sync(store, saved, root=_read_root(request))
+        _sync_index(request, saved)
         line = [child.uuid for child in mindmap.children_of(store, parent, box.config)]
         if saved.uuid in line:
             line.remove(saved.uuid)
@@ -2270,10 +2406,11 @@ def create_app(
                 raise HTTPException(
                     status_code=422, detail={"error": "bad_viewport", "reason": problem}
                 )
-        saved = store.add(box, index_it=payload.index_resource)
-        # A text or PDF box goes into the full-text index the moment it exists, so it
-        # is findable by what it says without anyone remembering to rebuild anything.
-        text_search.sync(store, saved, root=_read_root(request))
+        saved = store.add(box, index_it=payload.index_resource, read_now=False)
+        # A text or PDF box goes into the full-text index as soon as it exists, so it is findable by
+        # what it says without anyone remembering to rebuild anything — but the reading happens in
+        # the queue rather than inside this response.
+        _sync_index(request, saved)
         if payload.parent:
             store.link(payload.parent, saved.uuid)
             if payload.cell is not None:
@@ -2327,10 +2464,10 @@ def create_app(
         if "config" in data and data["config"] is not None:
             box.config = dict(data["config"])
         _check_viewport_children(store, box)
-        saved = store.update(box, index_it=payload.index_resource)
+        saved = store.update(box, index_it=payload.index_resource, read_now=False)
         # The same rule as on creation, in both directions: a box retyped away from
         # text, or pointed at another file, has its indexed text replaced or removed.
-        text_search.sync(store, saved, root=_read_root(request))
+        _sync_index(request, saved)
         return saved.to_dict()
 
     @app.delete("/api/boxes/{ref}", status_code=204)
@@ -2813,7 +2950,7 @@ def _mindmap_box(store: BoxStore, ref: str) -> Box:
     return box
 
 
-def _add_unique(store: BoxStore, box: Box, name: str | None) -> Box:
+def _add_unique(store: BoxStore, box: Box, name: str | None, *, read_now: bool = True) -> Box:
     """Add a box, under a given name or under the next free one of its own.
 
     A name that is taken is refused to the caller in the ordinary way when they asked
@@ -2822,7 +2959,7 @@ def _add_unique(store: BoxStore, box: Box, name: str | None) -> Box:
     """
     if name and name.strip():
         box.name = name.strip()
-        return store.add(box)
+        return store.add(box, read_now=read_now)
     box.name = mindmap.NEW_NODE_NAME
     refused: set[str] = set()
     for _attempt in range(50):

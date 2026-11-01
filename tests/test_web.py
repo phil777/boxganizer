@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -16,6 +18,7 @@ from boxganizer import mqtt
 from boxganizer.errors import MqttError
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
+from conftest import wait_for_index
 
 pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
@@ -543,6 +546,7 @@ def test_by_default_a_box_points_anywhere_the_account_can_read(
     uuid = response.json()["uuid"]
     assert client.get(f"/api/boxes/{uuid}/raw").status_code == 200
     assert "ninety eight" in client.get(f"/api/boxes/{uuid}/raw").text
+    wait_for_index(client)
     found = client.get("/api/search?q=ninety").json()
     hits = found["boxes"] if isinstance(found, dict) else found
     assert "Far note" in [hit.get("name") for hit in hits], found
@@ -4364,3 +4368,274 @@ def test_only_a_sensor_is_asked_for_templates(client: TestClient) -> None:
     )
     assert refused.status_code == 422
     assert "style_template" in refused.text
+
+
+# -- indexing in the background, with a bar that says how far it got ---------
+
+
+def _hold_reader(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Make the reader wait for permission, so "off the request thread" is measured not claimed."""
+    from boxganizer import search as indexing
+
+    release = threading.Event()
+    real = indexing.sync_resource
+
+    def slow(store: object, resource_id: int, **kwargs: object) -> str:
+        release.wait(timeout=20.0)
+        return real(store, resource_id, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(indexing, "sync_resource", slow)
+    return release
+
+
+def test_saving_a_box_answers_before_its_file_has_been_read(
+    populated: BoxStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The save is prompt, the reading happens elsewhere, and the words arrive anyway.
+
+    A timing comparison, not an assertion of intent: with the reader held, the POST still returns in
+    a small fraction of the time the read takes. That is the whole promise of the change — a box
+    pointed at a big folder used to hold the request open for the walk.
+    """
+    release = _hold_reader(monkeypatch)
+    tree = tmp_path / "vault"
+    tree.mkdir()
+    (tree / "deep.md").write_text("the archive holds eleven thousand letters\n", encoding="utf-8")
+
+    with TestClient(create_app(populated)) as app_client:
+        began = monotonic()
+        made = app_client.post(
+            "/api/boxes",
+            json={"name": "Vault", "box_type": "markdown", "resource_uri": str(tree / "deep.md")},
+        )
+        elapsed = monotonic() - began
+        assert made.status_code == 201
+        assert elapsed < 0.5, f"the save waited {elapsed:.2f}s for the reader"
+
+        mid = app_client.get("/api/index/status").json()["queue"]
+        assert mid["reading"] is True and mid["total"] >= 1, mid
+        assert mid["waiting"] + mid["done"] <= mid["total"], "the denominator bounds the work"
+
+        # the box is usable now, index or no index
+        uuid = made.json()["uuid"]
+        assert app_client.get(f"/api/boxes/{uuid}").json()["name"] == "Vault"
+        assert app_client.get(f"/api/boxes/{uuid}/raw").status_code == 200
+
+        release.set()
+        wait_for_index(app_client)
+        found = app_client.get("/api/search?q=thousand").json()
+        hits = found if isinstance(found, list) else found.get("boxes", [])
+        assert "Vault" in [hit["name"] for hit in hits], found
+        settled = app_client.get("/api/index/status").json()["queue"]
+        assert settled["reading"] is False and settled["waiting"] == 0, settled
+        assert settled["done"] == settled["total"], "the bar reached its denominator, not a stall"
+
+
+def test_a_refused_file_is_named_and_the_bar_does_not_stall(
+    populated: BoxStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One unreadable file is a report, not a hang.
+
+    The queue carries on and counts it, and the line says it was refused; a bar that stops moving
+    because one file threw is the failure mode that teaches people to ignore the bar.
+    """
+    from boxganizer import search as indexing
+
+    def refuse(store: object, resource_id: int, **kwargs: object) -> str:
+        return "the file could not be opened (permission denied)"
+
+    monkeypatch.setattr(indexing, "sync_resource", refuse)
+    note = tmp_path / "stubborn.md"
+    note.write_text("words that will not be read\n", encoding="utf-8")
+
+    with TestClient(create_app(populated)) as app_client:
+        made = app_client.post(
+            "/api/boxes",
+            json={"name": "Stubborn", "box_type": "markdown", "resource_uri": str(note)},
+        )
+        assert made.status_code == 201
+        wait_for_index(app_client)
+        queue = app_client.get("/api/index/status").json()["queue"]
+        assert queue["reading"] is False and queue["waiting"] == 0, queue
+        assert queue["done"] == queue["total"], "it finished; it was the file that refused"
+        named = {item["name"]: item["note"] for item in queue["errors"]}
+        assert "Stubborn" in named and "permission denied" in named["Stubborn"], queue
+
+
+def test_taking_a_box_out_of_the_index_happens_in_the_request(
+    populated: BoxStore, tmp_path: Path
+) -> None:
+    """Un-indexing reads nothing, so it stays synchronous: a stale doc is findable, and wrong.
+
+    The other direction is queued. The asymmetry is the decision, so both halves are asserted —
+    after this save the word must be gone with no waiting at all.
+    """
+    words = tmp_path / "brief.md"
+    words.write_text("the ledger balances at forty two\n", encoding="utf-8")
+    with TestClient(create_app(populated)) as app_client:
+        made = app_client.post(
+            "/api/boxes",
+            json={"name": "Brief", "box_type": "markdown", "resource_uri": str(words)},
+        )
+        uuid = made.json()["uuid"]
+        wait_for_index(app_client)
+        assert app_client.get("/api/search?q=forty").json()
+
+        out = app_client.put(f"/api/boxes/{uuid}", json={"index_resource": False})
+        assert out.status_code == 200
+        assert app_client.get("/api/search?q=forty").json() == [], "no window of stale findability"
+
+
+def test_saves_during_a_background_read_leave_the_rows_clean(
+    populated: BoxStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker indexes while people keep saving: no duplicated rows, no half links, no 5xx.
+
+    ADR 31 made adoption race-proof; this is that race existing in anger — a reader thread and
+    request threads walking one folder — and the assertions are on the rows, not on the scheduler's
+    mood.
+    """
+    tree = tmp_path / "shared"
+    tree.mkdir()
+    for index in range(12):
+        (tree / f"s{index}.md").write_text(f"shared word {index}\n", encoding="utf-8")
+
+    release = _hold_reader(monkeypatch)
+    with TestClient(create_app(populated)) as app_client:
+        folder = app_client.post(
+            "/api/boxes",
+            json={"name": "Shared", "box_type": "directory", "resource_uri": str(tree)},
+        )
+        assert folder.status_code == 201
+        folder_uuid = folder.json()["uuid"]
+
+        errors: list[str] = []
+
+        def save_more(worker: int) -> None:
+            for index in range(3):
+                answer = app_client.post(
+                    "/api/boxes",
+                    json={
+                        "name": f"W{worker}-{index}",
+                        "box_type": "markdown",
+                        "resource_uri": str(tree / f"s{index}.md"),
+                    },
+                )
+                if answer.status_code >= 500:
+                    errors.append(f"{answer.status_code} {answer.text[:120]}")
+
+        threads = [threading.Thread(target=save_more, args=(worker,)) for worker in range(4)]
+        for thread in threads:
+            thread.start()
+        release.set()
+        for thread in threads:
+            thread.join()
+        wait_for_index(app_client)
+
+        assert errors == [], errors[:2]
+        keys = [row[0] for row in populated._rows("SELECT ref_key FROM resources")]
+        assert len(keys) == len(set(keys)), "one address, one row, whatever the interleaving"
+        pairs = populated._rows("SELECT parent_id, child_id FROM resource_link")
+        assert len(pairs) == len({(p[0], p[1]) for p in pairs})
+        names = {box["name"] for box in app_client.get("/api/boxes").json()}
+        assert {"W0-0", "W3-2", "Shared"} <= names, names
+        counts = app_client.get("/api/index/status").json()
+        assert counts["wanted"] >= 1 and counts["outstanding"] == 0, counts
+        # the folder box itself survived the storm, and its file rows are the shared ones
+        folder = app_client.get(f"/api/boxes/{folder_uuid}").json()
+        assert folder["box_type"] == "directory"
+        # twelve boxes, saved at once, over three distinct files: three file rows and one folder
+        rows = populated._rows("SELECT count(*) FROM resources WHERE is_dir = 0")[0][0]
+        made = app_client.get("/api/boxes").json()
+        assert rows == 3, (rows, [r[0] for r in populated._rows("SELECT ref_key FROM resources")])
+        assert len(made) == 1 + 12 + 5, f"every save landed, none doubled: {len(made)}"
+
+
+def test_the_left_pane_shows_the_reading_with_a_denominator(client: TestClient) -> None:
+    """The progress lives in the bottom line of the left pane, and says "3 of 12".
+
+    One place owns the words and the bar, both drawn from the same status answer, so they cannot
+    tell different stories. The bar is hidden rather than left full when the queue drains — a full
+    bar that never goes away is the stalled bar people stop believing — and a save asks the status
+    once itself, because polling only begins while the server already says it is busy.
+    """
+    script = client.get("/static/app.js").text
+    page = client.get("/").text
+    css = client.get("/static/app.css").text
+
+    assert '<progress id="index-progress" max="1" value="0" hidden></progress>' in page
+    assert "#index-progress[hidden] { display: none; }" in css
+
+    words = script[script.index("function indexWords(status_)") :]
+    words = words[: words.index("function indexDetail(")]
+    assert "reading ${queue.done} of ${queue.total}" in words
+    assert "index refused" in words, "a refusal is reported, not swallowed"
+
+    draw = script[script.index("function drawIndexProgress(status_)") :]
+    draw = draw[: draw.index("async function refreshIndexStatus(")]
+    assert 'const bar = el("index-progress");' in draw
+    assert "bar.hidden = !busy;" in draw
+    assert 'bar.max = String(Math.max(queue.total, 1));' in draw
+
+    drawn = script[script.index("async function refreshIndexStatus(") :]
+    assert "drawIndexProgress(status_);" in drawn
+    wiring = script[script.index("function afterWrite(answer)") :]
+    wiring = wiring[: wiring.index("const api = {")]
+    assert "refreshIndexStatus();" in wiring and "return answer;" in wiring
+    assert ".then(afterWrite)" in script[script.index("  create: (payload) =>") :]
+    assert ".then(afterWrite)" in script[script.index("  updateBox: (ref, payload) =>") :]
+
+
+def test_the_store_can_be_asked_to_record_the_wish_without_reading_yet(
+    tmp_path: Path,
+) -> None:
+    """`read_now=False` is how the web app defers; the terminal still reads inline.
+
+    The distinction matters because the wait belongs to whoever can feel it: a person at a terminal
+    asked for the read and is shown its result, while a page save should answer and let the line at
+    the bottom of the panel report progress (ADR 32).
+    """
+    words = tmp_path / "later.md"
+    words.write_text("these words wait their turn\n", encoding="utf-8")
+    with BoxStore(tmp_path / "later.db") as store:
+        made = store.add(
+            Box(name="Later", box_type="markdown", resource_uri=str(words)), read_now=False
+        )
+        assert made.resource_id is not None
+        assert store.indexed_count() == 0, "the wish was recorded, the file was not read"
+        record = store.resource(str(words))
+        assert record is not None and record.index_it, "and the index still knows it is wanted"
+
+        store.update(made)  # the default reads inline again
+        assert store.indexed_count() == 1
+
+
+def test_the_bar_counts_files_not_queue_items(
+    populated: BoxStore, tmp_path: Path
+) -> None:
+    """A folder is one save and many files; the denominator a person watches is the files.
+
+    Without this the bar reads "1 of 1" while eighty files are being read, which is technically true
+    and useless: it cannot be waited on. The walk reports its own total, and the queue replaces the
+    one-file estimate it started with.
+    """
+    tree = tmp_path / "logs"
+    tree.mkdir()
+    for index in range(6):
+        (tree / f"l{index}.md").write_text(f"log {index} words about boilers\n", encoding="utf-8")
+
+    with TestClient(create_app(populated)) as app_client:
+        made = app_client.post(
+            "/api/boxes",
+            json={
+                "name": "Logs",
+                "box_type": "directory",
+                "resource_uri": str(tree),
+                "index_resource": True,
+            },
+        )
+        assert made.status_code == 201
+        wait_for_index(app_client)
+        queue = app_client.get("/api/index/status").json()["queue"]
+        assert queue["done"] == queue["total"], queue
+        assert queue["total"] >= 6, f"the denominator hid the walk: {queue}"

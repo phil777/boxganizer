@@ -42,6 +42,9 @@
           <span id="box-count"></span>
           <!-- A button, not a span: the number is a question people ask, and the names
                behind it are the answer. -->
+          <!-- Read in the background now, so the bar is the save's own progress: how many of the
+               files this write put in the index's way have been read. Hidden when nothing is reading. -->
+          <progress id="index-progress" max="1" value="0" hidden></progress>
           <button type="button" id="index-status" class="index-status"></button>
         </p>
       </aside>

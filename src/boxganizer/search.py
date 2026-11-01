@@ -641,6 +641,7 @@ def expand_directory(
     *,
     root: Path | str | None = None,
     walk_always: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> str:
     """Index a folder by indexing the files inside it, and keep that in step with the disk.
 
@@ -666,6 +667,11 @@ def expand_directory(
     failure mode that makes people stop trusting the search box. The row itself goes only if
     nothing else needs it: no box points at it, and no other folder still claims it.
 
+    `on_progress(done, total)` is called around the reading of each file, with the total the walk
+    already knows — the list is complete before the first read. The background queue uses it so the
+    bar counts **files**, which is what a person is waiting for, rather than queue items, of which a
+    folder is exactly one no matter how much work it is (ADR 32).
+
     Returns a note when something stopped the walk, empty when it finished.
     """
     parent = store.resource(resource_id)
@@ -688,7 +694,9 @@ def expand_directory(
     files, note = address.walk_files(target, confine=confine)
     known: set[str] = set()
     indexed = 0
-    for path in files:
+    for position, path in enumerate(files):
+        if on_progress is not None:
+            on_progress(position, len(files))
         key = address.normalise(str(path))
         known.add(key)
         # A file the person explicitly left out stays left out. The folder's `index_it` says
@@ -703,6 +711,10 @@ def expand_directory(
         store.link_resource(int(resource_id), int(record.id))
         if sync_resource(store, int(record.id), root=confine, walk_always=False) == "":
             indexed += 1
+        if on_progress is not None:
+            # counted whether or not this one yielded text: the reader is waiting on the walk, not
+            # on the harvest, and a bar that skips the empty files never reaches its total.
+            on_progress(position + 1, len(files))
 
     # What the folder used to hold and does not hold now. `known` is the whole current list,
     # so a file that merely stopped being indexable (renamed to a `.jpg`) is dropped here too
@@ -727,6 +739,7 @@ def sync_resource(
     *,
     root: Path | str | None = None,
     walk_always: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> str:
     """Read one resource into the index if it is worth reading, and say what stopped it.
 
@@ -752,6 +765,7 @@ def sync_resource(
             int(resource_id),
             root=root if root is not None else _confine_of(store),
             walk_always=walk_always,
+            on_progress=on_progress,
         )
     if not resource.index_it:
         if resource.indexed:

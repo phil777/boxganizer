@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -43,3 +44,29 @@ def populated(store: BoxStore) -> BoxStore:
     store.link("House", "Garage")
     store.link("Kitchen", "Passport")
     return store
+
+
+def wait_for_index(client: object, timeout: float = 20.0) -> None:
+    """Let the background reader finish before a test asserts on what the index holds.
+
+    Saving a box now returns before its file has been read (ADR 32), which is the point of the
+    change and a race for any test that asserts a word is findable straight afterwards. Waiting on
+    the queue is the honest fix: waiting on a sleep passes on a fast machine and fails on a loaded
+    one, which is how a suite starts needing `--rerun 3` and stops being believed.
+    """
+    app = getattr(client, "app", None)
+    state = getattr(getattr(app, "state", None), "index_queue", None)
+    if state is None:
+        return  # an app built without the queue: nothing was ever queued
+    deadline = time.monotonic() + timeout
+    while True:
+        with state["lock"]:
+            busy = bool(state["todo"]) or bool(state["live"])
+        if not busy:
+            return
+        if time.monotonic() > deadline:
+            with state["lock"]:
+                raise AssertionError(
+                    f"index queue never drained: {len(state['todo'])} waiting, live={state['live']}"
+                )
+        time.sleep(0.02)

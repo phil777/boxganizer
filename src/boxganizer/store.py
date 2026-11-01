@@ -383,7 +383,7 @@ class BoxStore:
 
     # -- boxes -------------------------------------------------------------
 
-    def add(self, box: Box, *, index_it: bool | None = None) -> Box:
+    def add(self, box: Box, *, index_it: bool | None = None, read_now: bool = True) -> Box:
         """Insert *box* and return the stored copy with ``id`` filled in.
 
         The type named by ``box.box_type`` must exist and must accept the box:
@@ -392,6 +392,11 @@ class BoxStore:
         ``index_it`` is the answer of the dialog's "keep this in the full-text index"
         checkbox. Left out, the default falls out of what the box points at and what it
         is — see :meth:`_ensure_resource`.
+
+        ``read_now=False`` records the wish and leaves the reading to the caller. The web app
+        uses it so a save answers before the file has been read, with the progress shown where it
+        belongs (ADR 32); the terminal keeps reading inline, because there the wait is the work the
+        person asked for and ``box add`` prints what it read.
         """
         kind = boxtypes.get(box.box_type)
         self._check_singleton(box, kind)
@@ -420,7 +425,8 @@ class BoxStore:
         )
         box.id = row_id
         box.updated_at = datetime.now(UTC)
-        self._read_in(box)
+        if read_now:
+            self._read_in(box)
         self._sync_membership(box)
         return box
 
@@ -608,7 +614,7 @@ class BoxStore:
         """True when a box with that name (any case) is stored."""
         return bool(self._rows(_SELECT_BY_KEY, (canonical_name(name),)))
 
-    def update(self, box: Box, *, index_it: bool | None = None) -> Box:
+    def update(self, box: Box, *, index_it: bool | None = None, read_now: bool = True) -> Box:
         """Write the mutable fields of *box* back to the database.
 
         The type is re-checked, so a box cannot be retyped into something its
@@ -654,7 +660,8 @@ class BoxStore:
         # remembered it is, and only when nothing points at it now.
         if previous is not None and previous != box.resource_id:
             self._release_resource(previous)
-        self._read_in(box)
+        if read_now:
+            self._read_in(box)
         self._sync_membership(box)
         return box
 
