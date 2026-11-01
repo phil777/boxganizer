@@ -67,6 +67,12 @@ parent** unless you pass `--parent NAME` — the root holds exactly one box, so
 filing every new box there would keep evicting the previous one. Running `init`
 again adds nothing.
 
+The root's own page is one line — `root › 📂 That Box` — and then the box itself, at full size. The
+name is the way in: click it to open the box as the subject of the page, right-click it for the box's
+menu (where *Remove from root* still lives). Dragging a box onto the line takes the slot; dropping one
+onto the child's own view belongs to the child, as it should. An empty root says so and offers nothing
+else, because there is nothing to offer.
+
 Every command is one word after `box`. `box link CHILD PARENT` files the box named
 first inside the one named second, and `box ls` is `box list` said shorter.
 

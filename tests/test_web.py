@@ -3297,6 +3297,36 @@ def test_a_box_drawn_inside_another_keeps_the_navigation_of_the_space_it_is_in(
     assert "if (!gone) openBox(child.uuid);" not in script
 
 
+def test_the_root_box_shows_a_name_and_not_a_row_of_buttons(client: TestClient) -> None:
+    """The way in said its child's name and then offered three buttons about it.
+
+    "Open" repeated what clicking the name does; "Modify…" and "Remove from root" belong to the
+    box's own menu, which right-clicking that name still opens — so the bar was three controls
+    standing between a person and the box they came to look at. What is left is the name, underlined
+    only when the pointer is on it, so the line reads as a path rather than as a toolbar.
+    """
+    script = client.get("/static/app.js").text
+    root = script[script.index('registerView("root", {') :]
+    root = root[: root.index('holder.addEventListener("drop"')]
+    assert 'bar.className = "root-bar";' not in root
+    assert 'textContent = "Remove from root"' not in root
+    assert 'textContent = "Modify…"' not in root
+    assert "const open = document.createElement" not in root
+
+    assert 'crumb.className = "root-crumb";' in root
+    assert 'name.className = "root-crumb-name";' in root
+    assert 'ctx.open(child.uuid, { trail: ctx.trail(), mode: "content" })' in root
+    # the menu keeps what the bar lost: same items, one gesture away, on the thing they are about
+    assert "ctx.showMenu(" in root
+    assert "boxMenuItems(child, [" in root
+    assert "Remove from ${box.name}" in root
+    assert '"root — nothing filed in it"' in root
+
+    css = client.get("/static/app.css").text
+    assert ".root-crumb-name" in css
+    assert ".root-bar" not in css
+
+
 def test_no_dialog_shows_itself_before_it_is_opened(client: TestClient) -> None:
     """A closed `<dialog>` is just a section of the page unless something enforces the closed part.
 

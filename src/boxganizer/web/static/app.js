@@ -4772,38 +4772,40 @@ registerView("root", {
     holder.dataset.uuid = box.uuid;
     canvas.append(holder);
 
-    const bar = document.createElement("div");
-    bar.className = "root-bar";
-    const label = document.createElement("span");
-    label.className = "muted";
-    label.append(
-      child ? "root › " : "root — nothing filed in it",
-      ...(child ? [iconElement(child), document.createTextNode(` ${child.name}`)] : [])
-    );
-    bar.append(label);
+    // One line that says what the way in is showing, and *is* the way in. The three buttons this
+    // replaces were a toolbar wearing a label's clothes: "Open" repeated what clicking the name does,
+    // and "Modify…" and "Remove from root" belong to the box's own menu, where right-clicking the name
+    // still offers all of them. A box reached from two places needs one of them to be the name.
+    const crumb = document.createElement("div");
+    crumb.className = "root-crumb";
     if (child) {
-      const open = document.createElement("button");
-      open.type = "button";
-      open.textContent = "Open";
-      open.addEventListener("click", () => ctx.open(child.uuid, { trail: ctx.trail(), mode: "content" }));
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.textContent = "Remove from root";
-      remove.addEventListener("click", async () => {
-        try {
-          await api.unlink(box.uuid, child.uuid);
-          ctx.reload();
-        } catch (error) {
-          ctx.status(error.message, true);
-        }
+      crumb.append(document.createTextNode("root › "));
+      const name = document.createElement("button");
+      name.type = "button";
+      name.className = "root-crumb-name";
+      name.dataset.uuid = child.uuid;
+      name.append(iconElement(child), document.createTextNode(` ${child.name}`));
+      name.title = `open ${child.name} — right-click for its menu`;
+      name.addEventListener("click", () =>
+        ctx.open(child.uuid, { trail: ctx.trail(), mode: "content" })
+      );
+      name.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        ctx.showMenu(
+          event.clientX,
+          event.clientY,
+          boxMenuItems(child, [
+            { separator: true },
+            { label: `Remove from ${box.name}`, run: () => ctx.removeFrom(box, child) },
+          ]),
+        );
       });
-      const modify = document.createElement("button");
-      modify.type = "button";
-      modify.textContent = "Modify…";
-      modify.addEventListener("click", () => ctx.edit(child));
-      bar.append(open, modify, remove);
+      crumb.append(name);
+    } else {
+      crumb.textContent = "root — nothing filed in it";
     }
-    holder.append(bar);
+    holder.append(crumb);
 
     const body = document.createElement("div");
     body.className = "root-child-body";

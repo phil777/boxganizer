@@ -1437,7 +1437,40 @@ pre.text {
 }
 
 .root-view.drop-target { border-color: var(--accent); background: var(--panel); }
-.root-bar { display: flex; align-items: center; gap: 0.5rem; flex: none; }
+.root-crumb {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex: none;
+  font-size: 0.85rem;
+  color: var(--muted, inherit);
+}
+
+/* The box's name, which is also the way in. It looks like a name because it is one; the underline
+   only arrives when the pointer is on it, so the line reads as a path and not as a strip of buttons. */
+.root-crumb-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: 3px;
+  padding: 0 0.15rem;
+  cursor: pointer;
+}
+
+.root-crumb-name:hover,
+.root-crumb-name:focus-visible {
+  text-decoration: underline;
+}
+
+.root-crumb-name:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .root-child-body { flex: 1; min-height: 0; overflow: hidden; }
 .root-child { height: 100%; border: none; padding: 0; background: none; }
 .root-child > * { height: 100%; }
@@ -1495,7 +1528,7 @@ pre.text {
 .children-view[data-layout="grid"] .child .box-icon { font-size: 2.2rem; }
 .cell-caption .box-icon,
 .chip .box-icon,
-.root-bar .box-icon { font-size: 1em; }
+.root-crumb .box-icon { font-size: 1em; }
 
 /* Icon mode shows the miniature large, still in the same thin frame. */
 .icon-view .glyph.box-icon--thumb {
