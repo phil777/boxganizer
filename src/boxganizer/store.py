@@ -261,10 +261,17 @@ SELECT resource_id, bm25(resource_text) AS score,
        snippet(resource_text, 1, '[', ']', ' \u2026 ', 12) AS passage
   FROM resource_text WHERE resource_text MATCH ?
    AND resource_id IN (
+        -- the file a scoped box points at, plus every file hanging under that resource:
+        -- resource_link joins resources to resources, so the walk starts at the box's
+        -- resource_id, not at the box. Joining it to boxes.id matched whichever box shared
+        -- an id with the directory's resource row, which made a folder search look right.
         SELECT b.resource_id FROM boxes b WHERE b.uuid IN ({marks}) AND b.resource_id IS NOT NULL
         UNION
-        SELECT rl.child_id FROM resource_link rl JOIN boxes b ON b.id = rl.parent_id
-         WHERE b.uuid IN ({marks})
+        SELECT rl.child_id FROM resource_link rl
+         WHERE rl.parent_id IN (
+            SELECT b.resource_id FROM boxes b
+             WHERE b.uuid IN ({marks}) AND b.resource_id IS NOT NULL
+         )
    )
  ORDER BY score LIMIT ?
 """

@@ -4721,6 +4721,65 @@ def test_search_under_a_box_is_the_same_search_restricted(
         assert [hit["name"] for hit in by_field] == ["Sub"], by_field
 
 
+def test_searching_inside_an_indexed_directory_finds_its_own_files(
+    populated: BoxStore, tmp_path: Path
+) -> None:
+    """A directory's text lives on the *file* rows, one link below the directory's resource row.
+
+    The scoped content query used to walk that link by joining `resource_link.parent_id` to
+    `boxes.id`. It is a resource id, not a box id, so the walk found nothing and a search inside
+    the directory answered empty — while the same search from a parent looked right whenever some
+    box in scope happened to carry the id the directory's resource row owned. Every earlier test
+    pointed a box straight at a file, which never crosses that link, so the accident hid.
+    """
+    tree = tmp_path / "shelf"
+    tree.mkdir()
+    words = "the boilerhouse log records an orangutan at dusk\n"
+    (tree / "notes.md").write_text(words, encoding="utf-8")
+
+    with TestClient(create_app(populated)) as app_client:
+        shelf = app_client.post(
+            "/api/boxes",
+            json={
+                "name": "Shelf",
+                "box_type": "indexed-directory",
+                "resource_uri": str(tree),
+                "index_resource": True,
+            },
+        ).json()["uuid"]
+        wait_for_index(app_client)
+
+        # searched from the inside: the words are in a file it holds, not in the box
+        inside = app_client.get("/api/search", params={"q": "orangutan", "under": shelf}).json()
+        assert [hit["name"] for hit in inside] == ["Shelf"], inside
+        assert inside[0]["match"]["how"] == "content"
+        assert inside[0]["match"]["in_file"] == "notes.md", inside[0]["match"]
+
+        # and from one level up, which is the answer the broken join only ever appeared to give
+        drawer = app_client.post(
+            "/api/boxes", json={"name": "Drawer", "box_type": "folder"}
+        ).json()["uuid"]
+        app_client.post(f"/api/boxes/{drawer}/children", json={"child": shelf})
+        above = app_client.get("/api/search", params={"q": "orangutan", "under": drawer}).json()
+        assert [hit["name"] for hit in above] == ["Shelf"], above
+
+        # a sibling directory that holds nothing matching still keeps its neighbour's hits out
+        other = app_client.post(
+            "/api/boxes",
+            json={
+                "name": "Empty shelf",
+                "box_type": "indexed-directory",
+                "resource_uri": str(tmp_path / "bare"),
+            },
+        )
+        assert other.status_code in (200, 201, 422)
+        if other.status_code in (200, 201):
+            bare = other.json()["uuid"]
+            (tmp_path / "bare").mkdir(exist_ok=True)
+            quiet = app_client.get("/api/search", params={"q": "orangutan", "under": bare}).json()
+            assert quiet == [], quiet
+
+
 def test_a_scoped_search_never_opens_a_file_to_answer(
     populated: BoxStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
