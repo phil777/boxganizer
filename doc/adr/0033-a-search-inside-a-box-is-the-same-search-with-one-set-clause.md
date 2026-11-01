@@ -80,6 +80,20 @@ pick up.
   actually matches: `_match_text` folded the held text but not the value, so `name contains 'Hit'` —
   every capitalised filter — selected nothing in silence. Fixed separately, because the search
   measurement was the thing that noticed.
+**A field a person types into never lives inside something a person drags.** The first mount put the
+widget at the head of `.vp-path`. In a tiling pane that row is an address bar and nothing more; in a
+window it is the title — the handle that moves the window, the surface that raises it, and on a minimized
+window the only thing there, clicked to bring it back. Two failures followed, and a probe that synthesised
+keyboard events saw neither: the crumbs slid right, so a click aimed at the title landed on a crumb and
+truncated that pane's saved walk (a state loss that survived closing and reloading, which is precisely the
+class of bug item 3 of this project exists to eliminate); and `dragWindow`'s `pointerdown` calls
+`preventDefault()` on any non-button target, so clicking the field focused `BODY` and the window could not
+be typed into with a real mouse at all. The field now hangs on the pane between the title and the body —
+outside the handle, and outside the body the view repaints — and the handle ignores form controls as well
+as buttons, so the next control someone adds to a title line cannot repeat this. A windowed window is
+measured with `page.mouse`, not with dispatched key events: a synthetic keystroke does not have a
+`pointerdown`, so it cannot find the defect that lives there.
+
 - The results window is anchored to its own mount, so a pane's results open under that pane and can
   never cover a neighbour. Measured: two panes, one searched, the other's body byte-identical before
   and after.

@@ -3133,7 +3133,7 @@ def test_a_pane_keeps_the_walk_after_everything_the_viewport_does(client: TestCl
     script = client.get("/static/app.js").text
 
     # the walk is recalled, and only while it starts at the box the layout names
-    shell = script[script.index("function paneShell(node, shown)") :]
+    shell = script[script.index("function paneShell(node, shown, options = {})") :]
     shell = shell[: shell.index("function renderNode(")]
     assert "const walked = panePathFor(box.uuid, node);" in shell
     assert "const stillHere = Boolean(walked && shown && walked[0].uuid === shown.uuid);" in shell
@@ -3232,7 +3232,7 @@ def test_a_pane_keeps_the_path_it_was_handed_when_it_opens_a_child(
     old one, which is the shape that makes the aliasing invisible.
     """
     script = client.get("/static/app.js").text
-    pane = script[script.index("function paneShell(node, shown)") :]
+    pane = script[script.index("function paneShell(node, shown, options = {})") :]
     opener = pane[: pane.index("async draw(target)")]
     assert "const before = options.trail ? [...options.trail] : [];" in opener
     assert opener.index("const before =") < opener.index("trail.length = 0;")
@@ -3371,7 +3371,7 @@ def test_the_window_controls_are_drawn_not_typed_and_the_chosen_window_is_on_top
     assert "controls.insertBefore(" in frame
     assert "controls.append(" not in frame
 
-    shell = script[script.index("function paneShell(node, shown)") :]
+    shell = script[script.index("function paneShell(node, shown, options = {})") :]
     shell = shell[: shell.index('pane.addEventListener("dragover"')]
     assert "buttons.append(gear);" in shell
     assert 'if (layout.kind !== "windowed") {' in shell
@@ -3858,7 +3858,7 @@ def test_a_boxs_settings_are_hidden_until_asked_for_and_take_room_when_shown(
     pane = script[script.index("function foldPaneRows(pane)") :]
     pane = pane[: pane.index("const viewportView")]
     assert 'row.closest(".vp-pane") === pane' in pane
-    shell = script[script.index("function paneShell(node, shown)") :]
+    shell = script[script.index("function paneShell(node, shown, options = {})") :]
     shell = shell[: shell.index('pane.addEventListener("dragover"')]
     assert 'gear.className = "vp-btn gear";' in shell
     assert 'gear.setAttribute("aria-expanded", "false");' in shell
@@ -4780,6 +4780,41 @@ def test_searching_inside_an_indexed_directory_finds_its_own_files(
             assert quiet == [], quiet
 
 
+def test_a_window_searches_from_below_its_title_not_from_inside_it(
+    client: TestClient,
+) -> None:
+    """A window's title line is a handle: it moves the window, raises it, and restores it.
+
+    The search widget was mounted at the head of `.vp-path`, which is that handle in a windowed
+    frame. Two failures followed, and a synthetic-keyboard probe saw neither: the crumbs slid right,
+    so a click meant for the title landed on a crumb and truncated the pane's saved walk, and the
+    handle's own `pointerdown` calls `preventDefault()`, so clicking the field focused `BODY` and
+    the window could not be typed into at all. Measured with a real mouse, then fixed by hanging the
+    field on the pane between the title and the body.
+
+    Asserted as structure because the repo has no DOM harness, and because the invariant is about
+    where an element lives: nothing that a person clicks to type into may sit inside what a person
+    drags to move.
+    """
+    script = client.get("/static/app.js").text
+
+    assert "paneShell(entry.node, entry.box, { pathIsChrome: true })" in script, (
+        "the windowed frame tells its shell that the path line is chrome"
+    )
+    shell = script[script.index("function paneShell(node, shown, options = {})") :]
+    shell = shell[: shell.index("function renderNode(entry")]
+    assert "if (!pathIsChrome) path.append(searchSlot, crumbs, buttons);" in shell
+    assert "else path.append(crumbs, buttons);" in shell, (
+        "the title keeps only crumbs and buttons — the hit targets the title is clicked through"
+    )
+    # the field is a row of the pane, outside both the handle and the body the view repaints
+    assert "path.after(row);" in shell
+
+    drag = script[script.index("function dragWindow(frame, grab, entry, kind)") :]
+    guard = 'event.target.closest("button, input, select, textarea, a[href], [contenteditable]")'
+    assert guard in drag, "otherwise preventDefault() swallows the focus a control asks for"
+
+
 def test_a_scoped_search_never_opens_a_file_to_answer(
     populated: BoxStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4875,7 +4910,7 @@ def test_the_box_search_widget_is_one_function_mounted_per_line(client: TestClie
     assert "box-search-via" in widget, "the route down is shown, not just the hit"
 
     assert "mountBoxSearch(slot, box," in script[script.index("async function renderTagLine(") :]
-    pane = script[script.index("function paneShell(node, shown)") :]
+    pane = script[script.index("function paneShell(node, shown, options = {})") :]
     pane = pane[: pane.index("function renderNode(")]
     assert "mountBoxSearch(" in pane, "the same widget, mounted per pane"
     assert "searchSlot.remove(); // an empty pane has nothing to search inside yet" in pane

@@ -697,7 +697,16 @@ const viewportView = {
       }
     };
 
-    function paneShell(node, shown) {
+    function paneShell(node, shown, options = {}) {
+      // `pathIsChrome` says the path line of this shell is also the window's title: it is the handle
+      // that moves the window, it is what you click to raise one, and on a minimized window it is
+      // the only thing there, waiting to be clicked to bring the window back. A search field does not
+      // belong in it. Put one there and it takes the space the title was clicked in — the auditor
+      // measured a minimized window that would no longer restore because a crumb had slid under the
+      // click point — and the handle's own `pointerdown` answers the click first, so the field never
+      // receives focus. Measured with a real mouse before this change: clicking the field in a window
+      // focused `BODY` and typing typed nothing.
+      const pathIsChrome = Boolean(options.pathIsChrome);
       const pane = document.createElement("div");
       pane.className = "vp-pane";
       pane.dataset.node = node;
@@ -710,7 +719,10 @@ const viewportView = {
       buttons.className = "vp-buttons";
       const searchSlot = document.createElement("span");
       searchSlot.className = "tagline-search vp-search";
-      path.append(searchSlot, crumbs, buttons);
+      // In a window the slot stays out of the path line and is hung on the body below, where nothing
+      // treats a pointer landing on it as the start of an act on the window itself.
+      if (!pathIsChrome) path.append(searchSlot, crumbs, buttons);
+      else path.append(crumbs, buttons);
 
       const body = document.createElement("div");
       body.className = "vp-body";
@@ -867,6 +879,14 @@ const viewportView = {
       // here never moves a neighbour. The owner is read each time, so walking deeper in the pane
       // narrows the search to where the pane now stands.
       if (shown) {
+        if (pathIsChrome) {
+          // A row of the pane, between the title and the body — not inside the body, which the view
+          // repaints, and not inside the title, which is a handle.
+          const row = document.createElement("div");
+          row.className = "vp-search-row";
+          row.append(searchSlot);
+          path.after(row);
+        }
         const widget = mountBoxSearch(
           searchSlot,
           () => trail[trail.length - 1] || shown,
@@ -1112,7 +1132,7 @@ const viewportView = {
       if (state !== "normal") frame.classList.add(`vp-${state}`);
       frame.setAttribute("aria-label", `${entry.box ? entry.box.name : "empty"} window${state === "normal" ? "" : `, ${state}`}`);
 
-      const pane = paneShell(entry.node, entry.box);
+      const pane = paneShell(entry.node, entry.box, { pathIsChrome: true });
       pane.classList.add("vp-in-window");
       frame.append(pane);
 
@@ -1203,7 +1223,12 @@ const viewportView = {
       if (!grab) return;
       let start = null;
       grab.addEventListener("pointerdown", (event) => {
-        if (event.target.closest("button")) return;
+        // Buttons and form fields are not handles. `preventDefault()` below is what makes dragging
+        // feel solid, and it also cancels the focus a click was asking for — so a control left in a
+        // handle could never be typed into. The search field now lives in the body and does not rely
+        // on this, but a handle that grabs every pointer it is given is a trap for the next control
+        // somebody adds to the title line.
+        if (event.target.closest("button, input, select, textarea, a[href], [contenteditable]")) return;
         if (kind === "move" && frame.dataset.state === "maximized") return;
         event.preventDefault();
         event.stopPropagation();

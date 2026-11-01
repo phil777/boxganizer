@@ -2883,6 +2883,11 @@ pre.text {
 /* A pane's search sits in the pane's own path line, and its window opens under that
    pane: a search in one pane must not move or cover a neighbour. */
 .vp-search { flex: 0 0 auto; }
+/* In a window the field hangs below the title, out of the handle: the title stays the thing you
+   click to raise a window and drag to move one. */
+.vp-search-row { display: flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.35rem 0.1rem; }
+.vp-search-row .box-search { width: 100%; }
+.vp-search-row .box-search-field { width: 100%; }
 .vp-search .box-search-field { width: min(13rem, 34vw); font-size: 0.72rem; }
 
 .tagline-search {
