@@ -254,7 +254,11 @@ def _wrap(node: Node) -> str:
 def _match_text(held: str, wanted: str, pattern: re.Pattern[str] | None) -> bool:
     if pattern is not None:
         return pattern.search(held) is not None
-    return wanted in held.casefold()
+    # Folded on both sides. The held text alone was folded, so a filter written with a capital —
+    # `Hit`, or a proper noun like most names are — matched nothing at all and said nothing about
+    # it: an empty folder that looks like an empty library. `box edit` folds what it stores, which
+    # is why the mapping form never showed this; the expression the filter bar writes did.
+    return wanted.casefold() in held.casefold()
 
 
 # -- reading an expression -------------------------------------------------------------

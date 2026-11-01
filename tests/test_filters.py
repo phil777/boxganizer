@@ -131,3 +131,24 @@ def test_the_state_a_folder_shows_when_its_filter_is_broken_is_the_broken_one() 
     asked = filters.parse_of(holder)
     assert not asked.empty
     assert not asked.matches(box_of())
+
+
+def test_a_capital_in_an_expression_still_matches_the_name_it_asks_about() -> None:
+    """`Hit` finds `Hit-folder`. Names are written with capitals, so the expression form folds the
+    value as the mapping form does: folding only the held text made a capital select nothing."""
+    held = box_of(name="Hit-folder")
+    lookup = filters.Lookup()
+    for raw in ("Hit", '"Hit"', "name:Hit", "hit", "HIT"):
+        assert filters.parse_expression(raw).holds(held, lookup), raw
+    # and it still declines what does not contain the word
+    assert not filters.parse_expression("Cellar").holds(held, lookup)
+    assert not filters.parse_expression("Cellar").holds(box_of(name="Attic"), lookup)
+
+
+def test_the_two_ways_of_writing_a_filter_agree_about_a_capitalised_value() -> None:
+    """`box edit` stores a mapping, the filter bar writes an expression; one reader, one answer."""
+    asked = filters.parse({"name": "Boiler"})
+    said = filters.parse_expression("Boiler")
+    for name in ("Boiler House Log", "boiler room", "Cellar"):
+        box = box_of(name=name)
+        assert asked.matches(box) == said.holds(box, filters.Lookup()), name
