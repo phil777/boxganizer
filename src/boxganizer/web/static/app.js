@@ -867,7 +867,7 @@ const viewportView = {
       // here never moves a neighbour. The owner is read each time, so walking deeper in the pane
       // narrows the search to where the pane now stands.
       if (shown) {
-        mountBoxSearch(
+        const widget = mountBoxSearch(
           searchSlot,
           () => trail[trail.length - 1] || shown,
           // The route the server worked out, not the pane's history with the hit tacked on: the
@@ -876,10 +876,18 @@ const viewportView = {
           // where the search was asked, and showing them would be a path nobody walked.
           // `route` ends at the hit itself and open() adds the box it opens, so the route is
           // handed over without its last entry — passing it whole drew the hit twice.
-          (hit) =>
-            self.open(hit.uuid, {
-              trail: hit.route && hit.route.length > 1 ? hit.route.slice(0, -1) : [trail[trail.length - 1]].filter(Boolean),
-            })
+          async (hit, term) => {
+            const foundAFile = hit.match && hit.match.how === "content" && hit.match.in_file;
+            await self.open(hit.uuid, {
+              trail:
+                hit.route && hit.route.length > 1
+                  ? hit.route.slice(0, -1)
+                  : [trail[trail.length - 1]].filter(Boolean),
+            });
+            // A pane redraws its body in place, so the widget that asked is still here to answer:
+            // no handoff needed, the term goes straight back into the field that sent it.
+            if (foundAFile) widget.run(term);
+          }
         );
       } else {
         searchSlot.remove(); // an empty pane has nothing to search inside yet
@@ -1473,20 +1481,17 @@ function mountBoxSearch(mount, owner, open) {
   };
 
   function choose(hit) {
+    // the term goes with the hit: a hit that is a file needs it to keep looking for
+    const term = field.value.trim();
     close();
     field.value = "";
-    open(hit);
+    open(hit, term);
   }
 
   let timer = null;
-  field.addEventListener("focus", () => {
-    // re-worded on the way in, because for a pane the owner may have moved since it was mounted
-    const here = ownerOf();
-    field.placeholder = `search inside ${here.name}`;
-    field.setAttribute("aria-label", `search boxes and files inside ${here.name}`);
-  });
-  field.addEventListener("input", () => {
-    const term = field.value.trim();
+  // One function asks, so a click that hands a found file to its box can unroll the same window a
+  // keystroke would have: the term arrives by hand instead of by typing, and nothing else differs.
+  const ask = (term) => {
     if (timer) clearTimeout(timer);
     if (!term) {
       close();
@@ -1508,7 +1513,15 @@ function mountBoxSearch(mount, owner, open) {
       active = hits.length ? 0 : -1;
       paint();
     }, 180);
+  };
+
+  field.addEventListener("focus", () => {
+    // re-worded on the way in, because for a pane the owner may have moved since it was mounted
+    const here = ownerOf();
+    field.placeholder = `search inside ${here.name}`;
+    field.setAttribute("aria-label", `search boxes and files inside ${here.name}`);
   });
+  field.addEventListener("input", () => ask(field.value.trim()));
 
   field.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -1538,8 +1551,21 @@ function mountBoxSearch(mount, owner, open) {
     }, 120);
   });
 
-  return { close };
+  return {
+    close,
+    // Put a term in the field and show what it finds, exactly as if it had been typed.
+    run(term) {
+      field.value = term;
+      field.focus();
+      ask(term);
+    },
+  };
 }
+
+// A search that found a *file* has to finish its work in the box that holds it: that box opens, and
+// the field there is filled with the same term and unrolled on the spot. The page between those two
+// moments redraws the tag line from scratch, so the term is left here for the new widget to pick up.
+let searchHandoff = null;
 
 async function renderTagLine(box) {
   const token = paneGeneration; // a reply for the box before this one must not paint this one
@@ -1559,7 +1585,23 @@ async function renderTagLine(box) {
   line.append(slot, tags);
   // Search belongs to the box on screen, and opens where the page opens boxes today: as the
   // current box, with this box kept as a crumb to come back by.
-  mountBoxSearch(slot, box, (hit) => openBox(hit.uuid, { trail: [...state.trail, box] }));
+  const widget = mountBoxSearch(slot, box, (hit, term) => {
+    // A hit that is a file has no box of its own to open: the box that holds the file opens, and it
+    // opens already looking for that term, because a reader who clicked a file wants the file, not a
+    // box they now have to search again.
+    const foundAFile = hit.match && hit.match.how === "content" && hit.match.in_file;
+    if (foundAFile && hit.uuid === box.uuid) {
+      widget.run(term); // the file is in the box already on screen: unroll here, do not navigate
+      return;
+    }
+    if (foundAFile) searchHandoff = { boxUuid: hit.uuid, term };
+    openBox(hit.uuid, { trail: [...state.trail, box] });
+  });
+  if (searchHandoff && searchHandoff.boxUuid === box.uuid) {
+    const handoff = searchHandoff;
+    searchHandoff = null;
+    widget.run(handoff.term);
+  }
   let held;
   try {
     held = await api.boxTags(box.uuid);
