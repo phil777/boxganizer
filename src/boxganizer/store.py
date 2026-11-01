@@ -827,29 +827,44 @@ class BoxStore:
             return None
         key = resources.normalise(raw)
         found = self._rows("SELECT id FROM resources WHERE ref_key = ?", (key,))
-        if found:
-            existing = int(found[0]["id"])
-            if index_it is not None:
-                self._execute(
-                    "UPDATE resources SET index_it = ?, stale = 0 WHERE id = ?",
-                    (int(bool(index_it)), existing),
-                )
-            # A row made before this was noticed — a folder box pointed at a directory that
-            # has since been created — is corrected here rather than lying forever.
-            self._execute(
-                "UPDATE resources SET is_dir = ? WHERE id = ? AND is_dir = 0",
-                (int(resources.is_directory(raw)), existing),
+        if not found:
+            # **The insert is the existence check.** Asking first and inserting after is two
+            # statements, and `_execute` commits each one on its own, while this store is shared
+            # across threads deliberately (`check_same_thread=False`) and an index pass already runs
+            # in `asyncio.to_thread`. Two passes could each be told "no row" for the same file; the
+            # second INSERT then landed on `resources.ref_key` and every request that happened to be
+            # saving a box at that moment answered 500 with `write refused: UNIQUE
+            # constraint failed` (ADR 31). `ON CONFLICT DO NOTHING` makes the loser of that
+            # race read the row the winner made, which is the answer it wanted anyway.
+            where = origin or resources.origin_of(raw)
+            wanted = (
+                int(bool(index_it))
+                if index_it is not None
+                else int(bool(indexes_content) or resources.index_by_default(raw, origin=where))
             )
-            return existing
-        where = origin or resources.origin_of(raw)
-        if index_it is None:
-            index_it = bool(indexes_content) or resources.index_by_default(raw, origin=where)
-        return self._execute(
-            "INSERT INTO resources (reference, ref_key, origin, index_it, is_dir)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (raw, key, where, int(bool(index_it)), int(resources.is_directory(raw))),
-            lastrowid=True,
+            self._execute(
+                "INSERT INTO resources (reference, ref_key, origin, index_it, is_dir)"
+                " VALUES (?, ?, ?, ?, ?) ON CONFLICT (ref_key) DO NOTHING",
+                (raw, key, where, wanted, int(resources.is_directory(raw))),
+            )
+            found = self._rows("SELECT id FROM resources WHERE ref_key = ?", (key,))
+        if not found:
+            # Only a database that refused to say anything about a row it just accepted: the caller
+            # gets "nothing adopted" rather than a stack trace naming a row id that does not exist.
+            return None
+        existing = int(found[0]["id"])
+        if index_it is not None:
+            self._execute(
+                "UPDATE resources SET index_it = ?, stale = 0 WHERE id = ?",
+                (int(bool(index_it)), existing),
+            )
+        # A row made before this was noticed — a folder box pointed at a directory that
+        # has since been created — is corrected here rather than lying forever.
+        self._execute(
+            "UPDATE resources SET is_dir = ? WHERE id = ? AND is_dir = 0",
+            (int(resources.is_directory(raw)), existing),
         )
+        return existing
 
     def register_resource(
         self,
@@ -954,16 +969,26 @@ class BoxStore:
         """
         if parent_id == child_id:
             return False
-        before = self._rows(
-            "SELECT 1 FROM resource_link WHERE parent_id = ? AND child_id = ?",
-            (parent_id, child_id),
-        )
-        if before:
-            return False
-        self._execute(
-            "INSERT INTO resource_link (parent_id, child_id) VALUES (?, ?)", (parent_id, child_id)
-        )
-        return True
+        # Ask the insert, not a preceding SELECT: two index passes reaching the same file inside the
+        # same folder are both entitled to a link, and the second one used to land on the UNIQUE
+        # index for that pair and fail the request that hit it (ADR 31).
+        try:
+            made = self._execute(
+                "INSERT INTO resource_link (parent_id, child_id) VALUES (?, ?)"
+                " ON CONFLICT (parent_id, child_id) DO NOTHING",
+                (parent_id, child_id),
+                changed=True,
+            )
+        except StoreError as exc:
+            # The other failure of the same race: this walk found the file on disk, and a walk in
+            # another thread had just decided it had disappeared and dropped its row. Nothing
+            # is lost — the file is still there and the next pass adopts it again — so the save
+            # in the middle of it is not the thing that should fail. A different refusal (a
+            # stopped disk, a constraint nobody expected) still travels up as a refusal.
+            if "FOREIGN KEY" in str(exc):
+                return False
+            raise
+        return made > 0
 
     def linked_resources(self, parent_id: int) -> list[resources.Resource]:
         """The files a folder walk brought in, in address order."""
@@ -1810,6 +1835,7 @@ class BoxStore:
         params: Sequence[object] = (),
         *,
         lastrowid: bool = False,
+        changed: bool = False,
         duplicate_name: str | None = None,
     ) -> int:
         with self._lock:
@@ -1827,6 +1853,10 @@ class BoxStore:
                 self._conn.rollback()
                 raise StoreError(f"write failed: {exc}") from exc
             self._conn.commit()
+            if changed:
+                # How many rows the statement actually touched — which is how a caller learns an
+                # `ON CONFLICT DO NOTHING` inserted nothing, without a second round trip.
+                return int(cursor.rowcount or 0)
             return int(cursor.lastrowid or 0)
 
     def _id_of(self, ref: str) -> int:

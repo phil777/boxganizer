@@ -67,6 +67,12 @@ links (parent_id → boxes.id, child_id → boxes.id, added_at)   PRIMARY KEY (p
 Two JSON columns: `metadata` is a flat map of strings the user labels freely;
 `config` holds arbitrary nested settings belonging to the box type.
 
+Every address is one row: `resources.ref_key` is the normalised form of a reference and is UNIQUE, so
+two boxes on one file share a row, its observations and its copy of the text (ADR 13). Adoption is
+written as `INSERT … ON CONFLICT DO NOTHING` and a read-back rather than "ask if it exists, then
+insert", because the store is shared across threads and index passes run in worker threads — a check
+and an insert are two statements, and two of each can disagree (ADR 31).
+
 `box_type` is the key of a class in `boxganizer.boxtypes`; see
 `doc/box-types.md`. Schema version 2 added that column and version 3 added
 `config`. Migrations are a list of `(version, column, definition)` triples

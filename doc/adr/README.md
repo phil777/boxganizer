@@ -59,3 +59,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0028   | A delete is asked inside the menu, and the question says what survives | accepted |
 | 0029   | A pane's walk belongs to the tab; the pane's box belongs to the library | accepted |
 | 0030   | A confine is something you name: the server is unrestricted until you ask | accepted |
+| 0031   | The insert is the existence check: one address, one row, even under a race | accepted |

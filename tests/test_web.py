@@ -318,6 +318,28 @@ def test_creating_inside_an_unknown_parent_is_reported(client: TestClient) -> No
     assert response.status_code == 404
 
 
+def test_a_write_the_store_refuses_answers_in_words_not_a_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declined write is an answer, not a crash.
+
+    Forced rather than raced: what the handler is for is any sentence the storage layer produces — a
+    constraint two index passes fell foul of, a disk that stopped — and none of them should reach
+    the page as "Internal Server Error".
+    """
+    from boxganizer.errors import StoreError
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise StoreError("write refused: UNIQUE constraint failed: resources.ref_key")
+
+    monkeypatch.setattr(BoxStore, "update", refuse)
+    response = client.put("/api/boxes/Books", json={"description": "trying"})
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "write_refused"
+    assert "resources.ref_key" in detail["reason"]
+
+
 def test_a_box_can_be_deleted_by_uuid(client: TestClient, populated: BoxStore) -> None:
     uuid = populated.get("Books").uuid
     assert client.delete(f"/api/boxes/{uuid}").status_code == 204

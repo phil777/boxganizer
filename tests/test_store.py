@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -1060,3 +1061,114 @@ def test_a_half_failed_deletion_leaves_the_library_whole(
         kids = [box.name for box in store.children("Kitchen")]
         assert kids == ["Passport"], "and so did the link"
         assert store.resource(book) is not None, "and so did the resource it was the last box on"
+
+
+def test_two_threads_adopting_one_file_make_one_row(tmp_path: Path) -> None:
+    """One address, one row — even when two passes reach the same file at the same moment.
+
+    `_ensure_resource` asked "is there a row?" and then inserted if not, as two statements that
+    each committed on their own. The store is shared across threads on purpose
+    (`check_same_thread=False`), and index passes already run in `asyncio.to_thread`, so two
+    passes could both be told "no" and the second INSERT then hit the UNIQUE index:
+    `write refused: UNIQUE constraint failed: resources.ref_key`, a 500 on whatever request
+    happened to be saving a box at that moment.
+    """
+    tree = tmp_path / "notes"
+    tree.mkdir()
+    for index in range(40):
+        (tree / f"n{index}.md").write_text(f"word{index} searchable prose\n", encoding="utf-8")
+
+    from boxganizer import search as indexing
+    from boxganizer.models import Box as _Box
+
+    store = BoxStore(tmp_path / "race.db")
+    try:
+        store.add(_Box(name="Notes", box_type="directory", resource_uri=str(tree)), index_it=True)
+        failures: list[str] = []
+        barrier = threading.Barrier(6)
+
+        def pass_worker() -> None:
+            barrier.wait()
+            try:
+                for _ in range(3):
+                    indexing.rebuild(store, root=None)
+            except Exception as exc:
+                failures.append(f"{type(exc).__name__}: {exc}")
+
+        threads = [threading.Thread(target=pass_worker) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert failures == [], failures[:2]
+        keys = [row[0] for row in store._rows("SELECT ref_key FROM resources")]
+        assert len(keys) == len(set(keys)), "the UNIQUE index keeps the rows straight"
+        assert store.content_search(indexing.plan("word7").content_match, limit=5), "words are in"
+    finally:
+        store.close()
+
+
+def test_re_expanding_the_same_tree_changes_nothing(tmp_path: Path) -> None:
+    """A second walk over an unchanged folder is idempotent: same rows, same ids, no new links."""
+    from boxganizer import search as indexing
+    from boxganizer.models import Box as _Box
+
+    tree = tmp_path / "again"
+    (tree / "a").mkdir(parents=True)
+    (tree / "a" / "deep.md").write_text("deep words here\n", encoding="utf-8")
+    (tree / "top.md").write_text("top words here\n", encoding="utf-8")
+
+    store = BoxStore(tmp_path / "again.db")
+    try:
+        store.add(_Box(name="Tree", box_type="directory", resource_uri=str(tree)), index_it=True)
+        first = {row[0]: row[1] for row in store._rows("SELECT ref_key, id FROM resources")}
+        links = store._rows("SELECT count(*) FROM resource_link")[0][0]
+        first_pass = indexing.rebuild(store, root=None)
+        second = {row[0]: row[1] for row in store._rows("SELECT ref_key, id FROM resources")}
+        again = indexing.rebuild(store, root=None)
+
+        assert first == second, "walking the same tree twice does not mint rows"
+        assert store._rows("SELECT count(*) FROM resource_link")[0][0] == links
+        # nothing left to do, nothing refused: the walk finished both times
+        assert first_pass.skipped == () and again.skipped == (), (first_pass.skipped, again.skipped)
+        assert again.indexed == 0 and again.resources == first_pass.resources
+        assert store.index_counts()["outstanding"] == 0, store.index_counts()
+    finally:
+        store.close()
+
+
+def test_linking_a_resource_that_just_vanished_declines_quietly(tmp_path: Path) -> None:
+    """A file another pass decided had disappeared is not a reason to fail this save.
+
+    The same race seen from the other side: one walk finds the file on disk and reaches for a link,
+    while a walk in another thread concludes the file is gone and drops its row. The INSERT then
+    trips the foreign key. Nothing has been lost — the file is still on disk and the next pass
+    adopts it again — so the answer is "no link made this time", not an error blamed on the reader.
+    """
+    tree = tmp_path / "folder"
+    tree.mkdir()
+    (tree / "one.md").write_text("one file worth indexing\n", encoding="utf-8")
+
+    store = BoxStore(tmp_path / "vanish.db")
+    try:
+        store.add(Box(name="Folder", box_type="directory", resource_uri=str(tree)), index_it=True)
+        parent = store.resource(str(tree))
+        child = store.register_resource(str(tree / "one.md"), index_it=True)
+        assert parent is not None and child is not None and child.id is not None
+        parent_id, child_id = int(parent.id), int(child.id)
+
+        # A fresh pair links, and linking it again is nothing new rather than an error.
+        store._execute("DELETE FROM resource_link WHERE parent_id = ? AND child_id = ?",
+                       (parent_id, child_id))
+        assert store.link_resource(parent_id, child_id) is True
+        assert store.link_resource(parent_id, child_id) is False, "a second link is nothing new"
+
+        # The child row goes away from under the caller, as another thread's sweep would do.
+        store._execute("DELETE FROM resource_link WHERE parent_id = ? AND child_id = ?",
+                       (parent_id, child_id))
+        store._execute("DELETE FROM resources WHERE id = ?", (child_id,))
+        assert store.link_resource(parent_id, child_id) is False
+        assert store._rows("SELECT 1 FROM resource_link WHERE parent_id = ?", (parent_id,)) == []
+    finally:
+        store.close()

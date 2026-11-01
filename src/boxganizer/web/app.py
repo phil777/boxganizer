@@ -58,6 +58,7 @@ from boxganizer.errors import (
     PlacementError,
     RootCannotBeDeleted,
     RootCannotBeFiled,
+    StoreError,
     UnknownBoxType,
 )
 from boxganizer.models import DEFAULT_ICON, Box
@@ -696,6 +697,21 @@ def create_app(
                     "reason": exc.reason,
                 }
             },
+        )
+
+    @app.exception_handler(StoreError)
+    async def _store_refused(request: Request, exc: StoreError) -> JSONResponse:
+        """The database said no. That is an answer, not a crash.
+
+        Every write the storage layer refuses — a constraint two concurrent passes fell foul
+        of, a disk that stopped, a row another tab claimed first — arrives here as a sentence
+        written for a person. Before this, any of them was a 500 with a traceback in the log
+        and "Internal" on the page, which sends a reader to file a bug about a library that
+        merely declined (ADR 31).
+        """
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"error": "write_refused", "reason": str(exc)}},
         )
 
     @app.get("/api/health")
