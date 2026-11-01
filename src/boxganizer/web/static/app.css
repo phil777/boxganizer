@@ -2824,6 +2824,26 @@ pre.text {
   border-style: dashed;
 }
 
+/* The line is two parts: the box's own search on the left, and the tags centred in the room
+   that is left over — which puts them right of the line's centre without pinning them to the edge.
+   The search part keeps its share when it holds nothing, so a tag line does not slide sideways
+   the moment a box grows a field. */
+.tagline-search {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.tagline-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 2 1 auto;
+  justify-content: center;
+}
+
 .tagline .tag-add {
   flex: 0 1 11rem;
   min-width: 6rem;

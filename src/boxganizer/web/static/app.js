@@ -1352,6 +1352,16 @@ async function renderTagLine(box) {
   line.textContent = "";
   line.hidden = !box;
   if (!box) return;
+
+  // Two columns, and the left one exists even when it is empty. The search widget fills it and the
+  // tags stay right of centre; drawn the other way round, a tag line would move along the panel
+  // every time a box grew a search field, and a line that shifts under the pointer is a line
+  // people stop reading.
+  const slot = document.createElement("span");
+  slot.className = "tagline-search";
+  const tags = document.createElement("span");
+  tags.className = "tagline-tags";
+  line.append(slot, tags);
   let held;
   try {
     held = await api.boxTags(box.uuid);
@@ -1402,7 +1412,7 @@ async function renderTagLine(box) {
       });
       node.append(cross);
     }
-    line.append(node);
+    tags.append(node);
   });
 
   const entry = document.createElement("input");
@@ -1411,7 +1421,7 @@ async function renderTagLine(box) {
   entry.placeholder = held.explicit.length ? "+ tag" : "tag this box";
   entry.setAttribute("list", "tag-options");
   entry.setAttribute("aria-label", "add a tag to this box");
-  line.append(entry);
+  tags.append(entry);
 
   await ensureTagOptions();
 
