@@ -637,7 +637,7 @@ def test_the_viewport_view_paints_panes_windows_and_dividers(client: TestClient)
         'await act("close", { node: hit.dataset.node });',
         "close.disabled = !layout.closable;",
         "the last viewport cannot be closed; split one first",
-        "const trail = shown ? [shown] : [];",
+        "const trail = stillHere ? walked.slice() : shown ? [shown] : [];",
         "async function renderContentIn(",
         "async function saveSettingFor(box, key, value, { onSaved }, options = {}) {",
         "empty — open a box here, or drop one in",
@@ -2972,6 +2972,49 @@ def test_the_pane_itself_files_a_box_that_no_view_claimed(client: TestClient) ->
     css = client.get("/static/app.css").text
     start = css.index("#canvas.drop-target {")
     assert "outline:" in css[start : css.index("}", start)]
+
+
+def test_a_pane_keeps_the_walk_after_everything_the_viewport_does(client: TestClient) -> None:
+    """A repaint redraws the panes; it must not send the reader back to where they were.
+
+    Splitting, closing a neighbour, dragging the divider, dropping a box in and reloading all
+    rebuild the panes from the layout. The layout knows what each space was **told** to show and
+    nothing about where the reader clicked from there — so a path kept only in the pane's closure
+    was lost on every one of those gestures, and each pane snapped back to its direct child. The
+    walk belongs to the space, per tab: ADR 29.
+
+    The layout staying the library's single answer is the part worth pinning: navigation must never
+    write it, or two tabs on one library get two truths about one pane.
+    """
+    script = client.get("/static/app.js").text
+
+    # the walk is recalled, and only while it starts at the box the layout names
+    shell = script[script.index("function paneShell(node, shown)") :]
+    shell = shell[: shell.index("function renderNode(")]
+    assert "const walked = panePathFor(box.uuid, node);" in shell
+    assert "const stillHere = Boolean(walked && shown && walked[0].uuid === shown.uuid);" in shell
+    assert "const trail = stillHere ? walked.slice() : shown ? [shown] : [];" in shell
+    # every move inside a pane is remembered, and what is drawn is the end of the walk
+    opening = shell[shell.index("async open(ref, options = {}) {") :]
+    opening = opening[: opening.index("async draw(target) {")]
+    assert "rememberPanePath(box.uuid, node, trail);" in opening
+    assert "const end = trail.length ? trail[trail.length - 1] : null;" in shell
+    # navigation never writes the layout: the pane's own box stays the library's answer
+    assert "viewportAction" not in opening, "walking inside a pane must not rewrite the layout"
+    # a walk that leads to a deleted box is forgotten, not painted as an error
+    assert "} catch {\n          rememberPanePath(box.uuid, node, []);" in shell
+
+    # the store is per tab, not per library, and nodes that vanish stop holding a path
+    store = script[script.index("const PANE_PATHS_KEY") :]
+    store = store[: store.index("const viewportView = {")]
+    assert 'sessionStorage.getItem(PANE_PATHS_KEY)' in store
+    assert 'sessionStorage.setItem(PANE_PATHS_KEY' in store
+    assert "localStorage" not in store
+    assert "function forgetMissingPanePaths(boxUuid, nodes)" in store
+    tiling = script[script.index("function paintTiling()") :]
+    windows = script[script.index("function paintWindows()") :]
+    for pane_painter in (tiling[: tiling.index("}\n")], windows[: windows.index("}\n")]):
+        assert "forgetMissingPanePaths(box.uuid," in pane_painter
 
 
 def test_a_box_that_holds_no_boxes_offers_no_drop_zone(client: TestClient) -> None:

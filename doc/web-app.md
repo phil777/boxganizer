@@ -110,7 +110,13 @@ beside it, and the gear in the page's top line folds only the box on the main sc
 shows, it holds: those boxes are its children, so the tree view and the side list agree with the page.
 Opening a box **inside a pane stays inside that pane**, however deep it is embedded: a folder in a grid
 cell in a pane answers to that pane's path line, and the settings its own view writes land on the
-folder — not on the grid, and not on the viewport around it. Dragging a box onto another box **copies the link**
+folder — not on the grid, and not on the viewport around it. **Where you walked inside a pane is
+remembered** through every operation on the viewport — a split, closing a neighbour, dragging the bar,
+a drop, a reload — so a pane three folders deep stays three folders deep instead of snapping back to
+the box the layout names (ADR 29). The walk lives in the browser tab and the layout lives in the
+library, and they are not the same fact: what a space was *told* to show is shared, how you got there
+is yours. So a second tab on the same library opens each pane at the box the layout names, and a pane
+you were told to show something else in — a drop, another tab — starts a new walk from there. Dragging a box onto another box **copies the link**
 (it is filed in both); **holding Shift moves it** (filed here, taken off where it came from, in one
 request so it is never nowhere). ADR 23.
 

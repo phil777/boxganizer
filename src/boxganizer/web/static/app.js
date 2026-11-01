@@ -561,6 +561,77 @@ function foldPaneRows(pane) {
   });
 }
 
+/* ------------------------------------------------ a pane's walked path ---- */
+
+/**
+ * Where the reader has walked inside each pane, held by the tab rather than by the library.
+ *
+ * The layout the server owns says what a space was **told** to show. Clicking deeper into a folder
+ * *inside* a pane is a different fact — where the reader went from there — and it has nowhere honest
+ * to live. Writing it into the layout would give one pane two sources of truth, which disagree the
+ * moment a second tab looks at the same library; keeping it only in the pane's own closure loses it
+ * the moment anything repaints, which is how every split, closed neighbour, dragged divider and drop
+ * sent every pane back to the box the layout names. So it lives here, keyed by library box and node:
+ * a repaint rebuilds the panes, and none of those gestures is a reason to forget where you were.
+ *
+ * The layout still wins whenever it says something different. A path is kept only while it **starts
+ * at** the box the layout names, so an explicit "show this in that pane" — a drop, a crumb from
+ * another tab, an `open` action — replaces the walk instead of being ignored by it.
+ */
+const PANE_PATHS_KEY = "boxganizer:pane-path";
+
+function panePathsRead() {
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(PANE_PATHS_KEY) || "{}");
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {}; // a full quota or a hand-edited session: this is a convenience, not the reader's data
+  }
+}
+
+function panePathsWrite(paths) {
+  try {
+    sessionStorage.setItem(PANE_PATHS_KEY, JSON.stringify(paths));
+  } catch {
+    /* the worst case is that a reload forgets a path — which is what it does today for every path */
+  }
+}
+
+const panePathKey = (boxUuid, node) => `${boxUuid}|${node}`;
+
+function panePathFor(boxUuid, node) {
+  const entry = panePathsRead()[panePathKey(boxUuid, node)];
+  return Array.isArray(entry) && entry.length ? entry : null;
+}
+
+function rememberPanePath(boxUuid, node, trail) {
+  const paths = panePathsRead();
+  const key = panePathKey(boxUuid, node);
+  if (!trail.length) delete paths[key];
+  else
+    paths[key] = trail.map((one) => ({
+      uuid: one.uuid,
+      name: one.name,
+      icon: one.icon,
+      box_type: one.box_type,
+    }));
+  panePathsWrite(paths);
+}
+
+/** Nodes that no longer exist have no space to have walked in, so their paths go with them. */
+function forgetMissingPanePaths(boxUuid, nodes) {
+  const paths = panePathsRead();
+  const alive = new Set(nodes.map((node) => panePathKey(boxUuid, node)));
+  let changed = false;
+  for (const key of Object.keys(paths)) {
+    if (key.startsWith(`${boxUuid}|`) && !alive.has(key)) {
+      delete paths[key];
+      changed = true;
+    }
+  }
+  if (changed) panePathsWrite(paths);
+}
+
 const viewportView = {
   async render(canvas, box, ctx, mode, opts = {}) {
     const token = paneGeneration;
@@ -626,7 +697,11 @@ const viewportView = {
       /* Each pane walks on its own path. One shared trail would mean that opening a box in the
          left pane changed what "back" means in the right one — and the whole point of the box is
          that two things are open at once. */
-      const trail = shown ? [shown] : [];
+      const walked = panePathFor(box.uuid, node);
+      // Kept only while it is a walk *from* the box the layout names. The layout is the library's
+      // answer about this space, and a newer answer outranks an older detour through it.
+      const stillHere = Boolean(walked && shown && walked[0].uuid === shown.uuid);
+      const trail = stillHere ? walked.slice() : shown ? [shown] : [];
       const self = {
         node,
         el: pane,
@@ -649,6 +724,7 @@ const viewportView = {
           const before = options.trail ? [...options.trail] : [];
           trail.length = 0;
           trail.push(...before, target);
+          rememberPanePath(box.uuid, node, trail);
           await self.draw(target);
         },
         async draw(target) {
@@ -765,12 +841,34 @@ const viewportView = {
       // Views repaint their controls in place — a grid that changes its column count, a folder that
       // switches layout — and a row drawn after the pane's last render would arrive unfolded.
       new MutationObserver(() => foldPaneRows(pane)).observe(body, { childList: true, subtree: true });
-      if (shown) {
-        // The pane's box is drawn from the brief the layout already carried, then filled in.
-        self.draw(shown);
-      } else {
-        body.append(emptyMessage("Nothing open here."));
-      }
+      // What goes on the screen is the end of the walk, not necessarily the box the layout names —
+      // that is where the walk started. The end is read afresh so a rename shows, and a box deleted
+      // since the last look is forgotten rather than painted as an error where content used to be.
+      const restore = async () => {
+        const end = trail.length ? trail[trail.length - 1] : null;
+        if (!end) {
+          body.append(emptyMessage("Nothing open here."));
+          return;
+        }
+        if (shown && end.uuid === shown.uuid) {
+          self.draw(shown); // the brief the layout already carried, with nothing extra to fetch
+          return;
+        }
+        try {
+          await self.draw(await api.box(end.uuid));
+        } catch {
+          rememberPanePath(box.uuid, node, []);
+          trail.length = 0;
+          if (shown) {
+            trail.push(shown);
+            self.draw(shown);
+          } else {
+            drawCrumbs();
+            body.append(emptyMessage("Nothing open here."));
+          }
+        }
+      };
+      restore();
 
       pane.addEventListener("dragover", (event) => {
         event.preventDefault();
@@ -926,6 +1024,7 @@ const viewportView = {
 
     function paintTiling() {
       briefs = new Map((layout.panes || []).map((pane) => [pane.node, pane.box || null]));
+      forgetMissingPanePaths(box.uuid, (layout.panes || []).map((pane) => pane.node));
       const root = renderNode(layout.tree);
       root.classList.add("vp-root");
       wrap.append(root);
@@ -935,6 +1034,7 @@ const viewportView = {
       const stage = document.createElement("div");
       stage.className = "vp-stage";
       briefs = new Map((layout.panes || []).map((pane) => [pane.node, pane.box || null]));
+      forgetMissingPanePaths(box.uuid, (layout.panes || []).map((pane) => pane.node));
       const order = [...(layout.order || [])];
       order.forEach((nodeId, index) => {
         const entry = (layout.panes || []).find((pane) => pane.node === nodeId);
