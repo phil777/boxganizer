@@ -131,7 +131,9 @@ a field for it and one that merely honours it gets a field marked *optional* —
 type will use but never ask for is a feature that exists only in the documentation — and
 Browse and the index tick disappear when the resource is not a file on this machine — a control that will be ignored is a control that lies about what it is
 asking. A refusal is written **inside the dialog**, in its own line, because the status bar
-behind an open modal is a message nobody receives.
+behind an open modal is a message nobody receives. And none of these windows is on the page until it
+is asked for: a dialog that needs a layout of its own still disappears when it is closed, because a
+window that sits permanently at the bottom of the document is not a window, it is a leak.
 
 A box is also **about** things, and that is what tags are for. Type a word into the tag field
 under the top line — or a path like `home/kitchen/boiler`, which creates the branch — and the box

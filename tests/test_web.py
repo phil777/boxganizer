@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -3294,6 +3295,45 @@ def test_a_box_drawn_inside_another_keeps_the_navigation_of_the_space_it_is_in(
     assert script.count("ctx.open(uuid, { trail: ctx.trail() })") >= 1
     assert script.count("ctx.open(child.uuid, { trail: ctx.trail() })") >= 7
     assert "if (!gone) openBox(child.uuid);" not in script
+
+
+def test_no_dialog_shows_itself_before_it_is_opened(client: TestClient) -> None:
+    """A closed `<dialog>` is just a section of the page unless something enforces the closed part.
+
+    The report named two windows — Manage tags and Check the library — sitting at the bottom of the
+    page, readable and uncloseable. Both need `display: flex` to lay their columns out, and that
+    author `display` outranks the user-agent rule hiding a dialog until it is opened. So the guard
+    is one blanket rule, not a `:not([open])` per window: the next window that wants a layout
+    inherits the mistake, and the two reported are only the two that were noticed.
+    """
+    page = client.get("/").text
+    served = re.findall(r'<dialog\s+id="([^"]+)"', page)
+    assert served == [
+        "new-box-modal",
+        "edit-box-modal",
+        "tags-modal",
+        "index-modal",
+        "check-modal",
+        "about-modal",
+        "file-picker",
+    ], served
+
+    css = client.get("/static/app.css").text
+    guard = css[css.index("dialog:not([open]) {") :]
+    assert "display: none !important;" in guard[:80]
+
+    # every dialog that asks for a layout is covered by that rule rather than by its own guard:
+    # `!important` is what wins over the per-window `display`, whatever the cascade order says
+    for name in served:
+        block = re.search(rf"#{name}\s*\{{([^}}]*)\}}", css)
+        if block and re.search(r"\bdisplay:", block.group(1)):
+            assert "dialog:not([open])" in css, name
+            assert "display: none !important;" in guard[:80], name
+
+    script = client.get("/static/app.js").text
+    # each is opened with showModal and closed with close(); nothing toggles `hidden` by hand
+    assert ".showModal()" in script
+    assert ".close()" in script
 
 
 def test_a_dialog_reports_its_own_refusal(client: TestClient) -> None:

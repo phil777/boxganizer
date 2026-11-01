@@ -1,5 +1,15 @@
 /* Boxganizer web UI. Two panes, one context menu, one modal. */
 
+/* A dialog that is not open is not on the page.
+
+   The browser already says so, but any author `display` on the dialog — and two of them need one to
+   lay their columns out — outranks that rule, and the window's whole body then sits permanently at
+   the bottom of the document, readable and uncloseable. `!important` is the honest strength here:
+   "closed" is not a style preference a later rule should be able to overrule. */
+dialog:not([open]) {
+  display: none !important;
+}
+
 :root {
   color-scheme: light dark;
   --gap: 0.75rem;
