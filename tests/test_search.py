@@ -12,6 +12,7 @@ import pytest
 from boxganizer import paths, search
 from boxganizer.models import Box
 from boxganizer.store import BoxStore
+from conftest import wait_for_index
 
 # --- a PDF with real text in it --------------------------------------------------
 
@@ -465,6 +466,10 @@ def test_a_box_retyped_away_from_text_leaves_the_index(tmp_path: Path) -> None:
                     "resource_uri": str(shelf / "siding.txt"),
                 },
             ).json()
+            # A save answers before the file has been read (ADR 32), so the queue is drained
+            # before asking whether the words are findable. Without this the test is a race that
+            # passes on an idle machine and fails when the suite is loaded.
+            wait_for_index(client)
             assert client.get("/api/search?q=fence").json()
             client.put(
                 f"/api/boxes/{created['uuid']}",
