@@ -285,7 +285,8 @@ that box, while the list or listing on screen closes down to the same answer —
 left pane runs, restricted to a set, so the ranking, the passage and the widening are identical and no
 file is re-read to answer (ADR 33). Each row says *via* which boxes you would reach the match, and a row
 that matched inside a file names the file. Where it opens depends on where you asked: from the library it
-becomes the current box; inside a viewport it replaces that pane's box and the crumb line shows the route
+becomes the current box, *carrying the term with it*, so a folder opened from a search result shows the
+children that answered; inside a viewport it replaces that pane's box and the crumb line shows the route
 down to it, each crumb clickable, and a search in one pane never moves another. Click a match that is a
 file and the box holding it opens with the word already typed and the results already unrolled on it.
 

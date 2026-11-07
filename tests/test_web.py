@@ -2275,6 +2275,35 @@ def test_a_folder_takes_a_box_dropped_from_the_panel(client: TestClient) -> None
     assert ".children-view.drop-target" in css
 
 
+def test_a_box_opened_out_of_a_search_opens_in_that_search(client: TestClient) -> None:
+    """The result came out of a question, and opening it should not lose the question.
+
+    Clicking a search result in the library carries the term into the box that opens, so a folder
+    shows the children that answered rather than the whole shelf. It rides the handoff a file
+    already uses (ADR 33) because it is the same act, and the term is read at the click, never
+    remembered from when the list was drawn — a term nobody typed any more is not a filter.
+    """
+    script = client.get("/static/app.js").text
+
+    carrier = script[script.index("function openBoxWithSearchTerm(box) {") :]
+    carrier = carrier[: carrier.index("async function openBox(")]
+    assert 'const term = field ? field.value.trim() : "";' in carrier
+    assert 'if (term) searchHandoff = { boxUuid: box.uuid, term };' in carrier, (
+        "the term travels on the handoff the next tag line consumes"
+    )
+    assert "if (term)" in carrier, "no term, no handoff: an ordinary open stays ordinary"
+
+    # both doors into a box carry it — the row and its menu
+    assert 'item.addEventListener("click", () => openBoxWithSearchTerm(box));' in script
+    assert 'item.addEventListener("dblclick", () => openBoxWithSearchTerm(box));' in script
+    assert '{ label: "Open", run: openBoxWithSearchTerm(box) }' in script
+
+    # and the tag line is where it is spent: filled in, run, and remembered
+    tag = script[script.index("async function renderTagLine(") :]
+    assert "searchHandoff.boxUuid === box.uuid" in tag
+    assert "widget.run(handoff.term);" in tag
+
+
 def test_the_tag_line_field_narrows_the_folder_and_it_keeps_no_field_of_its_own(
     client: TestClient,
 ) -> None:

@@ -78,7 +78,15 @@ to jump to — the list, icons, or directory listing underneath closes down to w
 never disagree. A box three levels down that matches keeps the drawers above it on screen, because a
 match you cannot reach is not a filter but a dead end; and in a directory, a file whose *contents* matched
 stays listed even when its name says nothing about the word. Escape clears the field and brings the whole
-shelf back. There is no second search box: the folder used to carry its own `name or type` field, and one
+shelf back.
+
+**A box opened out of a search opens *in* that search.** Click a result in the left pane and the term
+comes with it: it lands in the box's own field, the window is already unrolled, and a folder shows the
+children that answered rather than the whole shelf — so you arrive where the match was, with the reason
+still on screen. The term is read at the click, not remembered from when the list was drawn, and it joins
+the box's list of searched-for terms. It is not remembered as a *filter*: navigate away and back with an
+empty search box and the shelf is whole again.
+ There is no second search box: the folder used to carry its own `name or type` field, and one
 field per box replaced it (ADR 34).
 
 Where a result opens depends on where you asked. From the library, it becomes the current box and the

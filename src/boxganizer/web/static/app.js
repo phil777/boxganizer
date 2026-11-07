@@ -402,6 +402,25 @@ function status(message, isError = false) {
 
 /* ------------------------------------------------------------ navigation --- */
 
+/**
+ * Open a box the way the library list does — carrying whatever the left pane is searching for.
+ *
+ * A result that came out of a search is a partial answer about that box, and opening it should not
+ * lose the question: the term goes into the box's own field, so a folder shows the children that
+ * answered instead of the whole shelf, and the field says why those were chosen. The term is read at
+ * the click, not remembered from when the list was drawn, because the box may have been typed away in
+ * between — and a term nobody typed any more is not a filter.
+ *
+ * This rides the same handoff as a file whose box was clicked (ADR 33), because it is the same act:
+ * the next tag line drawn for that box picks the term up, fills the field, and runs it.
+ */
+function openBoxWithSearchTerm(box) {
+  const field = el("search");
+  const term = field ? field.value.trim() : "";
+  if (term) searchHandoff = { boxUuid: box.uuid, term };
+  return openBox(box.uuid);
+}
+
 async function openBox(ref, options = {}) {
   // A directory box shows its top directory when it is opened, every time. Remembering where
   // a browse left off sounds kind and is not: the box looks like it has children it does not
@@ -2694,8 +2713,9 @@ function renderSide() {
       item.append(passage);
       item.classList.add("content-hit");
     }
-    item.addEventListener("click", () => openBox(box.uuid));
-    item.addEventListener("dblclick", () => openBox(box.uuid));
+    // A box opened out of a search opens *in* that search: the term travels with it.
+    item.addEventListener("click", () => openBoxWithSearchTerm(box));
+    item.addEventListener("dblclick", () => openBoxWithSearchTerm(box));
     item.addEventListener("dragstart", (event) => {
       event.dataTransfer.setData("text/plain", box.uuid);
       event.dataTransfer.effectAllowed = "move";
@@ -2729,7 +2749,8 @@ function markSelected() {
 /** The items every box gets, wherever it is shown, plus the caller's own. */
 function boxMenuItems(box, extra = []) {
   const items = [
-    { label: "Open", run: () => openBox(box.uuid) },
+    // The menu opens the box the same way the click does, term and all: two doors, one room.
+    { label: "Open", run: openBoxWithSearchTerm(box) },
     { separator: true },
     { label: "Modify…", run: () => openEditBoxModal(box) },
     ...extra,
