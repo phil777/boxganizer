@@ -62,3 +62,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0031   | The insert is the existence check: one address, one row, even under a race | accepted |
 | 0032   | A save answers at once; the reading happens in a queue that counts files | accepted |
 | 0033   | A search inside a box is the same search with one set clause | accepted |
+| 0034   | One search field per box, and it filters what the box shows | accepted |

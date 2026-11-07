@@ -19,7 +19,7 @@ panel — the last row of the table.
 | ------------------ | --------------------------------------------------------- |
 | image              | the picture, scaled into the space left, ratio untouched   |
 | text, markdown     | the file's text; wrap, crop and font size in the right-click menu; vertical scroll always, horizontal when wrap is off. A **markdown** file is rendered instead — headings, emphasis, lists that nest, tables that line up, quotes, fenced code, links — with the plain text one click away and that choice kept in the box. Raw HTML in the file stays text on the screen, and a link whose address would run something keeps its words and loses its reach |
-| folder, directory, cabinet | its children, as a list or as icons; double-click opens one in place; a search box narrows the list by name or type — it starts empty every time, while the searches you have tried are remembered in the box. A **directory** box shows the top of its folder whenever it is opened, however deep the last browse went; a file in it can be dragged out — onto another box to file a new box inside it, or onto the library list to leave it unfiled — with the type inferred from the file |
+| folder, directory, cabinet | its children, as a list or as icons; double-click opens one in place; **the search field on the tag line narrows what is shown** — by the library's own search, so the child's words and the words inside its files count, not just its name — and it starts empty every time, while the searches you have tried are remembered in the box. A **directory** box shows the top of its folder whenever it is opened, however deep the last browse went; a file in it can be dragged out — onto another box to file a new box inside it, or onto the library list to leave it unfiled — with the type inferred from the file |
 | grid               | rows and columns you set (type them or step them), one child per cell, drag to move, drop on an occupied cell to swap, right-click to create a box in a cell |
 | desktop            | icons anywhere on the surface: drag them with the pointer, drag a corner to size them, arrow-key them about, and let a magnetic grid of the size you chose pull them onto its lines. The resource, when it is a picture, is the wallpaper — right-click the bare surface to choose one or take it away. Double-click opens a box in place of the desktop. Shown in a smaller pane it is the whole desktop drawn smaller, not a corner of it: canvas, wallpaper and icons scale by one factor, so an icon stays on the same feature of the picture |
 | tiling-viewport    | its space split into panes, each showing one box with its own path line and four buttons — settings, close, split side by side, split above and below — and a bar between any two panes you can drag; the split, the ratio and what is open where are saved on the box. Each pane folds **its own** settings row: one gear per box on screen, and the gear in the top line reaches no further than the main screen |
@@ -71,6 +71,15 @@ re-read to answer it, and a cycle in the graph terminates instead of looping (AD
 under the field as results arrive: each row says *via* which boxes you would reach it, and a row that
 matched inside a file names the file and quotes the words. Escape closes it, clicking away closes it,
 and the rows are reachable with the arrow keys and **Enter**.
+
+The same field also **narrows what the box is showing**. Typing does not only unroll a window of matches
+to jump to — the list, icons, or directory listing underneath closes down to what matches, and says
+`2 of 4 inside` while it is doing it. One search, one answer, two uses, so the window and the list can
+never disagree. A box three levels down that matches keeps the drawers above it on screen, because a
+match you cannot reach is not a filter but a dead end; and in a directory, a file whose *contents* matched
+stays listed even when its name says nothing about the word. Escape clears the field and brings the whole
+shelf back. There is no second search box: the folder used to carry its own `name or type` field, and one
+field per box replaced it (ADR 34).
 
 Where a result opens depends on where you asked. From the library, it becomes the current box and the
 box you searched from stays in the crumb line. Inside a viewport, it replaces that pane's box and the

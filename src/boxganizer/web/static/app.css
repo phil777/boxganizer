@@ -583,8 +583,6 @@ pre.text {
 
 /* The search box takes the room the toolbar has left, so a long name does not push
    the layout buttons off the pane. */
-.child-search { flex: 1; min-width: 6rem; max-width: 18rem; }
-.children-toolbar.compact .child-search { max-width: none; }
 
 /* A folder accepts a drop anywhere in its own area, including the empty part of an
    empty folder — which is the moment someone most wants to drop something. */

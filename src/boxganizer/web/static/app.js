@@ -539,6 +539,13 @@ async function dropBox(event, ctx, targetUuid, { after = null, label = null } = 
 /* ------------------------------------------------------------ main pane ---- */
 
 const context = {
+  // What a typed search term does to the content on this surface. A box view that can narrow what
+  // it shows adds a handler here, and the tag-line field calls every one of them: one field, and
+  // every list under it answers to it — including a folder embedded in a grid cell, which is why
+  // this is a set of handlers and not a single function. It is an object holding the set rather
+  // than the set itself so a render can hand it out before any view has asked to be filtered, and
+  // so a pane can be given its own and never paint over a neighbour's.
+  filterSink: { handlers: new Set() },
   // Which box this context is *about*. A view asked to draw a box it is not tells the difference
   // below and aims its writes at the box it was handed instead.
   owner: () => state.current,
@@ -710,6 +717,10 @@ const viewportView = {
       const pane = document.createElement("div");
       pane.className = "vp-pane";
       pane.dataset.node = node;
+      // What the pane's search field narrows. It belongs to this shell, not to the render context,
+      // which is built afresh on every draw: the field outlives the draws, and a neighbour pane has
+      // its own sink, so a term typed here cannot narrow a list over there.
+      const filterSink = { handlers: new Set() };
 
       const path = document.createElement("div");
       path.className = "vp-path";
@@ -763,6 +774,9 @@ const viewportView = {
         },
         async draw(target) {
           body.replaceChildren();
+          // The views about to be drawn register themselves again; the ones from the box this pane
+          // showed a moment ago must not stay on the list and answer a search they are no longer in.
+          filterSink.handlers.clear();
           await renderContentIn(body, target, paneContext(target), { depth: 0, embedded: false });
           drawCrumbs();
           foldPaneRows(pane);
@@ -778,6 +792,8 @@ const viewportView = {
       function paneContext(target) {
         return {
           ...context,
+          // After the spread: the pane's sink, not the one it was copied from the main context.
+          filterSink,
           owner: () => target,
           open: (ref, options = {}) => self.open(ref, options),
           trail: () => trail,
@@ -887,9 +903,12 @@ const viewportView = {
           row.append(searchSlot);
           path.after(row);
         }
+        // The box this pane is standing on right now, which is not necessarily the one the layout
+        // named: the search, the narrowing and the memory all follow the pane as it walks.
+        const paneOwner = () => trail[trail.length - 1] || shown;
         const widget = mountBoxSearch(
           searchSlot,
-          () => trail[trail.length - 1] || shown,
+          paneOwner,
           // The route the server worked out, not the pane's history with the hit tacked on: the
           // crumb line should read as though the person had clicked down child by child to reach
           // this box. Their earlier wanderings in the pane are not part of how you get here from
@@ -907,6 +926,13 @@ const viewportView = {
             // A pane redraws its body in place, so the widget that asked is still here to answer:
             // no handoff needed, the term goes straight back into the field that sent it.
             if (foundAFile) widget.run(term);
+          },
+          {
+            sink: filterSink,
+            history: {
+              get: () => folderOptions(paneOwner()).history,
+              remember: (term) => rememberFolderSearch(paneOwner(), term),
+            },
           }
         );
       } else {
@@ -1417,11 +1443,15 @@ async function saveSettingFor(box, key, value, { onSaved }, options = {}) {
  * is inside. `path` is the box's route down from `owner`, which is how the window can show *how you
  * would get there* for a hit three levels deep that the reader never clicked through.
  */
-function mountBoxSearch(mount, owner, open) {
+function mountBoxSearch(mount, owner, open, options = {}) {
   // A pane hands over a function, because the box it is showing changes under it: searching a pane
   // the moment after you walked two levels deeper means searching *there*, not the box the pane was
   // opened with. The main line passes the box itself and never notices the difference.
   const ownerOf = () => (typeof owner === "function" ? owner() : owner);
+  // `sink` is what the content underneath does with the term; `history` is the box's memory of the
+  // terms tried in it. Both are optional because not every surface has a list to narrow.
+  const sink = options.sink || null;
+  const history = options.history || null;
 
   const form = document.createElement("form");
   form.className = "box-search";
@@ -1443,6 +1473,37 @@ function mountBoxSearch(mount, owner, open) {
   form.append(field, results);
   mount.append(form);
   form.addEventListener("submit", (event) => event.preventDefault());
+
+  // The box remembers the terms tried in it. That memory used to live on the folder's own filter
+  // box; when the two search boxes became one, the memory came here with it rather than being lost.
+  let historyList = null;
+  if (history) {
+    historyList = document.createElement("datalist");
+    historyList.id = `box-search-history-${ownerOf().uuid}`;
+    field.setAttribute("list", historyList.id);
+    form.append(historyList);
+  }
+  const paintHistory = () => {
+    if (!historyList) return;
+    historyList.replaceChildren();
+    for (const entry of history.get() || []) {
+      const option = document.createElement("option");
+      option.value = entry;
+      historyList.append(option);
+    }
+  };
+  const remember = () => {
+    const term = field.value.trim();
+    if (!term || !history) return;
+    history.remember(term);
+    paintHistory();
+  };
+
+  // One answer, two uses: the window shows it, and the content under the field narrows to it.
+  const emit = (term, hits) => {
+    if (!sink) return;
+    for (const handler of sink.handlers) handler(term, hits);
+  };
 
   let hits = [];
   let active = -1;
@@ -1537,21 +1598,33 @@ function mountBoxSearch(mount, owner, open) {
       hits = answer;
       active = hits.length ? 0 : -1;
       paint();
+      emit(term, hits);
     }, 180);
   };
 
   field.addEventListener("focus", () => {
+    paintHistory(); // the box may have gained a remembered term since this field was mounted
     // re-worded on the way in, because for a pane the owner may have moved since it was mounted
     const here = ownerOf();
     field.placeholder = `search inside ${here.name}`;
     field.setAttribute("aria-label", `search boxes and files inside ${here.name}`);
   });
-  field.addEventListener("input", () => ask(field.value.trim()));
+  field.addEventListener("input", () => {
+    const term = field.value.trim();
+    // Emptying the field is the way out of a filter, so it says so even though there is nothing to
+    // search for and no window to paint.
+    if (!term) emit("", null);
+    ask(term);
+  });
+  field.addEventListener("change", remember);
 
   field.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.stopPropagation(); // the pane, the modal and the page all listen for this key
+      const wasFiltered = field.value.trim() !== "";
+      field.value = ""; // the way out of a filter, as it was on the box this one replaces
       close();
+      if (wasFiltered) emit("", null);
       return;
     }
     if (results.hidden || !hits.length) return;
@@ -1564,6 +1637,7 @@ function mountBoxSearch(mount, owner, open) {
     }
     if (event.key === "Enter") {
       event.preventDefault();
+      remember(); // a term pressed with Enter was a search that was actually meant
       if (active >= 0 && hits[active]) choose(hits[active]);
     }
   });
@@ -1578,10 +1652,14 @@ function mountBoxSearch(mount, owner, open) {
 
   return {
     close,
-    // Put a term in the field and show what it finds, exactly as if it had been typed.
+    // Put a term in the field and show what it finds, exactly as if it had been typed — including
+    // narrowing the content underneath, and including the box remembering the term it was opened
+    // with, because a search that arrived from the library was a search the reader really asked for.
     run(term) {
       field.value = term;
       field.focus();
+      paintHistory();
+      remember();
       ask(term);
     },
   };
@@ -1621,6 +1699,14 @@ async function renderTagLine(box) {
     }
     if (foundAFile) searchHandoff = { boxUuid: hit.uuid, term };
     openBox(hit.uuid, { trail: [...state.trail, box] });
+  }, {
+    // The field filters what this surface shows, and remembers what was typed in it — both of which
+    // used to belong to the folder's own "name or type" box, until one search box replaced the two.
+    sink: context.filterSink,
+    history: {
+      get: () => folderOptions(box).history,
+      remember: (term) => rememberFolderSearch(box, term),
+    },
   });
   if (searchHandoff && searchHandoff.boxUuid === box.uuid) {
     const handoff = searchHandoff;
@@ -2408,6 +2494,9 @@ function renderMain() {
     canvas.append(emptyMessage(`No view for type ${box.box_type}.`));
     return;
   }
+  // A surface starts unfiltered. Reusing the old set would hand last box's filter to this one, and
+  // a folder that opens already narrowed by a search you stopped typing two boxes ago is a lie.
+  context.filterSink = { handlers: new Set() };
   view.render(canvas, box, context, "content", { embedded: false, depth: 0 });
   renderTagLine(box);
   applyConfigHeader();
@@ -5405,6 +5494,41 @@ const FOLDER_DEFAULTS = { layout: "list", history: [] };
 /** How many searches a folder remembers. Long enough to be useful, short enough to read. */
 const FOLDER_HISTORY = 8;
 
+/**
+ * File a search term in the box's own memory of what was tried in it.
+ *
+ * It lives under `config.folder.history` because that is where it has always lived, and a box keeps
+ * its history whatever view it is drawn in. Saved without a re-render: a redraw would rebuild the
+ * field empty and the term would vanish under the fingers of someone still typing it.
+ */
+/**
+ * Which files a search leaves in a directory's listing, by name.
+ *
+ * A file on disk is not a box, so the scoped search cannot name it — but the index has read it, and
+ * a hit on the directory that found the words *inside* a file carries that file's path. So the rule
+ * is: keep what the term is part of, and keep what the index says the words were found in. The
+ * second half is the reason the contents are indexed at all; without it a search for a phrase could
+ * say "this folder matches" and then list none of the files that made it match.
+ */
+function filesMatchedIn(boxUuid, hits) {
+  const paths = new Set();
+  for (const hit of hits || []) {
+    if (hit.uuid !== boxUuid) continue;
+    const inside = hit.match && hit.match.in_file;
+    if (inside) paths.add(String(inside));
+  }
+  return paths;
+}
+
+function rememberFolderSearch(box, term) {
+  const clean = term.trim();
+  if (!clean) return folderOptions(box).history;
+  const rest = folderOptions(box).history.filter((entry) => entry.toLowerCase() !== clean.toLowerCase());
+  const next = [clean, ...rest].slice(0, FOLDER_HISTORY);
+  saveSectionFor(box, "folder", { history: next }, {}, { rerender: false });
+  return next;
+}
+
 function folderOptions(box) {
   const saved = (box.config || {}).folder || {};
   // A config written by hand or by an older build may hold anything under `history`.
@@ -5449,15 +5573,9 @@ const folderView = {
     const count = document.createElement("span");
     count.className = "muted";
 
-    const search = document.createElement("input");
-    search.type = "search";
-    search.className = "child-search";
-    search.placeholder = "name or type";
-    search.setAttribute("aria-label", `Filter the boxes inside ${box.name}`);
-    const historyId = `folder-history-${box.uuid}`;
-    search.setAttribute("list", historyId);
-    const datalist = document.createElement("datalist");
-    datalist.id = historyId;
+    // No search box of its own. There is one field per box, on the tag line, and it both unrolls the
+    // jump-to list and narrows what is drawn here; a folder with two fields that both said "search"
+    // and did different things was one too many. What it does keep is the memory below.
 
     const toggle = document.createElement("button");
     toggle.type = "button";
@@ -5481,11 +5599,11 @@ const folderView = {
     // Inside a cell or a root block there is no room, and no reason, to change
     // what the contained folder is showing. The search box is shown everywhere:
     // finding one child among many is exactly what a small pane needs.
-    toolbar.append(title, count, search, ...(opts.embedded ? [] : [toggle, add]));
+    toolbar.append(title, count, ...(opts.embedded ? [] : [toggle, add]));
 
     const holder = document.createElement("div");
     holder.className = "children";
-    wrap.append(toolbar, holder, datalist);
+    wrap.append(toolbar, holder);
 
     // Anything dropped in this folder is filed in it. Preventing the default is
     // also what claims the drop: without it the root, whose holder wraps this
@@ -5524,20 +5642,36 @@ const folderView = {
     }
     if (!stillOnScreen(token)) return;
 
-    function childMatches(child, term) {
-      if (!term) return true;
-      const childKind = state.types.get(child.box_type) || {};
-      return (
-        child.name.toLowerCase().includes(term) ||
-        String(child.box_type).toLowerCase().includes(term) ||
-        String(childKind.label || "").toLowerCase().includes(term)
-      );
+    // What the tag-line field asks for, and what it found. `filter` is null when nothing is typed:
+    // the whole shelf, no narrowing. Otherwise it holds the term and the set of children that may
+    // stay on screen.
+    let filter = null;
+
+    /**
+     * Which children a search leaves visible: the ones that matched, and the ones a match hangs
+     * under. Showing only exact matches would hide the drawer you have to open to reach the paper,
+     * and a filter you cannot navigate through is a dead end rather than a narrowing.
+     */
+    function visibleUnder(hits) {
+      const keep = new Set();
+      for (const hit of hits || []) {
+        keep.add(hit.uuid);
+        for (const step of (hit.route || []).slice(0, -1)) keep.add(step.uuid);
+      }
+      return keep;
+    }
+
+    if (ctx.filterSink) {
+      ctx.filterSink.handlers.add((term, hits) => {
+        if (!document.contains(wrap)) return; // this view has been replaced; a newer one answers now
+        filter = term ? { term, keep: visibleUnder(hits) } : null;
+        draw();
+      });
     }
 
     function draw() {
-      const term = search.value.trim().toLowerCase();
-      const shown = children.filter((child) => childMatches(child, term));
-      count.textContent = term
+      const shown = filter ? children.filter((child) => filter.keep.has(child.uuid)) : children;
+      count.textContent = filter
         ? ` ${shown.length} of ${children.length} inside`
         : ` ${children.length} inside`;
       holder.replaceChildren();
@@ -5545,8 +5679,8 @@ const folderView = {
         holder.append(emptyMessage("Nothing in here yet — drag a box from the panel on the left."));
         return;
       }
-      if (!shown.length) {
-        holder.append(emptyMessage(`Nothing inside matches “${search.value.trim()}”.`));
+      if (!shown.length && filter) {
+        holder.append(emptyMessage(`Nothing inside matches “${filter.term}”.`));
         return;
       }
       shown.forEach((child) => holder.append(childTile(child, box, ctx)));
@@ -5573,43 +5707,8 @@ const folderView = {
     };
     document.addEventListener(RELIST_EVENT, relist);
 
-    function paintHistory() {
-      datalist.replaceChildren();
-      options.history.forEach((entry) => {
-        const option = document.createElement("option");
-        option.value = entry;
-        datalist.append(option);
-      });
-    }
-
-    function rememberSearch() {
-      const term = search.value.trim();
-      if (!term) return;
-      const rest = options.history.filter(
-        (entry) => entry.toLowerCase() !== term.toLowerCase()
-      );
-      options.history = [term, ...rest].slice(0, FOLDER_HISTORY);
-      paintHistory();
-      // Saved without redrawing the pane: a redraw would rebuild this search box
-      // empty, and the term being typed would vanish under the fingers.
-      ctx.saveSection("folder", { history: options.history }, { rerender: false });
-    }
-
-    search.addEventListener("input", draw);
-    search.addEventListener("change", rememberSearch);
-    search.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        rememberSearch();
-      }
-      // Escape empties the box, which is the way out of a filter.
-      if (event.key === "Escape" && search.value) {
-        event.stopPropagation();
-        search.value = "";
-        draw();
-      }
-    });
-    paintHistory();
+    // The remembered-term list and the saving of a new one now live on the tag-line field, which is
+    // where the typing happens; `rememberFolderSearch` writes them into this box's config.
     draw();
 
     if (dynamic) {
@@ -6150,6 +6249,28 @@ const directoryView = {
     pane.className = "fs-pane";
     wrap.append(pane);
 
+    // What the tag-line field asked for, and which files the index says hold the words.
+    let filter = null;
+    if (ctx.filterSink) {
+      ctx.filterSink.handlers.add((term, hits) => {
+        if (!document.contains(wrap)) return; // replaced by a newer view
+        filter = term
+          ? { term: term.toLowerCase(), files: filesMatchedIn(box.uuid, hits) }
+          : null;
+        draw();
+      });
+    }
+
+    /** Whether one listing entry survives the filter. */
+    function entryShows(entry) {
+      if (!filter) return true;
+      if (entry.name.toLowerCase().includes(filter.term)) return true;
+      for (const found of filter.files) {
+        if (found === entry.sub || found === entry.name || found.endsWith(`/${entry.name}`)) return true;
+      }
+      return false;
+    }
+
     function drawBar(title, actions) {
       bar.replaceChildren();
       const label = document.createElement("span");
@@ -6259,13 +6380,19 @@ const directoryView = {
         nav.sub = "";
         draw();
       });
-      drawBar(`📁 ${payload.at}`, [up, root]);
+      const shown = payload.entries.filter(entryShows);
+      const tally = filter ? ` · ${shown.length} of ${payload.entries.length}` : "";
+      drawBar(`📁 ${payload.at}${tally}`, [up, root]);
       pane.replaceChildren();
       if (!payload.entries.length) {
         pane.append(emptyMessage("No files here."));
         return;
       }
-      payload.entries.forEach((entry) => {
+      if (!shown.length) {
+        pane.append(emptyMessage(`Nothing in this folder matches “${filter.term}”.`));
+        return;
+      }
+      shown.forEach((entry) => {
         const row = document.createElement("div");
         row.className = `fs-row ${entry.kind}`;
         row.dataset.sub = entry.sub;

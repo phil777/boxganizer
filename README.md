@@ -281,7 +281,7 @@ without reading it. ADR 19.
 
 **Every box can also search itself.** On the same line, the field sits on the left and the tags stay
 right of centre: type a word and a window unrolls underneath with everything matching anywhere below
-that box — its children, their children, and the words inside their files. It is the same search the
+that box, while the list or listing on screen closes down to the same answer — its children, their children, and the words inside their files. It is the same search the
 left pane runs, restricted to a set, so the ranking, the passage and the widening are identical and no
 file is re-read to answer (ADR 33). Each row says *via* which boxes you would reach the match, and a row
 that matched inside a file names the file. Where it opens depends on where you asked: from the library it

@@ -2275,32 +2275,73 @@ def test_a_folder_takes_a_box_dropped_from_the_panel(client: TestClient) -> None
     assert ".children-view.drop-target" in css
 
 
-def test_a_folder_filters_its_children_by_name_and_type(client: TestClient) -> None:
+def test_the_tag_line_field_narrows_the_folder_and_it_keeps_no_field_of_its_own(
+    client: TestClient,
+) -> None:
+    """One search field per box.
+
+    A folder used to carry its own "name or type" box while the tag line carried a field that jumped
+    to descendants: two fields on one box, both saying *search*, doing different things. The
+    tag-line field now does both, and a match is the library's scoped search — the child's own
+    fields *or* the words inside its files — not a substring of its name.
+
+    What the old field's tests guarded is guarded here instead: that narrowing happens, that it can
+    be undone, and that a match you cannot reach is not a filter but a dead end.
+    """
     script = client.get("/static/app.js").text
-    for needle in (
-        'search.className = "child-search"',
-        "function childMatches(child, term)",
-        'String(childKind.label || "").toLowerCase().includes(term)',
-        'search.addEventListener("input", draw);',
-    ):
-        assert needle in script, needle
-    assert ".child-search" in client.get("/static/app.css").text
+    css = client.get("/static/app.css").text
+
+    # gone, not hidden: no control, no rule styling it, no matcher left behind
+    assert ".child-search" not in css
+    assert 'search.className = "child-search"' not in script
+    assert "function childMatches(child, term)" not in script
+
+    folder = script[script.index("const folderView = {") : script.index("function childTile(")]
+    assert "ctx.filterSink.handlers.add((term, hits) =>" in folder
+    assert "filter = term ? { term, keep: visibleUnder(hits) } : null;" in folder
+    assert "children.filter((child) => filter.keep.has(child.uuid))" in folder
+    # a match three levels down stays reachable: the row above it is kept, never filtered away
+    assert "for (const step of (hit.route || []).slice(0, -1)) keep.add(step.uuid);" in folder
+    # a view that has been replaced stops answering, or a stale list would repaint over a new one
+    assert "if (!document.contains(wrap)) return;" in folder
+
+    widget = script[
+        script.index("function mountBoxSearch(") : script.index("async function renderTagLine(")
+    ]
+    assert "for (const handler of sink.handlers) handler(term, hits);" in widget
+    # emptying the field is the way out of a filter, and it says so with no window to paint
+    assert 'if (!term) emit("", null);' in widget
+
+    shell = script[script.index("function paneShell(node, shown, options = {})") :]
+    shell = shell[: shell.index("function renderNode(entry")]
+    assert "const filterSink = { handlers: new Set() };" in shell
+    assert "filterSink.handlers.clear();" in shell
 
 
-def test_a_search_starts_empty_and_its_history_is_kept_in_the_box(client: TestClient) -> None:
-    """The box is a look at the shelf; the list of things searched for is the memory."""
+def test_the_search_starts_empty_and_its_history_is_kept_in_the_box(client: TestClient) -> None:
+    """The field is typed into, never restored; what was searched for is remembered, in the box.
+
+    That memory predates the merge of the two fields and survives it unchanged: same config key,
+    same cap, still saved without a re-render, because a redraw would rebuild the field empty and
+    the term would vanish under the fingers of someone still typing it.
+    """
     script = client.get("/static/app.js").text
-    # the input is built with no value, so every opening starts clean
-    assert 'search.placeholder = "name or type";' in script
-    # nothing hands the input a saved value: the term is typed, never restored
-    assert "search.value = options." not in script
-    assert "search.value = saved" not in script
-    assert "search.value = folderOptions" not in script
-    # history: deduplicated, newest first, capped, saved into config.folder
+    widget = script[
+        script.index("function mountBoxSearch(") : script.index("async function renderTagLine(")
+    ]
+
+    # the box offers its past terms back; it never puts one in the field by itself
+    assert 'field.setAttribute("list", historyList.id);' in widget
+    assert "for (const entry of history.get() || [])" in widget
+    assert "const remember = () => {" in widget
+    assert "field.placeholder = `search inside ${ownerOf().name}`" in widget
+    assert "field.value = history" not in script
+    assert "field.value = options." not in script
+
     assert "const FOLDER_HISTORY = 8;" in script
-    assert "function rememberSearch()" in script
-    assert "options.history = [term, ...rest].slice(0, FOLDER_HISTORY);" in script
-    assert 'ctx.saveSection("folder", { history: options.history }, { rerender: false });' in script
+    assert "function rememberFolderSearch(box, term)" in script
+    assert "[clean, ...rest].slice(0, FOLDER_HISTORY)" in script
+    assert 'saveSectionFor(box, "folder", { history: next }, {}, { rerender: false });' in script
     # and saving it must not redraw the pane, which would clear the term mid-word
     assert "async function saveSection(section, patch, { rerender = true } = {})" in script
     assert "if (rerender) renderMain();" in script
@@ -4895,7 +4936,7 @@ def test_the_box_search_widget_is_one_function_mounted_per_line(client: TestClie
     script = client.get("/static/app.js").text
     css = client.get("/static/app.css").text
 
-    widget = script[script.index("function mountBoxSearch(mount, owner, open) {") :]
+    widget = script[script.index("function mountBoxSearch(mount, owner, open, options = {}) {") :]
     widget = widget[: widget.index("async function renderTagLine(")]
     # the scope is one argument on the search that already exists, read through a getter so a
     # pane's widget follows the pane as it walks deeper
