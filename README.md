@@ -181,6 +181,9 @@ box ls                                         # same command as `box list`
 box list
 box show Kitchen
 box add Invoice --type pdf -r /tmp/invoice.pdf --capture   # keep a copy, named by its sha256
+box check                                      # ...and what is waiting in the trash
+box trash list                                 # copies whose last box was deleted
+box trash empty --yes                          # the one command that really removes them
 box search cooking                           # names, fields, and what the files say
 box search "basement NOT pump"               # quotes and and/or/not are understood
 box index                                    # read every text and PDF file again

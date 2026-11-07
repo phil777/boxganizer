@@ -276,3 +276,170 @@ def _local_file(reference: str) -> Path:
     if not target.exists():
         raise CaptureError(f"there is nothing at {target} to capture")
     return target
+
+
+# -- retiring a captured copy -------------------------------------------------
+#
+# A captured file is the library's own, which raises a question the pointer boxes never
+# ask: what happens when the last box pointing at it is deleted? Deleting it would be the
+# one way Boxganizer destroys content nobody told it to destroy — a person deletes a box
+# on Tuesday and the copy they made on Monday is gone. Leaving it forever turns `files/`
+# into a graveyard with no way out. So it moves to a **trash folder beside `files/`**, at
+# the same bucket path it had, where it is still a file someone can find and move back —
+# and `box trash empty` is the single act that really removes it.
+
+TRASH_DIRECTORY = "trash"
+
+
+@dataclass(frozen=True)
+class Retirement:
+    """What retiring a captured file actually did, in words a front end can repeat."""
+
+    #: The file now sitting in the trash, when one was moved.
+    moved: Path | None
+    #: Why nothing moved: not the library's copy, or a name that no longer matches its bytes.
+    reason: str
+    #: Bytes involved, for the report.
+    size: int
+
+    @property
+    def happened(self) -> bool:
+        return self.moved is not None
+
+
+def trash_dir_for(db_path: str | Path, *, files_dir: Path | None = None) -> Path:
+    """`trash/` beside the library's `files/` — a sibling, so neither lives inside the other."""
+    own = files_dir or files_dir_for(db_path)
+    return own.parent / TRASH_DIRECTORY
+
+
+def retire(reference: str, *, files_dir: Path, trash_dir: Path) -> Retirement:
+    """Move a captured copy out of `files/` and into the trash, keeping its bucket path.
+
+    Call it only once the last box pointing at the file has gone. Two things are left exactly
+    where they are, and said why:
+
+    * a file that is **not** the library's copy — the ordinary case of a box pointing at
+      somebody's document. Deleting the card does not touch the document; that is the whole
+      design of the thing.
+    * a captured file whose **name no longer matches its bytes**, because somebody edited it
+      by hand. That file may now be the only copy of something, and moving it on the strength
+      of a name that lies is how a library loses a document twice.
+
+    A symlink is never followed and never moved: the trash must not become a route out of the
+    library's own directory.
+    """
+    raw = (reference or "").strip()
+    if not raw:
+        return Retirement(moved=None, reason="nothing to retire", size=0)
+    source = Path(raw)
+    if source.is_symlink():
+        return Retirement(moved=None, reason="a symlink was left where it is", size=0)
+    if not is_captured(source, files_dir=files_dir):
+        return Retirement(moved=None, reason="not a copy the library keeps", size=0)
+    if not source.exists():
+        return Retirement(moved=None, reason="the copy is already gone", size=0)
+    if not verify(source):
+        return Retirement(
+            moved=None,
+            size=_size(source),
+            reason=(
+                "was edited by hand, so it stays where it is — its name no longer says "
+                "what it holds"
+            ),
+        )
+
+    relative = source.resolve().relative_to(files_dir.resolve())
+    destination = trash_dir / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        chmod_owner_only(destination.parent)
+
+    if destination.exists():
+        # Same path, same name, so the same digest: these two files hold identical bytes. The one
+        # being retired is redundant and removing it loses nothing that is not provably elsewhere
+        # — but it is said out loud, because "a file disappeared" deserves a sentence.
+        source.unlink(missing_ok=True)
+        return Retirement(
+            moved=destination,
+            reason="already in the trash — the identical copy went away",
+            size=_size(destination),
+        )
+    try:
+        os.replace(source, destination)
+    except OSError as exc:
+        return Retirement(
+            moved=None, reason=f"could not be moved to the trash: {exc}", size=_size(source)
+        )
+    return Retirement(moved=destination, reason="moved to the trash", size=_size(destination))
+
+
+def listing(trash_dir: Path) -> tuple[int, int]:
+    """How many files the trash holds, and how many bytes. ``(0, 0)`` when there is no trash."""
+    if not trash_dir.exists():
+        return (0, 0)
+    files = [p for p in trash_dir.rglob("*") if p.is_file() and not p.is_symlink()]
+    return (len(files), sum(_size(p) for p in files))
+
+
+def empty(trash_dir: Path) -> tuple[int, int]:
+    """Really delete what is in the trash, and report how much went.
+
+    The only caller that should reach here is one that has been confirmed: this is where captured
+    content stops existing. Symlinks are unlinked and never followed, so a planted link cannot
+    make this reach outside the trash; directories come away bottom-up, and nothing above the
+    trash itself is touched.
+    """
+    if not trash_dir.exists():
+        return (0, 0)
+    count = 0
+    total = 0
+    for path in sorted(trash_dir.rglob("*"), reverse=True):
+        try:
+            if path.is_symlink():
+                path.unlink()
+                continue
+            if path.is_file():
+                total += _size(path)
+                path.unlink()
+                count += 1
+            elif path.is_dir():
+                path.rmdir()
+        except OSError:
+            continue  # already gone, or still open; the next pass will see it
+    return (count, total)
+
+
+def _size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return 0
+
+
+def retire_after_delete(
+    reference: str | None, *, db_path: str | Path, last_reference: bool
+) -> Retirement | None:
+    """Retire a captured copy on the delete path, or report why nothing moved.
+
+    Both front ends call this, so a box deleted from the page and a box deleted from the terminal
+    treat the library's files identically. It answers ``None`` when the question does not arise: the
+    box pointed at nothing, or at something the library does not own (an ordinary document, or a
+    note's own words file, which stays exactly where ADR 14 left it).
+
+    ``last_reference`` comes from the store: the same file can be held by several boxes, because a
+    captured copy is named for its content, and content can be pointed at twice. Only the last box
+    out puts the file in the trash; the others were never the only thing keeping it.
+    """
+    raw = (reference or "").strip()
+    if not raw:
+        return None
+    files_dir = files_dir_for(db_path)
+    if not is_captured(raw, files_dir=files_dir):
+        return None
+    trash_dir = trash_dir_for(db_path, files_dir=files_dir)
+    if not last_reference:
+        return Retirement(
+            moved=None, reason="another box still points at it", size=_size(Path(raw))
+        )
+    return retire(raw, files_dir=files_dir, trash_dir=trash_dir)

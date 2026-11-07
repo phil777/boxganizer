@@ -68,6 +68,15 @@ beside the database, named in the sentence you get back (ADR 14). The **root** i
 deletion, and the server refuses it in the same words if asked by another route: deleting it would
 leave nowhere to file anything. `box rm` asks the same question and answers with the same facts.
 
+If the box had **captured** a copy (ADR 35), what happens to that copy is decided by the server and
+reported back, because only it knows whether this was the last box pointing at it. The last one moves the
+copy to a `trash/` folder beside `files/`, at the same bucket path, where it can still be found and moved
+back; if another box still points at the same bytes, the copy stays exactly where it is and the message
+says so. A copy whose contents no longer match the hash in its name — edited by hand — is left alone and
+reported rather than moved, because it may be the only instance of something. Nothing is destroyed until
+`box trash empty` is confirmed, and `box check` counts what is waiting (ADR 36). A box that merely pointed
+at a document still leaves that document exactly where it was.
+
 **Every box has a search of its own**, on the tag line: the field sits on the left and the tags stay
 right of centre. It asks the library's existing full-text question restricted to that box and whatever
 is filed below it — same ranking, same passage, same widening, one extra set clause — so nothing is

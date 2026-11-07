@@ -366,6 +366,63 @@ tag_app = typer.Typer(
 )
 app.add_typer(tag_app, name="tag")
 
+trash_app = typer.Typer(
+    name="trash",
+    help="Captured copies whose box is gone. Nothing here is deleted until 'box trash empty'.",
+    no_args_is_help=True,
+)
+app.add_typer(trash_app, name="trash")
+
+
+@trash_app.command("list")
+def trash_list(ctx: typer.Context) -> None:
+    """Show the captured copies waiting in the trash.
+
+    A box that is deleted takes its links with it, and a copy it was the last to point at comes here
+    (ADR 36) rather than vanishing. This is the way to see what is waiting, so that "empty the
+    trash" can be a decision about named files instead of a guess about a directory.
+    """
+    with _open(ctx, _db_of(ctx)) as store:
+        where = capture.trash_dir_for(store.path)
+        count, total = capture.listing(where)
+    if not count:
+        say("trash", "empty")
+        return
+    say("trash", f"{count} file(s), {total} bytes, in {where}")
+    for path in sorted(p for p in where.rglob("*") if p.is_file()):
+        unwrapped(f"  {path.relative_to(where)}  {path.stat().st_size} bytes")
+    unwrapped("      remove for good: box trash empty --yes")
+
+
+@trash_app.command("empty")
+def trash_empty(
+    ctx: typer.Context,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Delete them without asking.")
+    ] = False,
+) -> None:
+    """Delete what is in the trash. This is the point where captured bytes stop existing.
+
+    Asked for by name first, unless `--yes`: the trash holds the library's only copy of things, and
+    a command whose spelling suggests tidying should not be the moment content is destroyed.
+    Symlinks are unlinked and never followed, so a planted link cannot turn this into an exit.
+    """
+    with _open(ctx, _db_of(ctx)) as store:
+        where = capture.trash_dir_for(store.path)
+        count, total = capture.listing(where)
+        if not count:
+            say("trash", "already empty")
+            return
+        if not yes:
+            for path in sorted(p for p in where.rglob("*") if p.is_file()):
+                unwrapped(f"  {path.relative_to(where)}  {path.stat().st_size} bytes")
+            if not typer.confirm(
+                f"delete {count} captured file(s) ({total} bytes) for good?"
+            ):
+                raise typer.Abort
+        removed, removed_bytes = capture.empty(where)
+    say("emptied", f"{removed} file(s), {removed_bytes} bytes", style="red")
+
 
 @tag_app.command("add")
 def tag_add(
@@ -790,12 +847,17 @@ def box_check(
     confine = paths.confine(root)
     with _open(ctx, _db_of(ctx)) as store:
         findings = checker.run(store, confine=confine)
+        # The trash is part of what a check owes you: copies the library still holds with no box
+        # pointing at them. Counted even when empty, because "0" is the answer to "is anything
+        # piling up in there?" and saying nothing is not.
+        trashed, trashed_bytes = capture.listing(capture.trash_dir_for(store.path))
         if as_json:
             print(
                 json.dumps(
                     {
                         "summary": checker.summary(findings),
                         "confine": str(confine) if confine else None,
+                        "trash": {"files": trashed, "bytes": trashed_bytes},
                         "findings": [item.as_dict() for item in findings],
                     },
                     indent=2,
@@ -813,6 +875,10 @@ def box_check(
             return
 
         say("checked", checker.summary(findings))
+        where = capture.trash_dir_for(store.path)
+        lit(f"  trash: {trashed} file(s)" + (f" in {where}" if trashed else ""))
+        if trashed:
+            unwrapped("      empty for good: box trash empty --yes")
         if not findings:
             return
         current = ""
@@ -867,11 +933,21 @@ def box_remove(
         if not yes and not typer.confirm(asks):
             raise typer.Abort
         gone = store.delete_box(doomed.uuid)
+        # Retired inside the same `with`, while the store still knows where its database is: a
+        # captured copy whose last box has gone moves to the trash beside `files/` (ADR 36).
+        # Anything the library does not own — an ordinary document, a note's own words — stays put.
+        retired = capture.retire_after_delete(
+            gone.box.resource_uri, db_path=store.path, last_reference=gone.resource_released
+        )
     say("deleted", gone.box.name, style="red")
     if gone.children:
         lit(f"  {gone.children} filed inside stay in the library, unfiled from {gone.box.name}")
     if gone.words_file:
         lit(f"  its own words are still in {gone.words_file}")
+    elif retired is not None and retired.moved is not None:
+        lit(f"  its copy is in the trash: {retired.moved} — 'box trash empty' removes it for good")
+    elif retired is not None:
+        lit(f"  its copy stays where it is: {retired.reason}")
     elif gone.box.resource_uri:
         lit(f"  the file it pointed at is untouched: {gone.box.resource_uri}")
 

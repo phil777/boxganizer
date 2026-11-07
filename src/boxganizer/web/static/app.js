@@ -2785,8 +2785,9 @@ function deleteMenuItem(box) {
 async function deleteBox(box) {
   const wasCurrent = state.current && state.current.uuid === box.uuid;
   const into = (state.current && state.current.parents ? state.current.parents : [])[0];
+  let report = null;
   try {
-    await api.deleteBox(box.uuid);
+    report = await api.deleteBox(box.uuid);
     await refreshSide();
     if (wasCurrent) {
       // A deleted box cannot stay the subject of the page; its own parent is the way back out, and
@@ -2800,13 +2801,19 @@ async function deleteBox(box) {
     } else {
       renderMain();
     }
-    // 204 says nothing, deliberately, so the page repeats the rule it stated when it asked, and names
-    // the file the box pointed at because the box object in hand already carries that path.
-    status(
-      box.resource_uri
-        ? `deleted ${box.name}; what was filed inside stays in the library, and ${box.resource_uri} was left alone`
-        : `deleted ${box.name}; what was filed inside stays in the library`,
-    );
+    // The server now says what became of the files, because only it knows whether this was the last
+    // box pointing at a captured copy and whether that copy still matches its own name. The page used
+    // to guess from the box in hand and announce that the path "was left alone" — true of a pointer
+    // and a note's words, and a lie the moment a capture was retired to the trash.
+    const kept = `deleted ${box.name}; what was filed inside stays in the library`;
+    const file = report && report.captured_file;
+    if (file && file.trashed) {
+      status(`${kept}; its copy went to the trash: ${file.path}`, true);
+    } else if (file) {
+      status(`${kept}; its copy stays where it is — ${file.reason}`, true);
+    } else {
+      status(box.resource_uri ? `${kept}, and ${box.resource_uri} was left alone` : kept);
+    }
   } catch (error) {
     status(error.message, true);
   }

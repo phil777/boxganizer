@@ -2517,18 +2517,46 @@ def create_app(
         _sync_index(request, saved)
         return saved.to_dict()
 
-    @app.delete("/api/boxes/{ref}", status_code=204)
-    def delete_box(ref: str, store: StoreDep) -> None:
-        """Delete one box, by name or uuid. Nothing comes back, because there is nothing to report.
+    @app.delete("/api/boxes/{ref}")
+    def delete_box(ref: str, store: StoreDep) -> dict[str, object]:
+        """Delete one box, by name or uuid, and say what became of its files.
 
         The links from it to what it held go with the row; the boxes inside stay in the library,
-        filed wherever else they were. A file it pointed at is left alone, and so is the words file
-        it wrote for itself — ADR 14, on purpose. The page states all of that *before* it asks (its
-        menu entry is armed by the first click), which is the moment a person can still change their
-        mind; a response body after the fact is not. Deleting the root is refused instead: it is
-        where everything else is filed, so there is nowhere to arrive at afterwards.
+        filed wherever else they were. A file it merely pointed at is left alone, as is the words
+        file it wrote for itself — ADR 14, on purpose. The page states all of that *before* it asks
+        (its menu entry is armed by the first click), which is the moment a person can still change
+        their mind.
+
+        What the page could not state beforehand is what happened to a **captured** copy, because
+        only the server knows whether this was the last box pointing at it, and whether the copy
+        still matches its own name. So this answers with a body now (it used to answer 204 and
+        nothing). A box that had captured its file moves that copy to the trash beside `files/`
+        (ADR 36), and a sentence saying so beats the page guessing from a box it just lost: the
+        message it used to print — "`<path>` was left alone" — was about to become a lie.
+
+        Deleting the root is refused instead: it is where everything else is filed, so there is
+        nowhere to arrive at afterwards.
         """
-        store.remove(store.resolve(ref).name)
+        deletion = store.delete_box(ref)
+        body: dict[str, object] = {
+            "deleted": deletion.box.to_dict(),
+            "children": deletion.children,
+            "parents": deletion.parents,
+            "words_file": str(deletion.words_file) if deletion.words_file else None,
+        }
+        retired = capture.retire_after_delete(
+            deletion.box.resource_uri,
+            db_path=store.path,
+            last_reference=deletion.resource_released,
+        )
+        if retired is not None:
+            body["captured_file"] = {
+                "path": str(retired.moved) if retired.moved else str(deletion.box.resource_uri),
+                "trashed": retired.moved is not None,
+                "reason": retired.reason,
+                "bytes": retired.size,
+            }
+        return body
 
     @app.post("/api/boxes/{ref}/children", status_code=201)
     def add_child(ref: str, payload: LinkCreate, store: StoreDep) -> dict[str, object]:

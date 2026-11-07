@@ -80,7 +80,12 @@ def test_read_unknown_box_is_not_found(client: TestClient) -> None:
 
 
 def test_delete_box(client: TestClient) -> None:
-    assert client.delete("/api/boxes/Books").status_code == 204
+    # 200 with a body now, not 204: only the server knows whether this was the last box pointing
+    # at a captured copy, and the page must report that instead of guessing (ADR 36).
+    gone = client.delete("/api/boxes/Books")
+    assert gone.status_code == 200
+    assert gone.json()["deleted"]["name"] == "Books"
+    assert "captured_file" not in gone.json(), "Books points at nothing the library owns"
     assert client.get("/api/boxes/Books").status_code == 404
 
 
@@ -345,7 +350,9 @@ def test_a_write_the_store_refuses_answers_in_words_not_a_500(
 
 def test_a_box_can_be_deleted_by_uuid(client: TestClient, populated: BoxStore) -> None:
     uuid = populated.get("Books").uuid
-    assert client.delete(f"/api/boxes/{uuid}").status_code == 204
+    deleted = client.delete(f"/api/boxes/{uuid}")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"]["uuid"] == uuid
     assert client.get(f"/api/boxes/{uuid}").status_code == 404
 
 
@@ -368,7 +375,11 @@ def test_deleting_a_box_takes_it_out_of_everything_that_listed_it(
     assert [m["name"] for m in client.get("/api/boxes/Tagged/filter").json()["members"]] == [
         "Passport"
     ]
-    assert client.delete(f"/api/boxes/{passport}").status_code == 204
+    answer = client.delete(f"/api/boxes/{passport}")
+    assert answer.status_code == 200
+    # a box pointing at someone else's document: the card goes, the document stays, and the body
+    # says so rather than letting the front end invent a sentence
+    assert "captured_file" not in answer.json()
 
     names = [box["name"] for box in client.get("/api/boxes").json()]
     assert "Passport" not in names

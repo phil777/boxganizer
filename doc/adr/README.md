@@ -64,3 +64,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0033   | A search inside a box is the same search with one set clause | accepted |
 | 0034   | One search field per box, and it filters what the box shows | accepted |
 | 0035   | A captured file is named by its own hash, so the copy is the record | accepted |
+| 0036   | A captured copy retires to a trash folder, and only the last box puts it there | accepted |
