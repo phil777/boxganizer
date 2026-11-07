@@ -180,6 +180,7 @@ box link "Kitchen" root                        # take the root's slot from cabin
 box ls                                         # same command as `box list`
 box list
 box show Kitchen
+box add Invoice --type pdf -r /tmp/invoice.pdf --capture   # keep a copy, named by its sha256
 box search cooking                           # names, fields, and what the files say
 box search "basement NOT pump"               # quotes and and/or/not are understood
 box index                                    # read every text and PDF file again
@@ -278,6 +279,13 @@ gets a coloured chip. A tag inherits the ones above it, so a box tagged `boiler`
 means moving the tag in ☰ **Manage tags…**, not editing the box. Colours are derived from a tag's
 place in the hierarchy — one hue per branch, lighter as it goes down — so the tree is visible
 without reading it. ADR 19.
+
+**A box can keep what it points at.** By default a box *points* — at a PDF, a photo, a folder — and the
+file stays wherever it is. Tick *Keep a copy in the library* (or pass `--capture`) and Boxganizer copies
+it beside the database instead, naming the copy by its own sha256 under two levels of hash buckets: the
+same bytes captured by fifty boxes are stored once, and the file's own name is a claim about its contents
+that can be checked later. A folder, a remote address, and a copy someone edited by hand are each refused
+with a sentence, and the box isn't created. ADR 35.
 
 **Every box can also search itself.** On the same line, the field sits on the left and the tags stay
 right of centre: type a word and a window unrolls underneath with everything matching anywhere below

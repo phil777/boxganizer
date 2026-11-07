@@ -41,7 +41,11 @@ finds boxes by their own fields and by the words inside their text and PDF files
 showing the passage that answered and what your words were widened to — and a main
 pane to show one box, **its content first**. **New box** opens a modal where you
 choose the type (the list is searchable, because there are 39 of them) and configure
-it. ☰ beside the name at the top of that panel is what belongs to the library rather than
+it. With a resource named, **Index content** decides whether the file is read into the
+full-text search, and **Keep a copy in the library** captures it — a copy beside the database,
+named by its sha256 and stored once however many boxes capture the same bytes (ADR 35). Both are
+off unless you say otherwise, and the capture box starts unticked every time the dialog opens, so
+an unrelated edit can't copy a file by accident. ☰ beside the name at the top of that panel is what belongs to the library rather than
 to one box: **About**, **Check the library**, and the two index passes. Along the bottom,
 in front of the box count, the index reports itself all the time — `75 indexed`, or `2 out
 of date`, or `reading 12 of 80…` — with the detail on hover, including which files hold nothing to

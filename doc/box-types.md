@@ -344,6 +344,18 @@ it is also what exempts the file from `$BOXGANIZER_CONTENT_ROOT`: the confine is
 which paths other people's boxes may open, and applying it to the library's own files would
 make every note unsearchable. ADR 14.
 
+A **captured** resource is the other kind of file the library owns. Pointing at a file is the norm; a
+box can instead ask for a copy, from the create dialog's or edit dialog's *Keep a copy in the library*
+checkbox or `box add --capture`. The copy goes to
+`<directory-of-the-database>/files/<h1h2>/<h3h4>/<sha256><original extension>`, where the name is the
+hash of the bytes it holds: capture the same content twice — from two different paths, under two
+different names — and it is stored once, with both boxes pointing at it. The extension is kept so type
+inference still works, and the two levels of two hex digits keep any one directory small. Because the
+name is a promise, the file can be checked against it, which is how a hand-edited copy is noticed
+(`capture` then refuses rather than writing over your work), and how deletion knows the file is the
+library's own. A folder, a remote address, a missing file and a tampered target are each refused with a
+sentence, and the box is not created. ADR 35; what happens to the copy when the box goes away is ADR 36.
+
 `vnc` holds no secret either, in the same way `ssh` holds none — and unlike `ssh`, it can
 still use one. `None` is chosen when the server will take it; VNC authentication when it will
 not, with the password taken from the field the panel shows or from the file named by

@@ -108,6 +108,13 @@
           <span>Index content</span>
         </label>
         <p id="nb-index-reason" class="muted index-reason"></p>
+        <!-- Capture is off by default and says what it does in the label itself: a box that quietly
+             swallowed copies of files into the library would surprise the person who only meant to
+             point at one. -->
+        <label class="index-choice">
+          <input id="nb-capture" type="checkbox" />
+          <span>Keep a copy in the library (by sha256, deduplicated)</span>
+        </label>
         <p id="nb-suggest" class="suggest" hidden></p>
         <label>Put it in
           <select id="nb-parent" name="parent"></select>
@@ -157,6 +164,10 @@
           <span>Index content</span>
         </label>
         <p id="eb-index-reason" class="muted index-reason"></p>
+        <label class="index-choice">
+          <input id="eb-capture" type="checkbox" />
+          <span>Keep a copy in the library (by sha256, deduplicated)</span>
+        </label>
         <div id="eb-config" class="config-fields"></div>
         <!-- A refusal belongs inside the dialog that caused it: the status bar behind this
              modal is not something a person reading the modal will ever see. -->

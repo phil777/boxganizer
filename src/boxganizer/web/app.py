@@ -26,6 +26,7 @@ from uuid import uuid4
 from boxganizer import (
     __version__,
     boxtypes,
+    capture,
     desktop,
     filters,
     fslist,
@@ -121,6 +122,11 @@ class BoxUpdate(BaseModel):
         description="Change whether this box's file is kept in the full-text index."
         " Omitted: leave the resource row as it is.",
     )
+    capture_resource: bool | None = Field(
+        default=None,
+        description="Capture the file this box points at: copy it beside the database and"
+        " repoint the box at the copy. Omitted or false: leave the address where it is.",
+    )
 
 
 class DesktopSpot(BaseModel):
@@ -157,6 +163,13 @@ class BoxCreate(BaseModel):
         description="Keep this box's file in the full-text index. Omitted: the default"
         " for what it points at — a text or PDF, and a local file whose ending says"
         " words, yes; anything else no.",
+    )
+    capture_resource: bool = Field(
+        default=False,
+        description="Copy the file into the library instead of only pointing at it. The copy"
+        " is named by its sha256 under files/<2 hex>/<2 hex>/, so the same bytes captured"
+        " twice are one file. Off by default: a box normally points, and a library that"
+        " quietly swallowed copies of the disk is not what a card index is for.",
     )
 
 
@@ -2408,13 +2421,20 @@ def create_app(
 
     @app.post("/api/boxes", status_code=201)
     def create_box(request: Request, payload: BoxCreate, store: StoreDep) -> dict[str, object]:
-        _refuse_out_of_range(request, payload.resource_uri)
+        resource_uri = payload.resource_uri
+        if payload.capture_resource:
+            # Captured *before* the range check, on purpose. A confine exists to stop the library
+            # wandering out onto the disk by itself (ADR 30); capture is a person naming one file
+            # and asking for a copy, and what the box ends up pointing at is inside the library.
+            # Refusing would remove the only deliberate way to bring an outside file in.
+            resource_uri = _capture_into_library(store, resource_uri)
+        _refuse_out_of_range(request, resource_uri)
         box = Box(
             name=payload.name,
             description=payload.description,
             icon=payload.icon or DEFAULT_ICON,
             box_type=payload.box_type,
-            resource_uri=payload.resource_uri,
+            resource_uri=resource_uri,
             metadata=payload.metadata,
             config=dict(payload.config),
         )
@@ -2478,6 +2498,10 @@ def create_app(
                 box.icon = value or boxtypes.get(box.box_type).icon or DEFAULT_ICON
             else:
                 setattr(box, field, value or None)
+        if payload.capture_resource:
+            # The same order as on create: copy first, then ask the confine about the address the
+            # box actually ends up holding, which is the library's own.
+            box.resource_uri = _capture_into_library(store, box.resource_uri)
         if str(box.resource_uri or "") != str(pointed_at_before or ""):
             # A box whose address did not move is not being pointed anywhere new, so editing its
             # name or its tags still works on a server that confines writes.
@@ -3152,6 +3176,28 @@ def _read_root(request: Request) -> Path | None:
     """
     confine = getattr(request.app.state, "content_root", None)
     return Path(confine) if confine is not None else None
+
+
+def _capture_into_library(store: BoxStore, reference: str | None) -> str:
+    """Copy what *reference* points at into the library, and return the address to store instead.
+
+    The library keeps its own files beside the database, bucketed by hash so one directory does not
+    end up holding everything (ADR 35). Identical bytes land on the same path, so capturing the same
+    file into two boxes costs one copy that both point at — which is also why deleting one of them
+    must not take the file with it.
+
+    A refusal comes back as 422 with the sentence from `capture`, because every reason a file cannot
+    be captured is something a person can act on: it is a folder, it is remote, it is not there, or
+    the library's own copy was edited by hand and will not be written over.
+    """
+    try:
+        result = capture.capture(reference or "", files_dir=capture.files_dir_for(store.path))
+        return result.reference
+    except capture.CaptureError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "capture_failed", "reason": str(exc)},
+        ) from exc
 
 
 def _refuse_out_of_range(request: Request, resource_uri: str | None) -> None:

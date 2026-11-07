@@ -30,6 +30,7 @@ from boxganizer import (
     __version__,
     bootstrap,
     boxtypes,
+    capture,
     config,
     editing,
     infer,
@@ -250,6 +251,15 @@ def box_add(
             "(-t pdf is still your call).",
         ),
     ] = False,
+    capture_resource: Annotated[
+        bool,
+        typer.Option(
+            "--capture",
+            help="Copy --resource into the library instead of only pointing at it. The copy is "
+            "named for its sha256 under files/<2 hex>/<2 hex>/, so the same bytes are kept once "
+            "however many boxes capture them. Off by default: a box normally only points.",
+        ),
+    ] = False,
 ) -> None:
     """Create a box."""
     # `-t` on the command line is a decision; the default is not. Only an
@@ -275,6 +285,20 @@ def box_add(
         thumbs.icon_from_resource(box)  # an image box is drawn as its own picture
     with _open(ctx, _db_of(ctx)) as store:
         container = _resolve_parent(store, box, parent=parent, no_parent=no_parent)
+        captured: capture.Capture | None = None
+        if capture_resource:
+            # Here rather than before the store opens, because the store's own path says where the
+            # library keeps its files. Capture reads a file the person named — which the confine
+            # allows, being about the library wandering, not about being asked (ADR 35) — and the
+            # box is then filed pointing inside the library.
+            try:
+                captured = capture.capture(
+                    box.resource_uri or "", files_dir=capture.files_dir_for(store.path)
+                )
+            except capture.CaptureError as exc:
+                _fail(str(exc))
+                raise typer.Exit(code=1) from exc
+            box.resource_uri = captured.reference
         saved = store.add(box)
         # Read into the full-text index now, so a text or PDF box is findable by what
         # it says without anyone remembering to rebuild.
@@ -283,6 +307,11 @@ def box_add(
             store.link(container, saved.name)
     note = f" in {container}" if container else ""
     say("added", f"{saved.icon} {saved.name} (#{saved.id}){note}")
+    if captured is not None:
+        # Where the copy went, and whether it was already there: a person who asked for a copy is
+        # owed the path of the copy, not just the name of the box that now holds it.
+        again = " — already in the library, same bytes" if captured.reused else ""
+        lit(f"  captured: {captured.path} ({captured.size} bytes){again}")
     if unread:
         lit(f"  note: not indexed for text — {unread}")
     if proposal is not None and saved.box_type != proposal.key:

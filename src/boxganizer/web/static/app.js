@@ -3055,6 +3055,7 @@ const EDIT_MODAL = {
   resource: "eb-resource",
   index: "eb-index",
   indexReason: "eb-index-reason",
+  capture: "eb-capture",
   suggest: "eb-suggest",
   resourceHint: "eb-resource-hint",
   metadata: "eb-metadata",
@@ -3147,6 +3148,10 @@ function openEditBoxModal(box) {
   el(EDIT_MODAL.type).value = box.box_type;
   renderConfigFields(EDIT_MODAL, box.config || {});
   el(EDIT_MODAL.suggest).hidden = true;
+  // Unticked every time this dialog opens. Capture is an act being requested, not a state the box
+  // carries, and the edit form is reused across boxes: a tick left over from the last one would make
+  // an unrelated edit — a rename, a description — silently copy this box's file into the library.
+  if (el(EDIT_MODAL.capture)) el(EDIT_MODAL.capture).checked = false;
   checkResourceType(EDIT_MODAL);
   // What the box's own resource row says is the starting answer — the suggestion endpoint
   // would only agree with it — and the sentence beside it says where the index stands
@@ -3177,6 +3182,11 @@ async function submitEditBox(event) {
     resource_uri: el(EDIT_MODAL.resource).value.trim() || null,
   };
   if (el(EDIT_MODAL.index)) payload.index_resource = el(EDIT_MODAL.index).checked;
+  // Only sent when ticked: an edit that did not ask for a copy must not make one, and `null` means
+  // "leave the address alone" on the way in. The box is never left half-done — the server copies
+  // before it writes, so a refusal (a folder, a remote address, a hand-edited copy in the store)
+  // changes nothing at all.
+  if (el(EDIT_MODAL.capture) && el(EDIT_MODAL.capture).checked) payload.capture_resource = true;
   // Merged over what the box already carries: the dialog shows the keys this type asks
   // for, and it must not quietly empty the ones it does not.
   const was = (state.editingBox && state.editingBox.metadata) || {};
@@ -3574,6 +3584,7 @@ async function submitNewBox(event) {
     cell: state.pendingCell || null,
     place: state.pendingPlace || null,
     index_resource: el("nb-index") ? el("nb-index").checked : null,
+    capture_resource: el("nb-capture") ? el("nb-capture").checked : false,
     metadata: collectMetadata(CREATE_MODAL),
     config: {},
   };
