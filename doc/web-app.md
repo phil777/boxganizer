@@ -36,6 +36,19 @@ panel — the last row of the table.
 
 ## How the page is put together
 
+**At the bottom of the left pane is a landing strip: drop resources here.** A file dragged onto it —
+from the desktop, a file manager, or out of a directory box — becomes a box: the type is guessed from the
+file, it is named after the object, and a copy is captured into the library (ADR 35), because a file
+dropped into a *library* is being filed, not merely shown. The strip is full width and about three lines
+tall on purpose: a target you have to aim at is one you stop using, and a file released beside it does
+nothing at all. It lights up only when the drag actually carries files — drag a **box** over it and it
+stays plain, because that is the list's business, not the strip's. Drop a file onto a folder instead and
+the same thing happens plus one link: the new box is filed inside that folder.
+
+Only a *drop* keeps a copy. The right-click "New box from this file" gesture makes the same box from the
+same inference and leaves the file where it is, because that gesture says *point at this*, and quietly
+duplicating it would surprise you.
+
 A left pane to search and pick — **Root** above it, the search field below, which
 finds boxes by their own fields and by the words inside their text and PDF files,
 showing the passage that answered and what your words were widened to — and a main

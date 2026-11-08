@@ -186,6 +186,27 @@ const api = {
       method: "DELETE",
     }),
   deleteBox: (ref) => request(`/api/boxes/${encodeURIComponent(ref)}`, { method: "DELETE" }),
+  // A dropped file's bytes, posted raw. Multipart would need another parser on the server for a
+  // payload that is already one opaque body with a name attached.
+  captureFile: (name, blob, parent = null) => {
+    const query = new URLSearchParams({ name });
+    if (parent) query.set("parent", parent);
+    return fetch(`/api/capture-file?${query.toString()}`, { method: "POST", body: blob }).then(
+      async (response) => {
+        if (!response.ok) {
+          let reason = `HTTP ${response.status}`;
+          try {
+            const detail = (await response.json()).detail;
+            reason = (detail && (detail.reason || detail.error)) || reason;
+          } catch {
+            /* an error page with no JSON body still deserves the status line */
+          }
+          throw new Error(reason);
+        }
+        return response.json();
+      }
+    );
+  },
   suggestType: (resourceUri, current) =>
     request(
       `/api/types/suggest?resource_uri=${encodeURIComponent(resourceUri)}&current=${encodeURIComponent(current || "box")}`
@@ -553,6 +574,43 @@ async function dropBox(event, ctx, targetUuid, { after = null, label = null } = 
     ctx.status(`cannot drop it here: ${error.message}`, true);
     return false;
   }
+}
+
+/**
+ * The landing strip at the bottom of the left pane, where files from outside the page are filed.
+ *
+ * It claims a drag only when the drag actually carries files (ADR 27's rule that a claimed drop is
+ * answered, and not answered twice, depends on zones being honest about what they take). Dropping a
+ * *box* here is deliberately not claimed: the list above is where boxes are filed, and a strip that
+ * said "drop resources here" and then did something else would be a lie with a highlight on it.
+ *
+ * The highlight itself is the page's to clear, not this element's — `clearDropZones()` runs on drop,
+ * dragend and a cancelled drag, so the outline cannot strand here when a drag dies halfway.
+ */
+function setupResourceDropZone() {
+  const zone = el("drop-resources");
+  if (!zone) return;
+  zone.addEventListener("dragover", (event) => {
+    if (!carriesResources(event)) return; // not ours: let the strip stay plain and the list take it
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    zone.classList.add("drop-target");
+    zone.classList.remove("drop-refused");
+  });
+  zone.addEventListener("dragleave", () => zone.classList.remove("drop-target", "drop-refused"));
+  zone.addEventListener("drop", async (event) => {
+    zone.classList.remove("drop-target", "drop-refused");
+    if (!carriesResources(event)) return;
+    // Claimed: the pane behind must not also answer it, which is how one gesture used to make two
+    // parents. A box filed once is a box; a box filed twice is a bug report.
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await ingestDroppedResources(event, null);
+    } catch (error) {
+      status(`could not take that file: ${error.message}`, true);
+    }
+  });
 }
 
 /* ------------------------------------------------------------ main pane ---- */
@@ -4254,6 +4312,7 @@ async function init() {
   wireIndexChoice("create", CREATE_MODAL);
   wireIndexChoice("edit", EDIT_MODAL);
   el("search").addEventListener("input", () => refreshSide());
+  setupResourceDropZone();
   el("search-form").addEventListener("submit", (event) => {
     event.preventDefault();
     refreshSide();
@@ -5668,6 +5727,14 @@ const folderView = {
       wrap.classList.remove("drop-target", "drop-refused");
       if (!canFile.ok) return; // the server would say the same thing; say it before the round trip
       event.preventDefault();
+      // A file dropped on this box becomes a captured box filed *here*, which is the same act as the
+      // landing strip in the left pane plus the filing the pointer happened to be over. A box dragged
+      // here is still just filed, and that is dropBox's business.
+      const filedFile = await ingestDroppedResources(event, box.uuid, ctx.status);
+      if (filedFile) {
+        ctx.reload();
+        return;
+      }
       const landed = await dropBox(event, ctx, box.uuid, { label: `filed in ${box.name}` });
       if (landed) ctx.reload();
     });
@@ -6245,7 +6312,7 @@ function readDraggedFile(event) {
  * omitted when the drop lands on the library list rather than on a box, which leaves the new
  * box in the cabinet and unfiled — the same thing typing a name in the side pane would do.
  */
-async function createBoxFromDraggedFile(payload, parent) {
+async function createBoxFromDraggedFile(payload, parent, { keep = false } = {}) {
   let type = "file";
   try {
     const suggested = await api.suggestType(payload.path);
@@ -6258,10 +6325,75 @@ async function createBoxFromDraggedFile(payload, parent) {
     box_type: type,
     resource_uri: payload.path,
     ...(parent ? { parent } : {}),
+    // Only a *drop* keeps a copy: the same inference reached from the right-click menu is "make a box
+    // out of this file", and quietly copying the file in that gesture would surprise the person who
+    // only meant to point at it.
+    ...(keep ? { capture_resource: true } : {}),
   });
   await refreshSide();
-  status(`made a ${type} box from ${payload.name}`);
+  status(
+    keep
+      ? `made a ${type} box from ${payload.name} and kept a copy in the library`
+      : `made a ${type} box from ${payload.name}`
+  );
   return made;
+}
+
+/**
+ * Whether a drag is carrying files to be filed, rather than a box being moved.
+ *
+ * The distinction decides whether a zone lights up at all. A strip that offers to "drop resources
+ * here" while a *box* is being dragged over it promises something it will not do, and the honest
+ * answer to a box dropped there is that the list above is where boxes are filed.
+ */
+function carriesResources(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer) return false;
+  if (transfer.files && transfer.files.length) return true;
+  const types = Array.from(transfer.types || []);
+  return types.includes(FILE_DRAG_TYPE);
+}
+
+/**
+ * Turn what was dropped into boxes: guess the type, capture the bytes, name it from the object.
+ *
+ * Two ways a file can arrive. From outside the page it comes as a `File` and no path — a browser will
+ * not say where anything on the disk is — so the bytes are posted and the server captures them into
+ * the library (ADR 35). From a directory box inside the page it arrives with a real path, and the
+ * server captures that file in place. Both end the same way: a box of the inferred type, pointing at
+ * the library's copy, filed in `parent` when the drop landed on a box rather than on the landing
+ * strip.
+ *
+ * Returns false when the drag held no files, so the caller can fall through to the ordinary
+ * box-being-filed handling instead of reporting nothing.
+ */
+async function ingestDroppedResources(event, parent, report = status) {
+  const transfer = event.dataTransfer;
+  if (!carriesResources(event)) return false;
+  const files = Array.from((transfer && transfer.files) || []);
+  if (!files.length) {
+    const payload = readDraggedFile(event);
+    if (!payload) return false;
+    await createBoxFromDraggedFile(payload, parent, { keep: true });
+    return true;
+  }
+  const made = [];
+  for (const file of files) {
+    try {
+      const answer = await api.captureFile(file.name, file, parent);
+      made.push(answer.box.name);
+    } catch (error) {
+      report(`could not capture ${file.name}: ${error.message}`, true);
+    }
+  }
+  if (!made.length) return true;
+  await refreshSide();
+  report(
+    `${made.length === 1 ? `captured ${made[0]}` : `captured ${made.length} files: ${made.join(", ")}`}${
+      parent ? " and filed it here" : ""
+    }`
+  );
+  return true;
 }
 
 /**

@@ -65,3 +65,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0034   | One search field per box, and it filters what the box shows | accepted |
 | 0035   | A captured file is named by its own hash, so the copy is the record | accepted |
 | 0036   | A captured copy retires to a trash folder, and only the last box puts it there | accepted |
+| 0037   | A dropped file arrives as bytes, so the page posts them and the server decides what it is | accepted |

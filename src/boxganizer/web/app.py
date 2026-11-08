@@ -2558,6 +2558,89 @@ def create_app(
             }
         return body
 
+    @app.post("/api/capture-file", status_code=201)
+    async def capture_file(
+        request: Request,
+        store: StoreDep,
+        name: Annotated[str, Query(min_length=1, max_length=240)],
+        parent: Annotated[str | None, Query(max_length=200)] = None,
+    ) -> dict[str, object]:
+        """Take a dropped file's bytes, capture them, and make the box the drop implied.
+
+        A file dragged in from outside the page arrives as bytes, not as a path: a browser will not
+        tell a web app where anything on the disk is. So the page posts the content, and the server
+        the only party that knows the library, the confine, and what a `.pdf` is — writes it to a
+        — writes it to a private temporary file, captures it like any other (ADR 35: named by its
+        sha256, in buckets, deduplicated), and files a new box pointing at the copy. Dropping a file
+        onto box A does the same and links the box into A.
+
+        Raw bytes rather than `multipart/form-data` on purpose: the multipart parser would be a
+        new dependency (`python-multipart`), and nothing here needs its framing: one file, one
+        name, one body. The size ceiling is the one this app already applies to reading a resource.
+
+        The dropped name is treated as data at every step: it becomes the box's name, and only its
+        extension is allowed to influence the stored filename (`capture.suffix_of` refuses all
+        but a short `.suffix`), so a name like `../../x.md` cannot steer a path.
+        """
+        body = await request.body()
+        if len(body) > MAX_RAW_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": "resource_too_large",
+                    "size": len(body),
+                    "limit": MAX_RAW_BYTES,
+                },
+            )
+        stem = Path(name).name
+        if not stem:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "bad_name", "reason": "the dropped object had no name"},
+            )
+
+        files_dir = capture.ensure_files_dir(capture.files_dir_for(store.path))
+        suffix = capture.suffix_of(stem)
+        temp = files_dir / f".upload-{uuid4().hex}{suffix}"
+        try:
+            temp.write_bytes(body)
+            got = capture.capture(str(temp), files_dir=files_dir)
+        except capture.CaptureError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "capture_failed", "reason": str(exc)}
+            ) from exc
+        finally:
+            temp.unlink(missing_ok=True)
+
+        box_name = stem[: 200 - len(suffix)] if suffix else stem[:200]
+        if suffix and box_name.lower().endswith(suffix.lower()):
+            box_name = box_name[: -len(suffix)]
+        box_type = boxtypes.DEFAULT_TYPE_KEY
+        proposal = infer.suggest(got.reference)
+        if proposal is not None:
+            box_type = proposal.key
+        box = Box(
+            name=box_name or stem,
+            box_type=box_type,
+            icon=DEFAULT_ICON,
+            resource_uri=got.reference,
+        )
+        boxtypes.adopt_type_icon(box)
+        thumbs.icon_from_resource(box)
+        saved = store.add(box, read_now=False)
+        _sync_index(request, saved)
+        filed_in: str | None = None
+        if parent:
+            container = store.resolve(parent)
+            store.link(container.uuid, saved.uuid)
+            filed_in = container.name
+        return {
+            "box": saved.to_dict(),
+            "captured": str(got.path),
+            "reused": got.reused,
+            "filed_in": filed_in,
+        }
+
     @app.post("/api/boxes/{ref}/children", status_code=201)
     def add_child(ref: str, payload: LinkCreate, store: StoreDep) -> dict[str, object]:
         """File a box here — and, with `move_from`, stop filing it somewhere else.

@@ -283,6 +283,12 @@ means moving the tag in ☰ **Manage tags…**, not editing the box. Colours are
 place in the hierarchy — one hue per branch, lighter as it goes down — so the tree is visible
 without reading it. ADR 19.
 
+**Files can be dropped in.** At the bottom of the left pane, a strip says *drop resources here*: release a
+file on it and a box appears, typed by inference, named after the file, with a copy captured into the
+library. Drop it on a folder instead and the new box is filed inside that folder too. A browser never tells
+the page where a file is, so the bytes go up and the server decides what the box is (ADR 37); the strip is
+three lines tall because a target you must aim at is one you stop using.
+
 **A box can keep what it points at.** By default a box *points* — at a PDF, a photo, a folder — and the
 file stays wherever it is. Tick *Keep a copy in the library* (or pass `--capture`) and Boxganizer copies
 it beside the database instead, naming the copy by its own sha256 under two levels of hash buckets: the

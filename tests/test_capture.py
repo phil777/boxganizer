@@ -510,3 +510,84 @@ def test_emptying_the_trash_never_follows_a_symlink_out(tmp_path: Path) -> None:
     assert not (trash / "ab" / "planted").exists()
     assert removed == 0, "a symlink is not a trashed copy; it is unlinked, not counted"
     store.close()  # type: ignore[attr-defined]
+
+
+# -- a file dropped from outside the page -------------------------------------
+
+
+def test_a_dropped_files_bytes_become_a_captured_box_of_the_guessed_type(api: object) -> None:
+    """A browser sends bytes and a name, never a path; the server decides what it is."""
+    body = b"# Dropped notes\n\nthe quokka was here\n"
+    answer = api.post(  # type: ignore[attr-defined]
+        "/api/capture-file", params={"name": "dropped-notes.md"}, content=body
+    )
+    assert answer.status_code == 201, answer.text
+    payload = answer.json()
+    box = payload["box"]
+
+    assert box["name"] == "dropped-notes"
+    assert box["box_type"] == "markdown", "the extension decides, the server infers"
+    digest = hashlib.sha256(body).hexdigest()
+    expected = api.files_dir / digest[:2] / digest[2:4] / f"{digest}.md"  # type: ignore[attr-defined]
+    assert box["resource_uri"] == str(expected)
+    assert expected.read_bytes() == body
+    assert payload["reused"] is False
+    assert payload["filed_in"] is None
+
+
+def test_the_same_bytes_dropped_twice_under_other_names_are_one_file(api: object) -> None:
+    first = api.post("/api/capture-file", params={"name": "one.md"}, content=b"shared bytes")  # type: ignore[attr-defined]
+    second = api.post(  # type: ignore[attr-defined]
+        "/api/capture-file", params={"name": "renamed.md"}, content=b"shared bytes"
+    )
+    assert first.status_code == second.status_code == 201
+    assert first.json()["box"]["resource_uri"] == second.json()["box"]["resource_uri"]
+    assert second.json()["reused"] is True
+    copies = [p for p in api.files_dir.rglob("*") if p.is_file()]  # type: ignore[attr-defined]
+    assert len(copies) == 1, "the bytes are stored once, however many boxes were made from them"
+
+
+def test_a_dropped_file_can_be_filed_into_the_box_it_was_dropped_on(
+    api: object, tmp_path: Path
+) -> None:
+    """The difference between the landing strip and a box's own zone is exactly one link."""
+    home = api.post("/api/boxes", json={"name": "Drop-Target", "box_type": "folder"}).json()  # type: ignore[attr-defined]
+    answer = api.post(  # type: ignore[attr-defined]
+        "/api/capture-file",
+        params={"name": "invoice.pdf", "parent": home["uuid"]},
+        content=b"%PDF-1.4 not really a pdf but bytes enough",
+    )
+    assert answer.status_code == 201, answer.text
+    assert answer.json()["filed_in"] == "Drop-Target"
+    kids = api.get(f"/api/boxes/{home['uuid']}/children").json()  # type: ignore[attr-defined]
+    assert [child["name"] for child in kids] == ["invoice"]
+
+
+def test_a_dropped_name_cannot_steel_a_path(api: object) -> None:
+    """`../../escape.md` is a name, not a directory to write in."""
+    body = b"tried to walk out"
+    answer = api.post(  # type: ignore[attr-defined]
+        "/api/capture-file", params={"name": "../../escape.md"}, content=body
+    )
+    assert answer.status_code == 201, answer.text
+    stored = Path(answer.json()["box"]["resource_uri"])
+    digest = hashlib.sha256(body).hexdigest()
+    assert stored.name == f"{digest}.md"
+    # two bucket levels deep, and still under the library's own directory: the name influenced the
+    # suffix and nothing else
+    files_dir = api.files_dir  # type: ignore[attr-defined]
+    assert stored.relative_to(files_dir).parts == (digest[:2], digest[2:4], f"{digest}.md")
+    # the basename is the name; the dots that pointed nowhere are dropped
+    assert answer.json()["box"]["name"] == "escape"
+
+
+def test_an_oversized_drop_is_refused_with_the_limit(api: object) -> None:
+    from boxganizer.web.app import MAX_RAW_BYTES
+
+    answer = api.post(  # type: ignore[attr-defined]
+        "/api/capture-file",
+        params={"name": "huge.bin"},
+        content=b"x" * (MAX_RAW_BYTES + 1024),
+    )
+    assert answer.status_code == 413
+    assert answer.json()["detail"]["limit"] == MAX_RAW_BYTES

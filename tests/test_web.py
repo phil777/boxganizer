@@ -4068,7 +4068,12 @@ def test_a_directory_box_opens_at_the_top_and_lets_a_file_be_dragged_out(
     assert 'event.dataTransfer.effectAllowed = "copy";' in script
     # the type is asked of the server, because that is where the inference lives
     assert "api.suggestType(payload.path)" in script
-    assert "async function createBoxFromDraggedFile(payload, parent)" in script
+    signature = "async function createBoxFromDraggedFile(payload, parent, { keep = false } = {})"
+    assert signature in script
+    # keeping a copy is the drop's decision, not the inference's: the menu that makes a box out of a
+    # file must not also copy it, or pointing at something silently duplicates it
+    assert "...(keep ? { capture_resource: true } : {})," in script
+    assert 'await createBoxFromDraggedFile(payload, parent, { keep: true });' in script
     assert "resource_uri: payload.path" in script
     # both drop targets: the box on screen, and the library itself
     pane = script[script.index("function wirePaneDrops") : script.index("async function init()")]
@@ -4997,3 +5002,58 @@ def test_the_box_search_widget_is_one_function_mounted_per_line(client: TestClie
     assert "searchSlot.remove(); // an empty pane has nothing to search inside yet" in pane
     assert ".box-search-results {" in css and "position: absolute;" in css
     assert ".tagline-search" in css
+
+
+def test_the_left_pane_lands_dropped_files_and_nobody_else_claims_them(
+    client: TestClient,
+) -> None:
+    """`drop resources here`: a strip at the bottom of the library list that makes boxes.
+
+    Two rules are what make the strip trustworthy rather than decoration, and both are pinned here
+    because both are invisible until they are broken:
+
+    * it claims a drag **only when the drag carries files**. A strip that lights up for a box being
+      moved promises a capture it will not perform, and the answer to a box dropped there is the
+      list above it;
+    * when it does claim, it **stops propagation**, so the pane behind does not answer the same drop
+      a second time — one gesture, one parent.
+    """
+    script = client.get("/static/app.js").text
+    page = client.get("/").text
+
+    assert 'id="drop-resources"' in page
+    assert "drop resources here" in page
+
+    gate = script[script.index("function carriesResources(event) {") :]
+    gate = gate[: gate.index("async function ingestDroppedResources(")]
+    assert "transfer.files && transfer.files.length" in gate
+    assert "types.includes(FILE_DRAG_TYPE)" in gate
+
+    zone = script[script.index("function setupResourceDropZone()") :]
+    zone = zone[: zone.index("const context = {")]
+    assert "if (!carriesResources(event)) return;" in zone, (
+        "a drag with no files leaves the strip plain — it does not offer what it will not do"
+    )
+    assert 'event.preventDefault();\n    event.stopPropagation();' in zone
+    assert "await ingestDroppedResources(event, null)" in zone
+
+    ingest = script[script.index("async function ingestDroppedResources(") :]
+    ingest = ingest[: ingest.index("A `directory` box, browsed for real")]
+    # the bytes go up; the page never learns, and never needs, where the file lives
+    assert "await api.captureFile(file.name, file, parent)" in ingest
+    assert "await createBoxFromDraggedFile(payload, parent, { keep: true });" in ingest
+    assert "return false;" in ingest, "no files means the caller keeps handling the drop"
+
+    # a file dropped on a box is filed there as well as captured — the same act plus one link
+    folder = script[script.index("const folderView = {") : script.index("function childTile(")]
+    assert "await ingestDroppedResources(event, box.uuid, ctx.status)" in folder
+    assert folder.index("ingestDroppedResources(event, box.uuid") < folder.index(
+        "await dropBox(event, ctx, box.uuid,"
+    ), "the file path is answered before the box-filing path is tried"
+
+    # raw bytes, not multipart: the server would need another parser for one opaque body
+    css = client.get("/static/app.css").text
+    assert ".drop-resources {" in css
+    assert ".drop-resources.drop-target {" in css
+    # three lines tall: a landing area you must aim at is one people stop using
+    assert "min-height: calc(3 * 1.35em + 1.1rem);" in css
