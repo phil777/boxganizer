@@ -322,8 +322,21 @@ def test_creating_inside_a_parent_by_uuid(client: TestClient, populated: BoxStor
 
 
 def test_creating_inside_an_unknown_parent_is_reported(client: TestClient) -> None:
+    """422, not 404, and in words.
+
+    This was a 404 while the handler answered every unresolvable reference the same way whatever
+    field it came from. A parent named in the *body* is content the route cannot process, not a
+    resource the URL failed to find, and the difference is what the status line is for: a person
+    reading 404 goes looking for a deleted box, and a person reading 422 looks at what they sent.
+    """
     response = client.post("/api/boxes", json={"name": "Orphan", "parent": "Ghost"})
-    assert response.status_code == 404
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["where"] == "body"
+    assert "Ghost" in detail["reason"]
+    assert "Orphan" not in [b["name"] for b in client.get("/api/boxes").json()], (
+        "the box was created anyway"
+    )
 
 
 def test_a_write_the_store_refuses_answers_in_words_not_a_500(
@@ -5213,3 +5226,271 @@ def test_a_dropped_link_is_filed_as_a_link_and_never_fetched(client: TestClient)
         "the cheap type test runs first: dragover fires at sixty hertz and the payload is only read"
         " when a drag could actually be a link"
     )
+
+
+def _grid(client: TestClient, name: str = "Refusal Board") -> dict[str, Any]:
+    """A grid to aim filing attempts at, created through the API like any other box."""
+    made = client.post(
+        "/api/boxes",
+        json={"name": name, "box_type": "grid", "config": {"rows": 3, "columns": 3}},
+    )
+    assert made.status_code == 201
+    return made.json()
+
+
+def test_an_unresolvable_child_is_refused_in_words_not_in_a_status_code(client: TestClient) -> None:
+    """The reported 404 was the server saying nothing at the moment it most needed to say something.
+
+    A grid drop posted an image's URL as a child reference. The answer was a bare `box_not_found`,
+    which reads as "you lost a box" when what happened was "you sent an address" — and the page had
+    no way to tell the person which. The status is now 422, because the route and its target both
+    exist and it is the request's content that cannot be processed; the body names the value, says
+    what shape it looks like, and says nothing changed.
+    """
+    grid = _grid(client)
+    url = "https://example.invalid/pictures/otter.png"
+
+    response = client.post(
+        f"/api/boxes/{grid['uuid']}/grid/place", json={"child": url, "cell": [0, 0]}
+    )
+
+    assert response.status_code == 422, "a bad body is not a missing resource"
+    detail = response.json()["detail"]
+    assert detail["error"] == "box_not_found", "the machine-readable code is kept for callers"
+    assert detail["where"] == "body", "the bad reference came from the payload, not the URL"
+    assert detail["shape"] == "address"
+    assert url in detail["reason"], "the refusal has to name the thing it turned down"
+    assert "address" in detail["reason"]
+    after = client.get(f"/api/boxes/{grid['uuid']}").json()
+    assert after["config"] == grid["config"], "a refusal must not even look at the layout"
+    # to the second: the create response carries microseconds and the read does not, so this is
+    # "no later write happened", not "byte-identical record"
+    assert after["updated_at"][:19] == grid["updated_at"][:19], (
+        "the box was written to by a request it refused"
+    )
+    assert client.get(f"/api/boxes/{grid['uuid']}/children").json() == []
+
+
+def test_every_shape_of_unresolvable_reference_gets_its_own_sentence(client: TestClient) -> None:
+    """Four kinds of nothing, four sentences. `box_not_found` is one sentence about nothing.
+
+    A stale tab, a captured file that was never captured, and a mistyped name all fail the same way
+    at the database and mean three different things to the person looking at the screen.
+    """
+    grid = _grid(client)
+    cases = {
+        "https://example.invalid/a.png": ("address", "address"),
+        "photo.png": ("file", "file name"),
+        "11111111-2222-3333-4444-555555555555": ("uuid", "deleted"),
+        "Kitchen Shelf Of Things": ("name", "no box named"),
+        "   ": ("empty", "no box was named"),
+    }
+    said: set[str] = set()
+    for value, (shape, phrase) in cases.items():
+        response = client.post(
+            f"/api/boxes/{grid['uuid']}/grid/place", json={"child": value, "cell": [1, 1]}
+        )
+        detail = response.json()["detail"]
+        assert response.status_code == 422
+        assert detail["shape"] == shape, f"{value!r} was sorted wrong"
+        assert phrase in detail["reason"], f"{shape} says the wrong thing: {detail['reason']}"
+        said.add(detail["reason"])
+    assert len(said) == len(cases), "one sentence for five different problems is the bug returning"
+
+
+def test_a_huge_dragged_payload_is_echoed_shortly(client: TestClient) -> None:
+    """A status line is one line. A drag can carry a 100 KB data URL, and it must not become one."""
+    grid = _grid(client)
+    response = client.post(
+        f"/api/boxes/{grid['uuid']}/grid/place",
+        json={"child": "data:image/png;base64," + "A" * 5000, "cell": [2, 2]},
+    )
+    reason = response.json()["detail"]["reason"]
+    assert len(reason) < 220, f"the refusal is {len(reason)} characters long"
+    assert "\n" not in reason
+
+
+def test_the_sibling_filing_routes_refuse_the_same_way(client: TestClient) -> None:
+    """One handler, so no route is left answering the old bare 404 by being forgotten."""
+    grid = _grid(client)
+    url = "https://example.invalid/a.png"
+    for path, body in (
+        ("/children", {"child": url}),
+        ("/grid/place", {"child": url, "cell": [0, 0]}),
+        ("/grid/unplace", {"child": url}),
+    ):
+        response = client.post(f"/api/boxes/{grid['uuid']}{path}", json=body)
+        assert response.status_code == 422, path
+        assert response.json()["detail"]["where"] == "body", path
+
+    desktop = client.post("/api/boxes", json={"name": "Surface", "box_type": "desktop"}).json()
+    client.post(f"/api/boxes/{desktop['uuid']}/children", json={"child": "Passport"})
+    response = client.post(
+        f"/api/boxes/{desktop['uuid']}/desktop/move", json={"child": url, "x": 9, "y": 9}
+    )
+    assert response.status_code == 422
+    assert "address" in response.json()["detail"]["reason"]
+
+
+def test_a_box_missing_from_the_url_is_still_a_404_and_now_says_so(client: TestClient) -> None:
+    """The box named by the URL is the addressed resource, and it is absent: that is a 404.
+
+    Only the body's shape moved to 422. HTTP's meanings survive the change, and the sentence is
+    added rather than substituted, so a caller keying off the code sees exactly what it saw before.
+    """
+    grid = _grid(client)
+    response = client.post(
+        "/api/boxes/Ghost/grid/place", json={"child": grid["name"], "cell": [0, 0]}
+    )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["where"] == "url"
+    assert detail["error"] == "box_not_found"
+    assert "Ghost" in detail["reason"]
+
+
+def test_a_route_that_does_not_exist_is_left_to_the_router(client: TestClient) -> None:
+    """`404` means no route matched. Nothing about a legible refusal may blur that.
+
+    The page turns the router's own body into "restart `box serve`" — a stale server is a different
+    emergency from a missing box, and it used to be the only thing this status could mean. Wrapping
+    every 404 in prose would send people reloading a server that is fine, or restarting one that is.
+    """
+    grid = _grid(client)
+    for response in (
+        client.post(f"/api/boxes/{grid['uuid']}/grid/placed", json={"child": "Passport"}),
+        client.get("/api/no/such/thing"),
+    ):
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Not Found"}, "the router's body stays recognisable"
+
+
+def test_filing_a_real_box_still_works(client: TestClient) -> None:
+    """The happy path is untouched: a real child by uuid is placed and filed as it always was."""
+    grid = _grid(client)
+    placed = client.post(
+        f"/api/boxes/{grid['uuid']}/grid/place", json={"child": "Passport", "cell": [0, 0]}
+    )
+    assert placed.status_code == 200
+    filed = client.post(f"/api/boxes/{grid['uuid']}/children", json={"child": "Books"})
+    assert filed.status_code == 201
+    assert {c["name"] for c in filed.json()["children"]} == {"Passport", "Books"}
+
+
+def test_the_page_only_ever_files_a_box_it_can_name(client: TestClient) -> None:
+    """The refusal added in this change is a backstop, because the page never sends a stray string.
+
+    Every filing call takes a reference that came from `draggedBoxRef` (a uuid dragged inside this
+    page, and nothing that looks like an address) or from a box the page just created. No call site
+    reads `dataTransfer` inline, which is how an image's URL reached `grid/place` in the first
+    place: the payload was treated as a reference because nothing asked what shape it was.
+    """
+    script = client.get("/static/app.js").text
+    filing = ("api.link(", "api.gridPlace(", "api.moveBox(", "api.linkViewport(")
+
+    offenders = []
+    for call in filing:
+        at = 0
+        while True:
+            at = script.find(call, at)
+            if at < 0:
+                break
+            args = script[at : at + 160].split(")", 1)[0]
+            if "getData(" in args or "dataTransfer" in args:
+                line = script.count("\n", 0, at) + 1
+                offenders.append(f"{call} at line {line}")
+            at += 1
+    assert not offenders, f"a filing call reads the drag directly: {offenders}"
+
+    # every local that reaches one of those calls is either the gated reference or a created box
+    for name in ("dragged", "boxRef"):
+        for assignment in (
+            f"const {name} = draggedBoxRef(event)",
+            f"let {name} = draggedBoxRef(event)",
+            f"const {{{name}}} =",
+        ):
+            if assignment in script:
+                break
+        else:
+            raise AssertionError(f"{name} is not sourced from the gate or from destructuring")
+
+    assert "const dragged = draggedBoxRef(event);" in script
+    assert "const boxRef = draggedBoxRef(event);" in script
+    assert "api.gridPlace(box.uuid, created.uuid, [row, column])," in script, (
+        "a placed file is placed by the uuid the create returned"
+    )
+
+
+def test_a_create_refused_after_the_layout_still_leaves_no_box(client: TestClient) -> None:
+    """A request for "a note in that grid at that cell" is one request, or it is nothing.
+
+    The cell check above stops the common case before the box exists. This is the rest: a placement
+    the pre-check cannot see, a grid with every cell taken, discovered only once there was a child
+    to hand to the layout layer. Half a create is the worst outcome on offer: a box the person did
+    not ask for, an error on the screen, and a cleanup only they can notice and perform.
+    """
+    # Two by two, so four occupants leave nowhere for a fifth to displace anybody into. The size
+    # lives under a `grid` section: a flat `rows` is read as an absent one and the default applies,
+    # which is exactly how this test first "failed" by succeeding.
+    made = client.post(
+        "/api/boxes",
+        json={
+            "name": "Full Board",
+            "box_type": "grid",
+            "config": {"grid": {"rows": 2, "columns": 2}},
+        },
+    )
+    assert made.status_code == 201
+    grid = made.json()
+    for row, column in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        filled = client.post(
+            "/api/boxes",
+            json={
+                "name": f"Filler {row}{column}",
+                "box_type": "note",
+                "text": f"occupant {row} {column}",
+                "parent": grid["name"],
+                "cell": [row, column],
+            },
+        )
+        assert filled.status_code == 201, filled.text
+
+    before = {b["name"] for b in client.get("/api/boxes").json()}
+    response = client.post(
+        "/api/boxes",
+        json={
+            "name": "Nowhere",
+            "box_type": "note",
+            "text": "unique text that must not be searchable",
+            "parent": grid["name"],
+            # in range, so the pre-check passes; occupied, and the grid has no free cell to move
+            # that occupant to -- only the placement itself can discover this
+            "cell": [0, 0],
+        },
+    )
+    assert response.status_code == 422
+    assert "full" in response.json()["detail"]["reason"]
+
+    assert {b["name"] for b in client.get("/api/boxes").json()} == before, "the box was left behind"
+    hits = client.get("/api/search", params={"q": "unique text that must not be searchable"}).json()
+    assert hits == [], f"the refused box is still in the index: {hits}"
+
+
+def test_a_cell_outside_the_grid_is_refused_before_any_box_exists(client: TestClient) -> None:
+    """The obvious case, refused before a byte is written, in the placement layer's own words."""
+    tight = client.post(
+        "/api/boxes",
+        json={
+            "name": "Tight Board",
+            "box_type": "grid",
+            "config": {"grid": {"rows": 2, "columns": 2}},
+        },
+    ).json()
+    before = {b["name"] for b in client.get("/api/boxes").json()}
+    response = client.post(
+        "/api/boxes",
+        json={"name": "Beyond", "box_type": "note", "parent": tight["name"], "cell": [99, 99]},
+    )
+    assert response.status_code == 422
+    assert "outside a grid" in response.json()["detail"]["reason"]
+    assert {b["name"] for b in client.get("/api/boxes").json()} == before

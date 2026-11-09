@@ -12,6 +12,7 @@ import contextlib
 import json
 import mimetypes
 import os
+import re
 import tarfile
 import threading
 import zipfile
@@ -20,7 +21,8 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
+from urllib.parse import unquote
 from uuid import uuid4
 
 from boxganizer import (
@@ -562,6 +564,75 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             store.close()
 
 
+_RefShape = Literal["empty", "uuid", "address", "file", "name"]
+
+_UUID_REF = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+)
+_MAX_ECHO = 120
+
+
+def _ref_shape(ref: str) -> _RefShape:
+    """Sort an unresolvable reference into the kind of thing it looks like.
+
+    The refusal has to guess intelligently, because the one word the server cannot know is what the
+    sender meant. It can, however, look at the string: a UUID is a box that used to be here, a URL
+    is a resource nobody captured, `photo.png` is a file that belongs in the drop strip, and
+    anything else is a name that does not match. Those four need four different sentences, and
+    `box_not_found` gives the reader none of them.
+    """
+    cleaned = ref.strip()
+    if not cleaned:
+        return "empty"
+    if _UUID_REF.fullmatch(cleaned):
+        return "uuid"
+    lowered = cleaned.lower()
+    if "://" in lowered or lowered.startswith("www."):
+        return "address"
+    if cleaned.startswith(("/", "~", "\\", "file:")):
+        return "address"
+    head, _, tail = cleaned.rpartition(".")
+    if head and tail and len(tail) <= 8 and tail.isalnum() and " " not in cleaned:
+        return "file"
+    return "name"
+
+
+def _echo(ref: str) -> str:
+    """Quote a value back at the person who sent it, flattened and shortened.
+
+    It is their own string, so showing it is how the message becomes checkable — but a drag payload
+    can be a data URL tens of kilobytes long, and one of those in a status line buries the sentence.
+    Newlines go because the status bar is one line.
+    """
+    flat = " ".join(ref.split())
+    if len(flat) > _MAX_ECHO:
+        flat = flat[: _MAX_ECHO - 1].rstrip() + "\u2026"
+    return flat
+
+
+def _unresolved_sentence(shape: _RefShape, ref: str) -> str:
+    """The words shown when a reference resolves to nothing: what was meant, and what to do."""
+    shown = _echo(ref)
+    if shape == "empty":
+        return "no box was named, so nothing was filed."
+    if shape == "address":
+        return (
+            f"{shown!r} is an address, not a box in this library. Capture the file, or make a link "
+            "box for it, and file that."
+        )
+    if shape == "file":
+        return (
+            f"{shown!r} looks like a file name. A file becomes a box through the drop strip or "
+            "\u201cnew box\u201d; it is not filed by name."
+        )
+    if shape == "uuid":
+        return (
+            f"no box with id {shown} is in this library. It was probably deleted, or this tab is "
+            "older than the server. Reload the page."
+        )
+    return f"no box named {shown!r} is in this library."
+
+
 def create_app(
     store: BoxStore | None = None,
     *,
@@ -632,9 +703,34 @@ def create_app(
 
     @app.exception_handler(BoxNotFound)
     async def _not_found(request: Request, exc: BoxNotFound) -> JSONResponse:
-        return JSONResponse(
-            status_code=404, content={"detail": {"error": "box_not_found", "name": exc.name}}
-        )
+        """Answer a reference that resolves to nothing with a sentence, not a bare status.
+
+        `404` used to come back for two completely different failures: the box named in the URL was
+        gone, and the box named in the *body* was never a box at all. The reported symptom was the
+        second kind — a grid drop posted an image's URL as a child reference and the page could only
+        say `box_not_found`, which reads as "you lost a box" when what happened is "you sent an
+        address". The page's gate stops that shape now; this is the backstop for whatever reaches
+        the server anyway, and it is where the words live, because a status code cannot name what
+        it rejected.
+
+        Statuses keep their meanings. A box named in the URL is the addressed resource and is
+        absent, so that stays `404`; a box named in the body is well-formed routing around content
+        that cannot be processed, so `422`. A path with no route at all never reaches this handler:
+        the router's own `Not Found` is what the page turns into "restart `box serve`", and that
+        distinction is why a legible refusal must not be dressed up as a 404 of its own.
+        """
+        ref = exc.name
+        shape = _ref_shape(ref)
+        in_url = ref in [unquote(part) for part in request.url.path.split("/")]
+        detail = {
+            "error": "box_not_found",
+            "name": ref,
+            # The page prefers `reason` over `error`, so this is what a person actually reads.
+            "reason": _unresolved_sentence(shape, ref),
+            "shape": shape,
+            "where": "url" if in_url else "body",
+        }
+        return JSONResponse(status_code=404 if in_url else 422, content={"detail": detail})
 
     @app.exception_handler(DuplicateBoxName)
     async def _duplicate(request: Request, exc: DuplicateBoxName) -> JSONResponse:
@@ -2421,6 +2517,27 @@ def create_app(
 
     @app.post("/api/boxes", status_code=201)
     def create_box(request: Request, payload: BoxCreate, store: StoreDep) -> dict[str, object]:
+        if payload.place is not None and not payload.parent:
+            # Decided before anything is written: a spot on a surface needs the surface, and finding
+            # that out afterwards would leave a box on the shelf and an error on the screen.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "place_without_parent",
+                    "reason": "a spot on the surface needs a surface to put it on",
+                },
+            )
+        # The parent is resolved first, and the box is not created unless it exists. This used to
+        # come after `store.add`, so a request to file inside a box that was not there answered an
+        # error *and* left the new box sitting at the top of the library: the person read "failed",
+        # retried, and collected orphans they had to notice and delete one by one. Nothing is
+        # captured, written or indexed until the whole request is known to be answerable.
+        parent_box = store.resolve(payload.parent) if payload.parent else None
+        if parent_box is not None and payload.cell is not None:
+            # Same predicate and same sentence the placement uses, asked here because a box created
+            # before the cell was checked is a box nobody asked for once the error arrives.
+            target = grid.parse_cell(payload.cell)
+            grid.ensure_fits(grid.size_of(parent_box.config), target)
         resource_uri = payload.resource_uri
         if payload.capture_resource:
             # Captured *before* the range check, on purpose. A confine exists to stop the library
@@ -2454,20 +2571,24 @@ def create_app(
         # what it says without anyone remembering to rebuild anything — but the reading happens in
         # the queue rather than inside this response.
         _sync_index(request, saved)
-        if payload.parent:
-            store.link(payload.parent, saved.uuid)
-            if payload.cell is not None:
-                _grid_place(store, payload.parent, saved.uuid, payload.cell)
-            elif payload.place is not None:
-                _desktop_place(store, payload.parent, saved.uuid, payload.place.x, payload.place.y)
-        elif payload.place is not None:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "place_without_parent",
-                    "reason": "a spot on the surface needs a surface to put it on",
-                },
-            )
+        if parent_box is not None:
+            try:
+                store.link(parent_box.uuid, saved.uuid)
+                if payload.cell is not None:
+                    _grid_place(store, parent_box.uuid, saved.uuid, payload.cell)
+                elif payload.place is not None:
+                    _desktop_place(
+                        store, parent_box.uuid, saved.uuid, payload.place.x, payload.place.y
+                    )
+            except Exception:
+                # The request was for one thing: "a note, in that grid, at that cell". A library
+                # holding the note and not the placement is not half a result, it is a stray box
+                # with an error on the screen, and the person has to notice it and clean it up
+                # themselves. Whatever the layout layer rejected, the box is taken back out and the
+                # refusal is handed on unchanged -- so a refused create leaves the library exactly
+                # as it was -- the promise a legible refusal is only worth making.
+                _undo_create(store, saved)
+                raise
         return saved.to_dict()
 
     @app.put("/api/boxes/{ref}")
@@ -2826,6 +2947,28 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _undo_create(store: BoxStore, created: Box) -> None:
+    """Take back a box whose create could not be finished, so a refusal changes nothing.
+
+    The delete is the same one the API performs, transaction and index rows included, and a file
+    this request captured retires to the trash as any released capture does (ADR 36). That leaves a
+    trashed file from a box that never appeared on screen, which is odd in a way worth naming: the
+    alternative is destroying bytes a person put on the server, and this library does not do that
+    even to its own mistakes. `box trash list` shows it, and it can be restored by hand.
+
+    A failure here is swallowed deliberately. The caller re-raises the refusal that started this,
+    and that is the message the person needs; a traceback about the cleanup would replace an
+    explanation of what went wrong with a second, louder problem.
+    """
+    with contextlib.suppress(Exception):
+        deletion = store.delete_box(created.uuid)
+        capture.retire_after_delete(
+            deletion.box.resource_uri,
+            db_path=store.path,
+            last_reference=deletion.resource_released,
+        )
 
 
 def _viewport_box(store: BoxStore, ref: str) -> Box:

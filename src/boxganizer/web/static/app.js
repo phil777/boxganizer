@@ -607,7 +607,11 @@ async function dropBox(event, ctx, targetUuid, { after = null, label = null } = 
     ctx.status(move ? "moved here; it is no longer filed where you dragged it from" : label || "filed here");
     return true;
   } catch (error) {
-    ctx.status(`cannot drop it here: ${error.message}`, true);
+    // A refusal from the server already names what it rejected and says nothing changed, so it is
+    // shown as it was written. Prefixing it with "cannot drop it here" buries the part that tells
+    // you whether to reload or go look for the box.
+    const sentence = error.detail && error.detail.reason;
+    ctx.status(sentence || `cannot drop it here: ${error.message}`, true);
     return false;
   }
 }

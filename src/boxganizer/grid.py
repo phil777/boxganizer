@@ -106,6 +106,19 @@ def cells_of(config: dict[str, Any] | None) -> dict[Cell, str]:
     return parse_cells(section.get("cells"))
 
 
+def ensure_fits(size: GridSize, cell: Cell) -> None:
+    """Refuse a cell outside the grid, in the words the API answers with.
+
+    Split out so a caller that has to decide *before* it can place — creating a box at a cell, where
+    there is no child to hand to :func:`place` yet — asks the same question with the same predicate
+    and the same sentence, rather than paraphrasing the rule and drifting from it.
+    """
+    if not size.contains(cell):
+        raise GridError(
+            f"cell {key(cell)} is outside a grid of {size.rows} rows and {size.columns} columns"
+        )
+
+
 def place(
     *,
     cells: dict[Cell, str],
@@ -122,10 +135,7 @@ def place(
     """
     if child_uuid not in known_children:
         raise GridError("that box is not one this grid can hold")
-    if not size.contains(cell):
-        raise GridError(
-            f"cell {key(cell)} is outside a grid of {size.rows} rows and {size.columns} columns"
-        )
+    ensure_fits(size, cell)
 
     placed = dict(cells)
     origin = next((existing for existing, uuid in placed.items() if uuid == child_uuid), None)
