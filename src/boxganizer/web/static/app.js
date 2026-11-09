@@ -613,6 +613,35 @@ function setupResourceDropZone() {
   });
 }
 
+/**
+ * The page-level safety net under every drop zone.
+ *
+ * A file released anywhere the page does not handle it is otherwise handled by the **browser**, which
+ * navigates to it: a new tab with the image in it, and this page — with whatever was being typed,
+ * filtered or half-edited — gone. That is a data-loss bug wearing a nice animation, so the page claims
+ * any file drag that reached it unhandled and cancels the default. Silently: a person who missed the
+ * target knows they missed it, and a message about the drop that did not happen would be describing the
+ * absence of an event they already noticed.
+ *
+ * Bubble phase, deliberately. Every zone that wants a drop calls `preventDefault()` and stops
+ * propagation, so what arrives here is by definition a drop nobody claimed. The `dragover` half exists
+ * because a browser only fires `drop` inside a target it allowed, and allowing it here costs nothing:
+ * no zone lights up from this listener, so the page never pretends to be a target it is not.
+ */
+function setupDropNavigationGuard() {
+  document.addEventListener("dragover", (event) => {
+    if (carriesFiles(event)) event.preventDefault();
+  });
+  document.addEventListener("drop", (event) => {
+    if (!carriesFiles(event) || event.defaultPrevented) return;
+    event.preventDefault(); // the browser would navigate; nothing here is filed and nothing is said
+  });
+  // A drop that lands inside a <form> would otherwise be read as a submit by some browsers.
+  document.addEventListener("dragend", (event) => {
+    if (carriesFiles(event)) clearDropZones();
+  });
+}
+
 /* ------------------------------------------------------------ main pane ---- */
 
 const context = {
@@ -4313,6 +4342,7 @@ async function init() {
   wireIndexChoice("edit", EDIT_MODAL);
   el("search").addEventListener("input", () => refreshSide());
   setupResourceDropZone();
+  setupDropNavigationGuard();
   el("search-form").addEventListener("submit", (event) => {
     event.preventDefault();
     refreshSide();
@@ -6340,7 +6370,34 @@ async function createBoxFromDraggedFile(payload, parent, { keep = false } = {}) 
 }
 
 /**
- * Whether a drag is carrying files to be filed, rather than a box being moved.
+ * Whether the drag carries a file from outside the page.
+ *
+ * `types` decides, not `files`. During `dragover` a browser reports `files` as **empty** for a drag
+ * that came from another window — the `File` objects are only handed over at the moment of the drop,
+ * with the paths withheld throughout — so a gate that looked at `files.length` would keep the strip
+ * dark for the exact gesture it exists for, and its `drop` handler would return before
+ * `preventDefault()` and let the browser do its default thing with an image: open it, in a new tab,
+ * taking the page with it. `"Files"` is present in `types` for the whole drag, which is the only
+ * honest signal available early enough to light a zone.
+ */
+function carriesFiles(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer) return false;
+  if (transfer.files && transfer.files.length) return true; // the drop itself, and in-page drags
+  return dragTypes(transfer).includes("Files");
+}
+
+/** `DataTransfer.types` is a frozen list in some browsers and a live one in others; copy it once. */
+function dragTypes(transfer) {
+  try {
+    return Array.from(transfer.types || []);
+  } catch {
+    return []; // a hostile or half-implemented transfer is simply not a file carrier
+  }
+}
+
+/**
+ * Whether a drag is carrying something to be filed, rather than a box being moved.
  *
  * The distinction decides whether a zone lights up at all. A strip that offers to "drop resources
  * here" while a *box* is being dragged over it promises something it will not do, and the honest
@@ -6349,9 +6406,8 @@ async function createBoxFromDraggedFile(payload, parent, { keep = false } = {}) 
 function carriesResources(event) {
   const transfer = event.dataTransfer;
   if (!transfer) return false;
-  if (transfer.files && transfer.files.length) return true;
-  const types = Array.from(transfer.types || []);
-  return types.includes(FILE_DRAG_TYPE);
+  if (carriesFiles(event)) return true;
+  return dragTypes(transfer).includes(FILE_DRAG_TYPE);
 }
 
 /**

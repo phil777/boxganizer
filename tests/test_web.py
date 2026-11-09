@@ -5026,8 +5026,8 @@ def test_the_left_pane_lands_dropped_files_and_nobody_else_claims_them(
 
     gate = script[script.index("function carriesResources(event) {") :]
     gate = gate[: gate.index("async function ingestDroppedResources(")]
-    assert "transfer.files && transfer.files.length" in gate
-    assert "types.includes(FILE_DRAG_TYPE)" in gate
+    assert "if (carriesFiles(event)) return true;" in gate
+    assert "dragTypes(transfer).includes(FILE_DRAG_TYPE)" in gate
 
     zone = script[script.index("function setupResourceDropZone()") :]
     zone = zone[: zone.index("const context = {")]
@@ -5057,3 +5057,40 @@ def test_the_left_pane_lands_dropped_files_and_nobody_else_claims_them(
     assert ".drop-resources.drop-target {" in css
     # three lines tall: a landing area you must aim at is one people stop using
     assert "min-height: calc(3 * 1.35em + 1.1rem);" in css
+
+
+def test_a_file_drag_is_recognised_before_the_browser_hands_over_the_bytes(
+    client: TestClient,
+) -> None:
+    """A zone must light up mid-drag, and `files` is empty mid-drag.
+
+    During a drag from another window a browser reports `dataTransfer.files` as empty and reveals
+    the `File` objects only at the drop — the gate deciding whether "drop resources here" turns red
+    has to read `types`. Reading `files.length` kept the strip dark for the one gesture it exists
+    for, and its drop handler returned before `preventDefault()`, so the browser did its default
+    thing with an image: opened it in a new tab and took the page with it.
+    """
+    script = client.get("/static/app.js").text
+
+    gate = script[script.index("function carriesFiles(event) {") :]
+    gate = gate[: gate.index("function dragTypes(transfer)")]
+    assert 'dragTypes(transfer).includes("Files")' in gate, (
+        "`types` decides, because `files` is empty until the moment of release"
+    )
+
+    resources = script[script.index("function carriesResources(event) {") :]
+    resources = resources[: resources.index("async function ingestDroppedResources(")]
+    assert "if (carriesFiles(event)) return true;" in resources
+    assert "dragTypes(transfer).includes(FILE_DRAG_TYPE)" in resources, (
+        "a file dragged out of a directory box is still a resource"
+    )
+
+    guard = script[script.index("function setupDropNavigationGuard()") :]
+    pane_rule = "/* ------------------------------------------------------------ main pane ---- */"
+    guard = guard[: guard.index(pane_rule)]
+    # bubble phase and `defaultPrevented`: a zone that claimed the drop must not be second-guessed
+    assert 'document.addEventListener("drop"' in guard
+    assert "if (!carriesFiles(event) || event.defaultPrevented) return;" in guard
+    assert "event.preventDefault(); // the browser would navigate" in guard
+    assert "clearDropZones();" in guard, "ADR 27 still owns the outline when a file drag ends"
+    assert "setupDropNavigationGuard();" in script, "the net is actually cast at startup"
