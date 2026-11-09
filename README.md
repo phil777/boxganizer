@@ -16,7 +16,8 @@ be using.
 What you end up with is a library you can do the four things a library has to support.
 
 * **Capture** it however it arrives: a file dropped on the page becomes a box typed to match
-  its contents, a note is a box, a photo is a box, a sensor reading is a box.
+  its contents, a link dropped on it becomes a box that points at the address and fetches nothing, a
+  note is a box, a photo is a box, a sensor reading is a box.
 * **Organise** it without choosing one scheme: a box can sit in several parents at once, so
   `Passport` can be under `Trip to Lisbon` and under `Identity` without either owning it.
   Tags add a hierarchy on top, and grids, desktops, checklists and mindmaps arrange the same
@@ -283,11 +284,20 @@ means moving the tag in ☰ **Manage tags…**, not editing the box. Colours are
 place in the hierarchy — one hue per branch, lighter as it goes down — so the tree is visible
 without reading it. ADR 19.
 
-**Files can be dropped in.** At the bottom of the left pane, a strip says *drop resources here*: release a
-file on it and a box appears, typed by inference, named after the file, with a copy captured into the
-library. Drop it on a folder instead and the new box is filed inside that folder too. A browser never tells
-the page where a file is, so the bytes go up and the server decides what the box is (ADR 37); the strip is
-three lines tall because a target you must aim at is one you stop using.
+**Files and links can be dropped in.** At the bottom of the left pane, a strip says *drop resources
+here*: release a file on it and a box appears, typed by inference, named after the file, with a copy
+captured into the library. Drop it on a folder, a grid cell, the desktop, a viewport pane or the
+library list and you get the same box *plus* the filing or placement you aimed at. A browser never
+tells the page where a file is, so the bytes go up and the server decides what the box is (ADR 37);
+the highlight is read from the drag's type list, because the file itself is withheld until you let go
+(ADR 38).
+
+Drag a **link** instead and it becomes a link box — named from the link text you selected, pointing at
+the address, with nothing fetched by the page or the server. A box that downloaded what it was shown
+would be a scraper with a search box, and would let any web page make your server visit machines only
+you can reach. A drag carrying both a picture and its URL takes the picture: you were filing it, not
+pointing at somebody else's copy. Miss every zone and nothing happens — a stray file drop is cancelled
+silently rather than opening in the browser and taking the tab's panes with it (ADR 38).
 
 **A box can keep what it points at.** By default a box *points* — at a PDF, a photo, a folder — and the
 file stays wherever it is. Tick *Keep a copy in the library* (or pass `--capture`) and Boxganizer copies

@@ -66,3 +66,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0035   | A captured file is named by its own hash, so the copy is the record | accepted |
 | 0036   | A captured copy retires to a trash folder, and only the last box puts it there | accepted |
 | 0037   | A dropped file arrives as bytes, so the page posts them and the server decides what it is | accepted |
+| 0038   | A drop zone promises only what it can finish, and an address is never a filing instruction | accepted |

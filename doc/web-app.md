@@ -40,14 +40,44 @@ panel — the last row of the table.
 from the desktop, a file manager, or out of a directory box — becomes a box: the type is guessed from the
 file, it is named after the object, and a copy is captured into the library (ADR 35), because a file
 dropped into a *library* is being filed, not merely shown. The strip is full width and about three lines
-tall on purpose: a target you have to aim at is one you stop using, and a file released beside it does
-nothing at all. It lights up only when the drag actually carries files — drag a **box** over it and it
-stays plain, because that is the list's business, not the strip's. Drop a file onto a folder instead and
-the same thing happens plus one link: the new box is filed inside that folder.
+tall on purpose: a target you have to aim at is one you stop using.
+
+It lights up for what it can finish, and that is not the same as what a drag looks like halfway
+through. A file dragged from another window exposes `Files` in its type list while **the file itself
+is still withheld until you let go**, so the highlight is decided from the type list, not from the
+file list — which is empty at exactly the moment you are deciding whether to drop (ADR 38). Drag a
+**box** over the strip and it stays plain, because that is the list's business, not the strip's.
+
+**Three payloads, three outcomes.** A **file** becomes a captured box, as above; drop it on a folder,
+a grid cell, the desktop, a viewport pane or the library list and the same happens *plus* the filing
+or placement you aimed at — the box is created first and then placed by the uuid the create returned,
+which is the only order in which placing it can mean anything. A **link** (a URL dragged out of a
+browser, with or without its title) becomes a link box pointing at that address: it is named from the
+link text you selected, or from the last part of the address, and **nothing is fetched** — not by the
+page, not by the server, which only ever stores the string you dropped. Boxganizer indexes things; it
+does not download what it is shown, and a dropped URL is the one thing a page could use to make a
+server visit machines only you can reach. A dropped link that is also carrying bytes takes the bytes:
+an image dragged off a page is you filing the picture, not a pointer to somebody else's copy. Drop
+the same link twice and you get two boxes, the second named `… 2`, because names are unique here and
+silently reusing the first would mean the drop did nothing.
+
+**Something that fits neither gets a sentence, not a shrug.** Drop a box where boxes are not accepted
+and the refusal says why; drop a file on the note editor or on a checklist line — which take boxes,
+not files, and would otherwise write a bare URL into your words or your attachments — and it tells you
+to use the strip and changes nothing at all. A reference the server cannot resolve answers in the same
+spirit: it names the value it turned down, says what it looked like (an address, a file name, an id
+that is no longer here, a name that never was), and says nothing changed. A create that cannot be
+finished leaves no half-finished box behind (ADR 38).
+
+**A stray drop cannot take the page away.** Release a file anywhere the app did not claim — a heading,
+a crumb, the gap between panes — and the browser's own behaviour (open the file, navigate away, lose
+the tab's panes and any unsaved editing) is cancelled quietly, with no message, because you were not
+aiming at the page and a red error for a miss you did not mean to make is noise. A drop that lands on
+a zone that *can* finish it is answered by that zone; this guard only ever sees the misses.
 
 Only a *drop* keeps a copy. The right-click "New box from this file" gesture makes the same box from the
 same inference and leaves the file where it is, because that gesture says *point at this*, and quietly
-duplicating it would surprise you.
+duplicating it would surprise you. A `dragover` writes nothing: a highlight is not a change.
 
 A left pane to search and pick — **Root** above it, the search field below, which
 finds boxes by their own fields and by the words inside their text and PDF files,
@@ -66,8 +96,10 @@ read. **Saving a box does not wait for its file to be read**: the rows are writt
 back, and the reading happens behind that line with a bar that counts **files**, so you can see how
 much of the folder you just pointed at has been gone through. Taking a box *out* of the index is
 immediate — a stale document staying findable is a wrong answer, not a slow one. A file the index
-refuses is named there rather than left as a stalled bar (ADR 32). A drop that no view claimed files the box into the box you are looking at, so the
-whole pane takes it. The outline that says *drop here* is the page's to take away, not the
+refuses is named there rather than left as a stalled bar (ADR 32). A **box** dropped where no view
+claimed it files into the box you are looking at, so the whole pane takes it; a **file** dropped where
+nothing claimed it is cancelled instead of opening in the browser, because what that navigation costs
+you is this tab (ADR 38). The outline that says *drop here* is the page's to take away, not the
 element's that drew it: a view that claims a drop stops the event, so the pane behind it is never
 told, and one drag cancelled with Escape never fires a drop at all. Every ending clears every zone
 (ADR 27), which is why a red outline no longer follows you into the next three boxes.

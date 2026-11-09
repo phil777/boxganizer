@@ -128,3 +128,36 @@ def test_the_readme_keeps_the_three_disclosures_at_the_top() -> None:
     assert opening[1] == "- *Warning*: access to web app = shell with web server uid"
     assert opening[2] == "- *Disclaimer*: Works-for-me^TM"
     assert opening[3] == ""
+
+
+def test_the_docs_answer_all_three_drop_questions() -> None:
+    """Drop a file, drop a link, drop something that is neither: the docs say what happens.
+
+    A drag is the one gesture whose outcome depends on a payload nobody can see, so the page's
+    promise has to be written down where a reader can check it before trying. This asserts the three
+    answers exist in both the tour and the reference, and that the ADR that made them is reachable —
+    the wording drifts otherwise, and the drift is invisible until someone drops an image and gets a
+    browser tab.
+    """
+    web_app = (ROOT / "doc" / "web-app.md").read_text(encoding="utf-8")
+    readme = README.read_text(encoding="utf-8")
+
+    for label, text in (("doc/web-app.md", web_app), ("README.md", readme)):
+        assert "link" in text.lower(), f"{label} never says what a dropped link does"
+        assert "nothing is fetched" in text.lower() or "fetches nothing" in text.lower(), (
+            f"{label} does not say the server stays away from a dropped address"
+        )
+        assert "captured" in text.lower(), f"{label} does not say a dropped file is captured"
+        assert "stray" in text.lower() or "Miss every zone" in text, (
+            f"{label} does not say what a drop that hits no zone does"
+        )
+
+    adr = ROOT / "doc" / "adr" / "0038-a-drop-zone-may-promise-only-what-it-can-finish.md"
+    assert adr.exists(), "ADR 38 is gone, and it is the only place the gate's reasoning lives"
+    body = adr.read_text(encoding="utf-8")
+    for heading in ("## Context", "## Decision", "## Consequences"):
+        assert heading in body, f"ADR 38 has no {heading}"
+    assert "types" in body and "preventDefault" in body, "ADR 38 lost the actual technical fork"
+    assert "0038" in (ROOT / "doc" / "adr" / "README.md").read_text(encoding="utf-8"), (
+        "ADR 38 is not in the index, so nobody finds it"
+    )
