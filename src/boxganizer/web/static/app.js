@@ -682,6 +682,40 @@ function setupDropNavigationGuard() {
   });
 }
 
+/**
+ * The library list itself, as a place a file can arrive.
+ *
+ * Not the pane around it: the list is what a person sees and aims at, so it is what lights. A file
+ * dropped here is made, captured, and left **unfiled** — the same outcome as typing a name into the
+ * list, which is the one place in this app that creates a box with no parent on purpose.
+ *
+ * `stopPropagation()` on the file branch matters: the pane behind this list answers drops too, and a
+ * file handled twice is a box captured twice under two names.
+ */
+function setupLibraryListFileDrop() {
+  const list = el("box-list");
+  if (!list) return;
+  list.addEventListener("dragover", (event) => {
+    if (!carriesResources(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    list.classList.add("drop-target");
+  });
+  list.addEventListener("dragleave", () => list.classList.remove("drop-target"));
+  list.addEventListener("drop", async (event) => {
+    list.classList.remove("drop-target");
+    if (!carriesResources(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await ingestDroppedResources(event, null, status);
+    } catch (error) {
+      status(`could not take that file: ${error.message}`, true);
+    }
+  });
+}
+
 /* ------------------------------------------------------------ main pane ---- */
 
 const context = {
@@ -4397,6 +4431,7 @@ async function init() {
   wireIndexChoice("edit", EDIT_MODAL);
   el("search").addEventListener("input", () => refreshSide());
   setupResourceDropZone();
+  setupLibraryListFileDrop();
   setupDropNavigationGuard();
   el("search-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -4480,13 +4515,18 @@ async function init() {
   wirePaneMenu();
   // Dropping on the library list means "into the library", not "into this box": the box is made
   // and left unfiled, which is where a box belongs when nobody chose a home for it.
+  // The whole left pane, and deliberately still only for the app's own in-page file marker.
+  //
+  // A first attempt here widened this to every file drag, which meant the *pane* — brand, search
+  // field, buttons, the index line — began capturing files it never advertised. Two things were wrong
+  // with that: the strip exists precisely because it is the named, full-width, highlighted place a file
+  // goes, and a region twice the height of the screen that swallows a drop without painting anything is
+  // the inverse of the honest-target rule rather than an instance of it. Files that miss the strip and
+  // miss the list miss the app, and the document guard cancels them quietly.
   const sideList = el("side");
   sideList.addEventListener("dragover", (event) => {
-    // The list takes a *file* drop as an unfiled box, so it must light for one. This used to look only
-    // for the in-page marker, which is the same mistake the landing strip made: a drag from outside
-    // carries `Files` in `types` and no marker, so the list stayed dark while accepting the drop —
-    // a target that works but does not say so is a target people stop trying.
-    if (!carriesResources(event)) return;
+    const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
+    if (!types.includes(FILE_DRAG_TYPE)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
     sideList.classList.add("drop-target");
@@ -4504,10 +4544,6 @@ async function init() {
       }
       return;
     }
-    // Files belong here too: dropped on the list rather than on a box, they are made and captured
-    // but left unfiled, which is the same thing typing a name into the list does.
-    const landedFile = await ingestDroppedResources(event, null, status);
-    if (landedFile) return;
     // A box dropped back on the list is not a filing: every box is already in the list, so there
     // is nothing to copy a link into. Shift is the gesture with a meaning here — "take it out of
     // the box I dragged it from" — and without Shift the drop changes nothing, which is the only

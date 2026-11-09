@@ -5150,11 +5150,13 @@ def test_a_dragged_payload_is_only_a_filing_instruction_when_it_names_a_box(
         "a grid drop that files before it makes the box is the 404 this replaced"
     )
 
-    # the library list lights for a file drop too, because it takes one (unfiled)
-    side = script[script.index('sideList.addEventListener("dragover"') :]
-    side = side[: side.index('sideList.addEventListener("dragleave"')]
-    assert "if (!carriesResources(event)) return;" in side
+    # A file dropped on the library list is taken (made, captured, left unfiled) and the list lights
+    # for it. Retargeted by the task-6 re-run: this first shipped on the *pane* around the list,
+    # where the class matched no CSS rule, so the pane captured files while nothing on screen said
+    # so. See
+    # `test_only_the_strip_and_the_list_claim_a_dropped_file`.
     assert "#box-list.drop-target" in client.get("/static/app.css").text
+    assert "function setupLibraryListFileDrop()" in script
 
     # the two zones that refuse must say so through the reporter, not through a name they shadow
     said = script.index("a dropped file is not an attachment")
@@ -5494,3 +5496,43 @@ def test_a_cell_outside_the_grid_is_refused_before_any_box_exists(client: TestCl
     assert response.status_code == 422
     assert "outside a grid" in response.json()["detail"]["reason"]
     assert {b["name"] for b in client.get("/api/boxes").json()} == before
+
+
+def test_only_the_strip_and_the_list_claim_a_dropped_file(client: TestClient) -> None:
+    """A region that captures without painting anything is the dishonest target, inverted.
+
+    The strip is the named place a file goes and the list is what a person aims at; both light. The
+    pane around them is roughly the height of the screen and covers the brand, the search field, the
+    buttons and the index line. Widening its gate to every file drag made all of that swallow files
+    silently -- the class went on `#side`, the CSS rule was written for `#box-list`, and the page
+    captured a file it had never advertised taking. The measurement that missed it looked for
+    `.drop-target` with `closest()`, which is satisfied by an ancestor: it proved the class existed
+    and said nothing about whether anything changed on screen.
+    """
+    script = client.get("/static/app.js").text
+
+    pane = script[script.index('const sideList = el("side");') :]
+    pane_dragover = pane[: pane.index('sideList.addEventListener("drop"')]
+    assert 'if (!types.includes(FILE_DRAG_TYPE)) return;' in pane_dragover, (
+        "the pane's gate must stay narrow; `carriesResources` here re-creates the invisible target"
+    )
+    assert "carriesResources" not in pane_dragover
+
+    list_drop = script[script.index("function setupLibraryListFileDrop()") :]
+    drop_at = list_drop.index('list.addEventListener("drop"')
+    list_drop = list_drop[: list_drop.index("\n}\n", drop_at)]
+    assert 'const list = el("box-list");' in list_drop, (
+        "the file target is the list the person sees, not the pane wrapped around it"
+    )
+    assert "list.classList.add(\"drop-target\")" in list_drop.replace("'", '"')
+    assert "event.stopPropagation();" in list_drop, (
+        "the pane behind answers drops too, and a file handled twice is captured twice"
+    )
+    assert "setupLibraryListFileDrop();" in script, "registered or not, that is"
+
+    # and the rule that paints it has to be written for the element that gets the class
+    css = client.get("/static/app.css").text
+    assert "#box-list.drop-target" in css
+    assert "#side.drop-target" not in css.replace("#box-list", ""), (
+        "a class on the pane with no rule behind it is the failure this test exists for"
+    )
