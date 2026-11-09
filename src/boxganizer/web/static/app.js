@@ -557,8 +557,44 @@ function relistFilteredFolders() {
   document.dispatchEvent(new CustomEvent(RELIST_EVENT));
 }
 
+/**
+ * The box a drag is carrying, or null when it is not carrying one.
+ *
+ * Every container used to read `text/plain` and trust it. A browser fills that field with the **URL of
+ * an image dragged out of a web page**, so a file drop reached `grid/place` as a child reference and the
+ * server answered 404; the note editor wrote the URL into the note as though it were a uuid, and a
+ * checklist line filed it as an attachment. None of those were filing instructions: a payload that
+ * addresses a resource is a resource, and a payload that addresses nothing is nothing.
+ *
+ * What is still allowed through is a bare uuid or name, unverified. This is not a whitelist — the page
+ * cannot know every box while a search has the list narrowed — it is a shape test on the payloads that
+ * are definitely not boxes, and anything odder than that is settled by the server, which now answers
+ * with a sentence rather than a bare 404.
+ */
+function draggedBoxRef(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer) return null;
+  if (carriesFiles(event)) return null;
+  if (dragTypes(transfer).includes(FILE_DRAG_TYPE)) return null;
+  const ref = (transfer.getData("text/plain") || "").trim();
+  if (!ref) return null;
+  if (looksLikeAResource(ref)) return null;
+  return ref;
+}
+
+/** Does this string address a thing somewhere, rather than name a box here? */
+function looksLikeAResource(ref) {
+  const lower = ref.toLowerCase();
+  return (
+    /^[a-z][a-z0-9+.-]*:\/\//.test(lower) || // http:, file:, ftp:, ssh: — any scheme is an address
+    lower.startsWith("www.") ||
+    ref.startsWith("/") || // an absolute path: a file, not a filing instruction
+    /\.(png|jpe?g|gif|webp|svg|pdf|md|txt|csv|json|zip|mp4|mov|html?)$/i.test(ref)
+  );
+}
+
 async function dropBox(event, ctx, targetUuid, { after = null, label = null } = {}) {
-  const dragged = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
+  const dragged = draggedBoxRef(event);
   if (!dragged || dragged === targetUuid) return false;
   const from = event.dataTransfer ? event.dataTransfer.getData("application/x-boxganizer-from") : "";
   const move = Boolean(event.shiftKey && from && from !== targetUuid);
@@ -1088,7 +1124,22 @@ const viewportView = {
         // box, so one gesture produced two parents and the person watching saw a box appear where
         // they had not put it. Same convention as the root view's holder and the canvas pane.
         if (event.defaultPrevented) return;
-        const dragged = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
+        // A file dropped on the pane's own space — not on a view that claimed it — is made, captured,
+        // filed in the viewport box and opened here: the pane is a place a thing can land, and the box
+        // that owns the space is what should hold it.
+        if (carriesResources(event)) {
+          event.preventDefault();
+          event.stopPropagation();
+          const made = await ingestDroppedResources(event, box.uuid, ctx.status);
+          if (made && made.length) {
+            apply(await api.viewportAction(box.uuid, "open", { node, child: made[0].uuid }));
+            paint();
+            return;
+          }
+          paint();
+          return;
+        }
+        const dragged = draggedBoxRef(event);
         if (!dragged) return;
         event.preventDefault();
         event.stopPropagation();
@@ -4427,8 +4478,11 @@ async function init() {
   // and left unfiled, which is where a box belongs when nobody chose a home for it.
   const sideList = el("side");
   sideList.addEventListener("dragover", (event) => {
-    const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
-    if (!types.includes(FILE_DRAG_TYPE)) return;
+    // The list takes a *file* drop as an unfiled box, so it must light for one. This used to look only
+    // for the in-page marker, which is the same mistake the landing strip made: a drag from outside
+    // carries `Files` in `types` and no marker, so the list stayed dark while accepting the drop —
+    // a target that works but does not say so is a target people stop trying.
+    if (!carriesResources(event)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
     sideList.classList.add("drop-target");
@@ -4446,11 +4500,15 @@ async function init() {
       }
       return;
     }
+    // Files belong here too: dropped on the list rather than on a box, they are made and captured
+    // but left unfiled, which is the same thing typing a name into the list does.
+    const landedFile = await ingestDroppedResources(event, null, status);
+    if (landedFile) return;
     // A box dropped back on the list is not a filing: every box is already in the list, so there
     // is nothing to copy a link into. Shift is the gesture with a meaning here — "take it out of
     // the box I dragged it from" — and without Shift the drop changes nothing, which is the only
     // answer that cannot lose somebody's filing.
-    const uuid = event.dataTransfer ? event.dataTransfer.getData("text/plain") : "";
+    const uuid = draggedBoxRef(event);
     const from = event.dataTransfer ? event.dataTransfer.getData("application/x-boxganizer-from") : "";
     if (!uuid || !event.shiftKey || !from) {
       if (uuid) status(uuid && from ? "it is still filed where it was; hold Shift to take it out" : "");
@@ -4909,8 +4967,22 @@ function gridCell(box, ctx, row, column, child, depth) {
   cell.addEventListener("drop", async (event) => {
     event.preventDefault();
     cell.classList.remove("drop-target");
+    // Read before anything is awaited: a browser may revoke the transfer once the event has been
+    // dealt with, and a placement that arrives with an empty reference is worse than no placement.
+    const boxRef = draggedBoxRef(event);
+    // A file dropped into a cell becomes a box, and *then* takes the cell. This used to file whatever
+    // `text/plain` held and post that same string to `grid/place` — but a browser puts an image's URL
+    // in that field, so the server was asked to place a box that has never existed, answered 404, and
+    // the cell had already looked like it accepted the drop.
+    const made = await ingestDroppedResources(event, box.uuid, ctx.status, {
+      cell: (created) => api.gridPlace(box.uuid, created.uuid, [row, column]),
+    });
+    if (made && made.length) {
+      ctx.reload();
+      return;
+    }
     const placed = await dropBox(event, ctx, box.uuid, {
-      after: () => api.gridPlace(box.uuid, event.dataTransfer.getData("text/plain"), [row, column]),
+      after: () => (boxRef ? api.gridPlace(box.uuid, boxRef, [row, column]) : Promise.resolve()),
     });
     if (placed) ctx.reload();
   });
@@ -5149,24 +5221,30 @@ registerView("desktop", {
     surface.addEventListener("drop", async (event) => {
       event.preventDefault();
       surface.classList.remove("drop-target");
-      const dragged = event.dataTransfer.getData("text/plain");
+      const frame = surface.getBoundingClientRect();
+      // The rect is the scaled box; the position the server keeps is in canvas
+      // pixels, so the pointer's distance from the corner is divided back out.
+      const scale = surfaceScale(surface);
+      const atX = (event.clientX - frame.left) / scale;
+      const atY = (event.clientY - frame.top) / scale;
+      // A file dropped on the desktop becomes a captured box and takes the spot under the pointer,
+      // which is what the icon under the cursor promises. The box has to exist before it can be put
+      // anywhere, so the making runs first and the placement gets a real uuid.
+      const made = await ingestDroppedResources(event, box.uuid, ctx.status, {
+        cell: (created) => placeOnDesktop(box, ctx, created.uuid, atX, atY),
+      });
+      if (made && made.length) {
+        ctx.reload();
+        return;
+      }
+      const dragged = draggedBoxRef(event);
       if (!dragged) return;
       if (event.shiftKey) {
         // A move is filed first, so the tile that appears under the pointer is the box's only copy
         const from = event.dataTransfer.getData("application/x-boxganizer-from");
         if (from && from !== box.uuid) await api.link(box.uuid, dragged, from);
       }
-      const frame = surface.getBoundingClientRect();
-      // The rect is the scaled box; the position the server keeps is in canvas
-      // pixels, so the pointer's distance from the corner is divided back out.
-      const scale = surfaceScale(surface);
-      const placed = await placeOnDesktop(
-        box,
-        ctx,
-        dragged,
-        (event.clientX - frame.left) / scale,
-        (event.clientY - frame.top) / scale
-      );
+      const placed = await placeOnDesktop(box, ctx, dragged, atX, atY);
       // This is the one desktop gesture that redraws: the box that landed had no tile on
       // this surface a moment ago, so there is nothing here to update in place.
       if (placed) ctx.reload();
@@ -5609,6 +5687,13 @@ registerView("root", {
       // the drop landed on.
       if (event.defaultPrevented) return;
       event.preventDefault();
+      // A file dropped here is filed like a box dropped here: made, captured and shown, because the
+      // root's holder is where something with no other home lands.
+      const made = await ingestDroppedResources(event, box.uuid, ctx.status);
+      if (made && made.length) {
+        ctx.reload();
+        return;
+      }
       const landed = await dropBox(event, ctx, box.uuid, { label: "the root now shows that box" });
       if (landed) ctx.reload();
     });
@@ -6423,33 +6508,87 @@ function carriesResources(event) {
  * Returns false when the drag held no files, so the caller can fall through to the ordinary
  * box-being-filed handling instead of reporting nothing.
  */
-async function ingestDroppedResources(event, parent, report = status) {
+async function ingestDroppedResources(event, parent, report = status, options = {}) {
   const transfer = event.dataTransfer;
-  if (!carriesResources(event)) return false;
+  if (!carriesResources(event)) return null;
   const files = Array.from((transfer && transfer.files) || []);
   if (!files.length) {
     const payload = readDraggedFile(event);
-    if (!payload) return false;
-    await createBoxFromDraggedFile(payload, parent, { keep: true });
-    return true;
+    if (payload) {
+      const made = await createBoxFromDraggedFile(payload, parent, { keep: true });
+      return await placeMade(made, options);
+    }
+    const path = droppedFilePath(event);
+    if (path) {
+      const made = await createBoxFromDraggedFile(
+        { path, name: pathName(path) },
+        parent,
+        { keep: true }
+      );
+      return await placeMade(made, options);
+    }
+    return null;
   }
   const made = [];
   for (const file of files) {
     try {
       const answer = await api.captureFile(file.name, file, parent);
-      made.push(answer.box.name);
+      made.push(answer.box);
     } catch (error) {
       report(`could not capture ${file.name}: ${error.message}`, true);
     }
   }
-  if (!made.length) return true;
+  if (!made.length) return [];
   await refreshSide();
+  const names = made.map((box) => box.name);
   report(
-    `${made.length === 1 ? `captured ${made[0]}` : `captured ${made.length} files: ${made.join(", ")}`}${
+    `${names.length === 1 ? `captured ${names[0]}` : `captured ${names.length} files: ${names.join(", ")}`}${
       parent ? " and filed it here" : ""
     }`
   );
-  return true;
+  return await placeMade(made, options);
+}
+
+/** A view that places as well as files (a grid cell, a desktop) says so here, once per box. */
+async function placeMade(boxes, options) {
+  for (const box of boxes || []) {
+    if (options.cell && typeof options.cell === "function") await options.cell(box);
+  }
+  return boxes;
+}
+
+/**
+ * A local path carried by the drag, when there is one.
+ *
+ * A file manager drops `file:///…` in `text/uri-list`; a terminal drops a bare path. Both name a file
+ * this machine can read, so it is captured like any other rather than filed as a link. An `http:` URL is
+ * deliberately not included here — that becomes a link box, and nothing is fetched.
+ */
+function droppedFilePath(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer) return "";
+  const types = dragTypes(transfer);
+  const candidates = [];
+  if (types.includes("text/uri-list")) candidates.push(...(transfer.getData("text/uri-list") || "").split("\n"));
+  candidates.push(transfer.getData("text/plain") || "");
+  for (const raw of candidates) {
+    const line = (raw || "").trim();
+    if (!line || line.startsWith("#")) continue;
+    if (/^file:\/\//i.test(line)) return line;
+    if (line.startsWith("/") && !line.includes("\n")) return line;
+  }
+  return "";
+}
+
+/** Last segment of a path or URL, for a name to show while the box is being made. */
+function pathName(target) {
+  const clean = target.replace(/[?#].*$/, "");
+  const tail = clean.split("/").filter(Boolean).pop() || clean;
+  try {
+    return decodeURIComponent(tail);
+  } catch {
+    return tail;
+  }
 }
 
 /**
@@ -9035,7 +9174,22 @@ async function noteView(canvas, box, ctx, opts = {}) {
       event.dataTransfer.dropEffect = "copy";
     });
     editor.addEventListener("drop", (event) => {
-      const uuid = event.dataTransfer.getData("text/plain");
+      // A dropped **file** is not a sentence the person wrote. This editor takes a *box* — that is what
+      // a box drag carries — and an image dragged in from a web page arrives with its URL in
+      // `text/plain`, which used to be written into the note as though it were a uuid: words nobody
+      // typed, appearing in a document while it is being edited. Refuse the payload by name and change
+      // nothing. Dropping ordinary selected text is left to the browser, which inserts it at the caret
+      // like any other editor.
+      if (carriesFiles(event) || readDraggedFile(event) || droppedFilePath(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        status(
+          "a dropped file does not go inside a note — drop it on a folder to keep it, then link it here",
+          true
+        );
+        return;
+      }
+      const uuid = draggedBoxRef(event);
       if (!uuid || uuid === box.uuid) return;
       event.preventDefault();
       const other = (state.boxes || []).find((candidate) => candidate.uuid === uuid);
@@ -9368,7 +9522,21 @@ async function checklistView(canvas, box, ctx, opts = {}) {
       event.preventDefault();
       event.stopPropagation();
       line.classList.remove("is-target");
-      const uuid = event.dataTransfer.getData("text/plain");
+      // A line hangs a **box** off a checklist item. A dropped file or link would have been pushed into
+      // `item.refs` as a URL — a phantom attachment with no box behind it, which survives the save and
+      // shows up as an unresolvable reference long after the gesture was forgotten. Refuse it out loud
+      // instead; the checklist keeps its behaviour, the person keeps their data.
+      if (carriesFiles(event) || readDraggedFile(event) || droppedFilePath(event)) {
+        // `ctx.status`, not `status`: this view already owns a local named `status` — the tally span
+        // in its header — and calling the module's reporter by that name throws a TypeError instead
+        // of saying anything, which turns a refusal into a silent console error.
+        ctx.status(
+          "a dropped file is not an attachment — drop it on a folder to keep it, then hang the box on the line",
+          true
+        );
+        return;
+      }
+      const uuid = draggedBoxRef(event);
       if (!uuid || uuid === box.uuid || item.refs.includes(uuid)) return;
       const from = event.dataTransfer.getData("application/x-boxganizer-from");
       // Shift while dropping onto a line means "move it here", and the save below only files it;

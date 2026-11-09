@@ -830,7 +830,11 @@ def test_every_drop_goes_through_one_copy_or_move_rule(client: TestClient) -> No
     for view, needle in (
         ("folder", "await dropBox(event, ctx, box.uuid,"),
         ("root", 'label: "the root now shows that box"'),
-        ("grid", "after: () => api.gridPlace(box.uuid"),
+        # the grid places the box dropBox filed, and only ever a reference the rule accepted — the
+        # payload used to be re-read from the transfer here, which is how an image's URL reached the
+        # endpoint and came back a 404
+        ("grid", "api.gridPlace(box.uuid, boxRef, [row, column])"),
+        ("grid", "const boxRef = draggedBoxRef(event);"),
         ("desktop", "if (event.shiftKey) {"),
         ("mindmap", 'move ? "moved here, off the box it came from"'),
         ("checklist", "await api.link(box.uuid, uuid, from);"),
@@ -2933,8 +2937,9 @@ def test_the_checklist_sends_the_whole_list_and_no_html_is_built_from_it(
     assert "api.saveChecklist(box.uuid, title, items.map(shape))" in view
     assert "innerHTML" not in view
     assert "textContent" in view
-    # a box dropped on a line is dropped by uuid, the same currency every view uses
-    assert 'event.dataTransfer.getData("text/plain")' in view
+    # a box dropped on a line is dropped by uuid, the same currency every view uses — and the gate
+    # that hands it over refuses a URL, which is what used to land in item.refs as a phantom
+    assert "const uuid = draggedBoxRef(event);" in view
 
 
 def test_a_box_dropped_on_a_line_files_it_there(client: TestClient) -> None:
@@ -5042,7 +5047,7 @@ def test_the_left_pane_lands_dropped_files_and_nobody_else_claims_them(
     # the bytes go up; the page never learns, and never needs, where the file lives
     assert "await api.captureFile(file.name, file, parent)" in ingest
     assert "await createBoxFromDraggedFile(payload, parent, { keep: true });" in ingest
-    assert "return false;" in ingest, "no files means the caller keeps handling the drop"
+    assert "return null;" in ingest, "no files means the caller keeps handling the drop"
 
     # a file dropped on a box is filed there as well as captured — the same act plus one link
     folder = script[script.index("const folderView = {") : script.index("function childTile(")]
@@ -5094,3 +5099,55 @@ def test_a_file_drag_is_recognised_before_the_browser_hands_over_the_bytes(
     assert "event.preventDefault(); // the browser would navigate" in guard
     assert "clearDropZones();" in guard, "ADR 27 still owns the outline when a file drag ends"
     assert "setupDropNavigationGuard();" in script, "the net is actually cast at startup"
+
+
+def test_a_dragged_payload_is_only_a_filing_instruction_when_it_names_a_box(
+    client: TestClient,
+) -> None:
+    """Chrome puts an image's **URL** in `text/plain`, and every container trusted it.
+
+    A drop on a grid cell filed that string and then posted it to `grid/place` as a child reference,
+    which answered 404 while the cell had already looked like it accepted the drop. The note editor
+    wrote it into the note as a uuid and a checklist line stored it as an attachment — a phantom
+    that survives the save and resolves to nothing. A payload that addresses a resource is a
+    resource: it
+    gets captured or filed as a link, never treated as "file that box in here".
+    """
+    script = client.get("/static/app.js").text
+
+    gate = script[script.index("function draggedBoxRef(event) {") :]
+    gate = gate[: gate.index("async function dropBox(")]
+    assert "if (carriesFiles(event)) return null;" in gate
+    assert "if (looksLikeAResource(ref)) return null;" in gate
+    assert '/^[a-z][a-z0-9+.-]*:\\/\\//.test(lower)' in gate, "any scheme is an address, not a name"
+    assert 'ref.startsWith("/")' in gate, "an absolute path is a file, not a filing instruction"
+
+    # the shared filing rule uses the gate, so no view has to remember it
+    filing = script[script.index("async function dropBox(") :][: 400]
+    assert "const dragged = draggedBoxRef(event);" in filing
+
+    # each container answers a file first, and only then considers a dragged box: the box must
+    # exist before anything can be placed into it
+    assert "cell: (created) => api.gridPlace(box.uuid, created.uuid, [row, column])," in script
+    assert "cell: (created) => placeOnDesktop(box, ctx, created.uuid, atX, atY)," in script
+    grid = script[script.index('cell.addEventListener("drop"') :]
+    grid = grid[: grid.index("cell.addEventListener(\"dblclick\"")]
+    assert grid.index("ingestDroppedResources") < grid.index("await dropBox("), (
+        "a grid drop that files before it makes the box is the 404 this replaced"
+    )
+
+    # the library list lights for a file drop too, because it takes one (unfiled)
+    side = script[script.index('sideList.addEventListener("dragover"') :]
+    side = side[: side.index('sideList.addEventListener("dragleave"')]
+    assert "if (!carriesResources(event)) return;" in side
+    assert "#box-list.drop-target" in client.get("/static/app.css").text
+
+    # the two zones that refuse must say so through the reporter, not through a name they shadow
+    said = script.index("a dropped file is not an attachment")
+    window = script[said - 260 : said]
+    assert "ctx.status(" in window, (
+        "the checklist view owns a local `status` span; calling the module reporter by that bare "
+        "name throws a TypeError instead of telling anybody anything"
+    )
+    refusal = script[script.index("a dropped file does not go inside a note") - 260 :][:260]
+    assert "status(" in refusal

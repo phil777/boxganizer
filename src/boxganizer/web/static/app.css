@@ -128,6 +128,8 @@ body {
 }
 
 #box-list li:hover { background: var(--line); }
+/* The list takes a dropped file as an unfiled box, so it says so while the drag is over it. */
+#box-list.drop-target { outline: 1px dashed var(--accent); outline-offset: -3px; background: var(--panel); }
 #box-list li[aria-selected="true"] { outline: 1px solid var(--accent); }
 #box-list li .kind { font-size: 0.72rem; opacity: 0.55; margin-left: auto; }
 
