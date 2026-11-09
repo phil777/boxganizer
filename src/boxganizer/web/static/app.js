@@ -6492,7 +6492,15 @@ function carriesResources(event) {
   const transfer = event.dataTransfer;
   if (!transfer) return false;
   if (carriesFiles(event)) return true;
-  return dragTypes(transfer).includes(FILE_DRAG_TYPE);
+  const types = dragTypes(transfer);
+  if (types.includes(FILE_DRAG_TYPE)) return true;
+  // A link is a resource too, and the zones that light for a file should light for it. The cheap
+  // type check comes first because `droppedLinkUrl` reads the payload, and `dragover` fires at
+  // something like sixty hertz while a pointer moves.
+  if (!types.includes("text/uri-list") && !types.includes("text/html") && !types.includes("text/plain")) {
+    return false;
+  }
+  return Boolean(droppedLinkUrl(event));
 }
 
 /**
@@ -6527,6 +6535,11 @@ async function ingestDroppedResources(event, parent, report = status, options = 
       );
       return await placeMade(made, options);
     }
+    const url = droppedLinkUrl(event);
+    if (url) {
+      const made = await createLinkBox(url, event, parent);
+      return await placeMade(made ? [made] : [], options);
+    }
     return null;
   }
   const made = [];
@@ -6547,6 +6560,50 @@ async function ingestDroppedResources(event, parent, report = status, options = 
     }`
   );
   return await placeMade(made, options);
+}
+
+/**
+ * File a dropped link as a link box: the address is stored, nothing is fetched.
+ *
+ * Boxganizer points at things; that is the whole design. A dropped URL is filed the same way a URL
+ * typed into the new-box dialog is filed — a `web` box whose resource is the address — and the server
+ * makes no request to find out what is behind it. A card index that downloaded whatever it was shown
+ * would be a scraper with a search box, and would also be a way to make the server send requests to
+ * machines only its owner can reach.
+ *
+ * Names must be unique in this library and the same link is often dropped twice. Rather than fail the
+ * second drop, the name is numbered — `otter`, `otter 2` — because silently reusing the first box would
+ * mean the drop did nothing, and nothing is the one answer the gesture cannot afford.
+ */
+async function createLinkBox(url, event, parent) {
+  const wanted = droppedLinkName(event, url);
+  let type = "web";
+  try {
+    const suggested = await api.suggestType(url);
+    if (suggested && suggested.suggestion) type = suggested.suggestion.key || type;
+  } catch {
+    // The inference is a convenience; `web` is what an http address is whatever the server thinks.
+  }
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const name = attempt === 0 ? wanted : `${wanted} ${attempt + 1}`;
+    try {
+      const made = await api.create({
+        name,
+        box_type: type,
+        resource_uri: url,
+        ...(parent ? { parent } : {}),
+      });
+      await refreshSide();
+      status(`linked ${name}`);
+      return made;
+    } catch (error) {
+      if (/already|duplicate|exists/i.test(error.message || "")) continue;
+      status(`could not link ${url}: ${error.message}`, true);
+      return null;
+    }
+  }
+  status(`could not name a box for ${url}: every similar name is already taken`, true);
+  return null;
 }
 
 /** A view that places as well as files (a grid cell, a desktop) says so here, once per box. */
@@ -6578,6 +6635,65 @@ function droppedFilePath(event) {
     if (line.startsWith("/") && !line.includes("\n")) return line;
   }
   return "";
+}
+
+/**
+ * The URL a drag carries, when it carries one and carries no bytes.
+ *
+ * Dragging a link or an image out of a web page puts the address in `text/uri-list`, the surrounding
+ * markup in `text/html`, and often the same address in `text/plain`. Only `http:` and `https:` count:
+ * `file:` is a local path and is captured like any other file, and any other scheme is not something
+ * this library pretends to open.
+ *
+ * Bytes win when a drag carries both. An image dragged off a page arrives with the bitmap *and* its
+ * URL, and the person is filing the picture, not a pointer to somebody else's copy of it — which is
+ * also the difference that matters later, when the other site stops serving it.
+ */
+function droppedLinkUrl(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer || carriesFiles(event)) return "";
+  const types = dragTypes(transfer);
+  const candidates = [];
+  if (types.includes("text/uri-list")) {
+    candidates.push(...(transfer.getData("text/uri-list") || "").split("\n"));
+  }
+  if (types.includes("text/html")) {
+    const href = /href\s*=\s*"([^"]+)|href\s*=\s*'([^']+)/i.exec(transfer.getData("text/html") || "");
+    if (href) candidates.push(href[1] || href[2] || "");
+  }
+  candidates.push(transfer.getData("text/plain") || "");
+  for (const raw of candidates) {
+    const line = (raw || "").trim();
+    if (/^https?:\/\//i.test(line)) return line.slice(0, 2000);
+  }
+  return "";
+}
+
+/**
+ * A name for a dropped link: what the page called it, or the last part of its address.
+ *
+ * `text/html` usually carries the anchor text the person actually selected, and an image drag carries
+ * its `alt`. Both say more than `otter.png` or a query-string tail, and both are read as plain text —
+ * markup from another document is never inserted into this page as markup.
+ */
+function droppedLinkName(event, url) {
+  const transfer = event.dataTransfer;
+  const html = transfer ? transfer.getData("text/html") || "" : "";
+  const anchor = /<a\b[^>]*>([\s\S]*?)<\/a>/i.exec(html);
+  const alt = /<img\b[^>]*\balt\s*=\s*"([^"]{2,120})"/i.exec(html);
+  const fromMarkup = anchor ? stripTags(anchor[1]) : alt ? alt[1] : "";
+  const clean = fromMarkup.replace(/\s+/g, " ").trim();
+  if (clean && !/^https?:\/\//i.test(clean)) return clean.slice(0, 200);
+  // An anchor whose text is just the address again adds nothing over the address itself.
+  const tail = pathName(url).slice(0, 200);
+  return tail || "link";
+}
+
+/** Markup from somewhere else, reduced to the words in it. Tags never survive. */
+function stripTags(fragment) {
+  // A regexp rather than `innerHTML` into a scratch node: a remote document's markup must not be
+  // parsed into this page's DOM on its way to becoming a label.
+  return String(fragment || "").replace(/<[^>]*>/g, "");
 }
 
 /** Last segment of a path or URL, for a name to show while the box is being made. */

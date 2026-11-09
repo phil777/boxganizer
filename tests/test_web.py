@@ -5032,7 +5032,8 @@ def test_the_left_pane_lands_dropped_files_and_nobody_else_claims_them(
     gate = script[script.index("function carriesResources(event) {") :]
     gate = gate[: gate.index("async function ingestDroppedResources(")]
     assert "if (carriesFiles(event)) return true;" in gate
-    assert "dragTypes(transfer).includes(FILE_DRAG_TYPE)" in gate
+    assert "const types = dragTypes(transfer);" in gate
+    assert 'if (types.includes(FILE_DRAG_TYPE)) return true;' in gate
 
     zone = script[script.index("function setupResourceDropZone()") :]
     zone = zone[: zone.index("const context = {")]
@@ -5086,7 +5087,7 @@ def test_a_file_drag_is_recognised_before_the_browser_hands_over_the_bytes(
     resources = script[script.index("function carriesResources(event) {") :]
     resources = resources[: resources.index("async function ingestDroppedResources(")]
     assert "if (carriesFiles(event)) return true;" in resources
-    assert "dragTypes(transfer).includes(FILE_DRAG_TYPE)" in resources, (
+    assert 'if (types.includes(FILE_DRAG_TYPE)) return true;' in resources, (
         "a file dragged out of a directory box is still a resource"
     )
 
@@ -5151,3 +5152,64 @@ def test_a_dragged_payload_is_only_a_filing_instruction_when_it_names_a_box(
     )
     refusal = script[script.index("a dropped file does not go inside a note") - 260 :][:260]
     assert "status(" in refusal
+
+
+def test_a_dropped_link_is_filed_as_a_link_and_never_fetched(client: TestClient) -> None:
+    """A drag carrying an address makes a `web` box. Nothing goes to get the address.
+
+    Boxganizer points at things; that is the design. A dropped URL is filed exactly as a typed one
+    is — a box whose resource is the address — and the page makes no request to the dropped host,
+    which is the difference between a card index and a scraper that also happens to have a search
+    box. It is also the safe side: fetching whatever a drag mentions would let a page induce this
+    server to send requests to machines only its owner can reach.
+    """
+    script = client.get("/static/app.js").text
+
+    url_at = script[script.index("function droppedLinkUrl(event) {") :]
+    url_at = url_at[: url_at.index("\n}\n", url_at.index("\n}\n") + 1)]
+    assert "if (!transfer || carriesFiles(event)) return \"\";" in url_at, (
+        "bytes beat an address: an image dragged off a page carries both, and the person is filing"
+        " the picture, not a pointer to somebody else's copy of it"
+    )
+    assert 'transfer.getData("text/uri-list")' in url_at, "uri-list read, then ignored for nothing"
+    assert "/^https?:\\/\\//i.test(line)" in url_at, (
+        "only http(s) is a link here; file: is a local path and is captured like any other file"
+    )
+    assert "line.slice(0, 2000)" in url_at, (
+        "a drag is somebody else's data; it does not get to set this library's length limits"
+    )
+
+    naming = script[script.index("function droppedLinkName(event, url) {") :]
+    naming = naming[: naming.index("Markup from somewhere else")]
+    assert "stripTags(" in naming, "markup from another document is reduced to words"
+    assert "anchor ? stripTags(anchor[1])" in naming, (
+        "the anchor text the person selected beats a URL tail"
+    )
+    assert "pathName(url)" in naming, "with no title, the last path segment names the box"
+    assert "innerHTML" not in naming
+    stripper = script[script.index("function stripTags(fragment) {") :]
+    stripper = stripper[: stripper.index("\n}\n", stripper.index("return String"))]
+    assert "replace(/<[^>]*>/g" in stripper and "innerHTML" not in stripper.split("\n", 3)[-1], (
+        "tags come off by regexp; a remote document's markup never enters this page's DOM"
+    )
+
+    made = script[script.index("async function createLinkBox(url, event, parent) {") :]
+    made = made[: made.index("\n}\n", made.index("every similar name is already taken"))]
+    assert 'let type = "web";' in made
+    assert "api.suggestType(url)" in made, "the type still comes from the one inference function"
+    assert "resource_uri: url" in made
+    assert "capture_resource" not in made, (
+        "a link is not captured by default; naming it here would invite someone to turn that on"
+    )
+    assert "attempt === 0 ? wanted : `${wanted} ${attempt + 1}`" in made, (
+        "the same link dropped twice makes a second box with a visible name, not a silent no-op"
+    )
+
+    # the zones light for a link too: the promise is made before the gesture, not after it fails
+    gate = script[script.index("function carriesResources(event) {") :]
+    gate = gate[: gate.index("\n}\n", gate.index("\n}\n") + 1)]
+    assert 'return Boolean(droppedLinkUrl(event));' in gate
+    assert 'types.includes("text/uri-list")' in gate, (
+        "the cheap type test runs first: dragover fires at sixty hertz and the payload is only read"
+        " when a drag could actually be a link"
+    )
