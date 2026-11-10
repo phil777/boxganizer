@@ -157,6 +157,12 @@ copying.
   the change's one real cost: a person who *wanted* to open that file in a browser now uses the file
   manager for it. The page's own rule, kept: something that looks like a filing gesture either files
   or says what it did.
+- "Nothing is fetched" means at the moment of the drop, and it is worth being precise about the
+  boundary, because a `web` box still has a view that shows the page when you **open** it — that is what
+  a browser box is for, and it predates this change. The distinction is the human action: opening a box
+  is asking to see the thing behind it. A drop is not that question, so a drop stores the address and
+  asks nothing of the network. If the view is ever changed to prefetch, or a list of link boxes starts
+  rendering thumbnails, this sentence is the thing that has to be argued with first.
 - The library now holds `web` boxes whose targets may rot. It always held pointers to files that move.
   What changed is that a pointer can be created by a drag rather than only typed, so rot becomes more
   likely in proportion. A "check this link" affordance is a separate piece of work; fetching at drop
