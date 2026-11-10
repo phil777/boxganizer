@@ -2209,6 +2209,15 @@ pre.text {
   outline: 2px dashed var(--accent, #e03e2f);
   outline-offset: -2px;
 }
+
+/* Two places take a box and refuse a file — a checklist line and the note editor. The refusal is
+   drawn, not merely withheld: an absent outline reads as "I missed the target", and the person
+   tries again. The amber dashes say the zone saw it and said no. */
+.checklist-item.drop-refused,
+.note-editor.drop-refused {
+  outline: 2px dashed var(--warn, #b45309);
+  outline-offset: -2px;
+}
 .checklist-tick {
   flex: 0 0 auto;
   width: 15px;

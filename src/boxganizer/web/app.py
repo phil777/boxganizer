@@ -734,8 +734,25 @@ def create_app(
 
     @app.exception_handler(DuplicateBoxName)
     async def _duplicate(request: Request, exc: DuplicateBoxName) -> JSONResponse:
+        """A name clash, said as a fact about the library rather than as a code.
+
+        `duplicate_name` reached people as the whole message when a dropped file's name was already
+        taken — a drop that looks like it failed with a glitch, when what happened is that this
+        library keeps one name per box and something already has it. The page prefers `reason` over
+        `error`, so adding it here fixes every surface at once, the CLI included.
+        """
         return JSONResponse(
-            status_code=409, content={"detail": {"error": "duplicate_name", "name": exc.name}}
+            status_code=409,
+            content={
+                "detail": {
+                    "error": "duplicate_name",
+                    "name": exc.name,
+                    "reason": (
+                        f"a box named {exc.name!r} is already in this library, and names are kept "
+                        "unique. Use that box, or drop the file under a different name."
+                    ),
+                }
+            },
         )
 
     @app.exception_handler(InvalidBoxName)

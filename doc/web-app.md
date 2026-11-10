@@ -49,25 +49,38 @@ file list — which is empty at exactly the moment you are deciding whether to d
 **box** over the strip and it stays plain, because that is the list's business, not the strip's.
 
 **Three payloads, three outcomes.** A **file** becomes a captured box, as above; drop it on a folder,
-a grid cell, the desktop, a viewport pane or the library list and the same happens *plus* the filing
-or placement you aimed at — the box is created first and then placed by the uuid the create returned,
-which is the only order in which placing it can mean anything. A **link** (a URL dragged out of a
-browser, with or without its title) becomes a link box pointing at that address: it is named from the
-link text you selected, or from the last part of the address, and **nothing is fetched** — not by the
-page, not by the server, which only ever stores the string you dropped. Boxganizer indexes things; it
+a grid cell, the desktop, a viewport pane, a mindmap (the bare picture files it as a branch, a node
+hangs it on that node) or the library list and the same happens *plus* the filing or placement you
+aimed at — the box is created first and then placed by the uuid the create returned, which is the only
+order in which placing it can mean anything. A file manager that hands over a **path** instead of bytes
+(`file:///…`) is the same case: the path is read as a path, typed by its real suffix — `notes.md` is a
+markdown box, not "a file" — named without the extension, and captured like any other file. A **link**
+(a URL dragged out of a browser, with or without its title) becomes a link box pointing at that
+address: it is named from the link text you selected, or from the last part of the address, and
+**nothing is fetched** — not by the page, not by the server, which only ever stores the string you
+dropped. Boxganizer indexes things; it
 does not download what it is shown, and a dropped URL is the one thing a page could use to make a
 server visit machines only you can reach. A dropped link that is also carrying bytes takes the bytes:
 an image dragged off a page is you filing the picture, not a pointer to somebody else's copy. Drop
 the same link twice and you get two boxes, the second named `… 2`, because names are unique here and
 silently reusing the first would mean the drop did nothing.
 
+**A target only lights for what it can finish, and the ones that refuse look like refusing.** The
+outline a zone draws while you hover is a promise made before you let go, so it is decided by the
+payload: bytes, a path, a link, or a box dragged from this page. The note editor and a checklist line
+take a box and turn away a file, and they show the same amber dashes a dynamic folder uses rather than
+a welcome they are about to withdraw — an absent outline reads as "I missed", and a drawn refusal reads
+as a decision. A **box** reference is a uuid, because a uuid is the only thing this page ever writes
+when it drags one: selected text that happens to spell a box's name is not filed anywhere, and makes no
+request at all.
+
 **Something that fits neither gets a sentence, not a shrug.** Drop a box where boxes are not accepted
-and the refusal says why; drop a file on the note editor or on a checklist line — which take boxes,
-not files, and would otherwise write a bare URL into your words or your attachments — and it tells you
-to use the strip and changes nothing at all. A reference the server cannot resolve answers in the same
-spirit: it names the value it turned down, says what it looked like (an address, a file name, an id
-that is no longer here, a name that never was), and says nothing changed. A create that cannot be
-finished leaves no half-finished box behind (ADR 38).
+and the refusal says why; drop a file on the note editor or on a checklist line — which would otherwise
+write a bare URL into your words or your attachments — and it tells you to use the strip and changes
+nothing at all. A reference the server cannot resolve answers in the same spirit: it names the value it
+turned down, says what it looked like (an address, a file name, an id that is no longer here, a name
+that never was), and says nothing changed; a name clash says which name and that names are kept unique.
+A create that cannot be finished leaves no half-finished box behind (ADR 38).
 
 **A stray drop cannot take the page away.** Release a file anywhere the app did not claim — a heading,
 a crumb, the gap between panes — and the browser's own behaviour (open the file, navigate away, lose

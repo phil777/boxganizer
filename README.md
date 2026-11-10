@@ -296,8 +296,13 @@ Drag a **link** instead and it becomes a link box — named from the link text y
 the address, with nothing fetched by the page or the server. A box that downloaded what it was shown
 would be a scraper with a search box, and would let any web page make your server visit machines only
 you can reach. A drag carrying both a picture and its URL takes the picture: you were filing it, not
-pointing at somebody else's copy. Miss every zone and nothing happens — a stray file drop is cancelled
-silently rather than opening in the browser and taking the tab's panes with it (ADR 38).
+pointing at somebody else's copy. A file manager that hands over a path rather than bytes works too —
+`file:///notes.md` is read as a path, typed by its suffix, and captured.
+
+A zone lights only for what it can finish, and the two that take a box but not a file (the note
+editor, a checklist line) show an amber refusal instead of a welcome. Miss every zone and nothing
+happens — a stray file drop is cancelled silently rather than opening in the browser and taking the
+tab's panes with it (ADR 38).
 
 **A box can keep what it points at.** By default a box *points* — at a PDF, a photo, a folder — and the
 file stays wherever it is. Tick *Keep a copy in the library* (or pass `--capture`) and Boxganizer copies

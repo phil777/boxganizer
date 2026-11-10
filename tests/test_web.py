@@ -1434,7 +1434,14 @@ def test_renaming_onto_another_box_is_refused_by_name(client: TestClient) -> Non
     created = client.post("/api/boxes", json={"name": "Renamable", "box_type": "box"}).json()
     response = client.put(f"/api/boxes/{created['uuid']}", json={"name": "occupied"})
     assert response.status_code == 409
-    assert response.json()["detail"] == {"error": "duplicate_name", "name": "occupied"}
+    detail = response.json()["detail"]
+    assert {k: detail[k] for k in ("error", "name")} == {
+        "error": "duplicate_name",
+        "name": "occupied",
+    }
+    # the sentence came later: a clash said `duplicate_name` and left the reader to work out that a
+    # box of that name already exists. The two fields above are the contract; this is the help.
+    assert "already in this library" in detail["reason"]
 
 
 def test_an_emptied_description_and_icon_do_not_become_null(
@@ -3278,7 +3285,10 @@ def test_a_box_that_holds_no_boxes_offers_no_drop_zone(client: TestClient) -> No
     sheet = sheet[: sheet.index("let children = []")]
     assert 'wrap.classList.add("drop-refused");' in sheet
     assert "if (canFile.reason) ctx.status(canFile.reason, true);" in sheet
-    assert 'if (!canFile.ok) return; // the server would say the same thing' in sheet
+    assert "if (!canFile.ok && !carriesResources(event)) return;" in sheet, (
+        "ADR 25 refuses to file a box into a folder that chooses its own members; a file being "
+        "brought into the library is not membership, so it must not be turned away alike"
+    )
     css = client.get("/static/app.css").text
     assert ".drop-refused" in css
 
@@ -4095,7 +4105,14 @@ def test_a_directory_box_opens_at_the_top_and_lets_a_file_be_dragged_out(
     assert "resource_uri: payload.path" in script
     # both drop targets: the box on screen, and the library itself
     pane = script[script.index("function wirePaneDrops") : script.index("async function init()")]
-    assert "types.includes(FILE_DRAG_TYPE)" in pane
+    # The pane answers a resource (bytes, a path, a link) through the shared gate and ingests it;
+    # it used to look for the in-page marker and raw `text/plain`, which is how selected prose from
+    # another window reached `api.link` as a box uuid.
+    assert "if (!claimableHere(event)) return;" in pane
+    assert 'event.dataTransfer.getData("text/plain")' not in pane, (
+        "the pane is the fallback for every view that did not claim the drop, so a raw read here "
+        "is the reported URL-as-child-ref bug waiting to happen again"
+    )
     assert 'const sideList = el("side");' in script
     assert "await createBoxFromDraggedFile(dragged, null);" in script
     assert "request(`/api/types/suggest?resource_uri=${encodeURIComponent(resourceUri)}`)" in script
@@ -5223,7 +5240,10 @@ def test_a_dropped_link_is_filed_as_a_link_and_never_fetched(client: TestClient)
     # the zones light for a link too: the promise is made before the gesture, not after it fails
     gate = script[script.index("function carriesResources(event) {") :]
     gate = gate[: gate.index("\n}\n", gate.index("\n}\n") + 1)]
-    assert 'return Boolean(droppedLinkUrl(event));' in gate
+    assert "return Boolean(droppedLinkUrl(event)) || Boolean(droppedFilePath(event));" in gate, (
+        "a path-only drag (`file:///…`, what a file manager sends instead of bytes) has to reach "
+        "this gate or `droppedFilePath` is dead code"
+    )
     assert 'types.includes("text/uri-list")' in gate, (
         "the cheap type test runs first: dragover fires at sixty hertz and the payload is only read"
         " when a drag could actually be a link"
@@ -5536,3 +5556,142 @@ def test_only_the_strip_and_the_list_claim_a_dropped_file(client: TestClient) ->
     assert "#side.drop-target" not in css.replace("#box-list", ""), (
         "a class on the pane with no rule behind it is the failure this test exists for"
     )
+
+
+#: Handlers whose whole job is to read a payload and report its shape. `text/plain` belongs here and
+#: nowhere else: a filing decision is only ever made from a reference these have already vetted.
+PAYLOAD_READERS = (
+    "function draggedBoxRef(",
+    "function droppedLinkUrl(",
+    "function droppedLinkName(",
+    "function droppedFilePath(",
+    "function readDraggedFile(",
+)
+
+
+def _drag_handlers(script: str) -> list[tuple[str, str, str]]:
+    """Each `addEventListener("dragover"|"drop", ...)` as (kind, enclosing function, body)."""
+    found: list[tuple[str, str, str]] = []
+    pattern = re.compile(
+        r'^(?P<indent>[ \t]*)(?P<target>[\w.]+)\.addEventListener\("(dragover|drop)"', re.MULTILINE
+    )
+    for match in pattern.finditer(script):
+        lines = script[: match.start()].count("\n")
+        body: list[str] = []
+        for line in script.split("\n")[lines + 1 :]:
+            if line.startswith(match.group("indent") + "});"):
+                break
+            body.append(line)
+        where = script[: match.start()]
+        funcs = re.findall(r"^(?:async )?function (\w+)", where, re.MULTILINE)
+        # group("target") is the element and group(3) is the kind. Reading the wrong one returns
+        # "zone", "pane", "cell" where the assertions below expect "drop" and "dragover" -- and then
+        # every check is an `if` that never fires: a test that passes because it asks nothing. That
+        # is how this sweep shipped vacuous once, and the meta-assertion in the test guards it.
+        found.append((match.group(3), funcs[-1] if funcs else "?", "\n".join(body)))
+    return found
+
+
+def test_no_drop_zone_reads_a_drag_payload_to_decide_what_to_file(client: TestClient) -> None:
+    """ADR 38 says one gate decides, and the page used to have fourteen opinions instead.
+
+    The reported 404, the URL written into a note, and the phantom checklist attachment were all the
+    same act: reading `text/plain` and calling whatever came back a box. Sweeping the file is the
+    only way to keep that claim true, because a new view written by anyone — including the next
+    version of this one — can reintroduce it in a single line.
+    """
+    script = client.get("/static/app.js").text
+    handlers = _drag_handlers(script)
+    assert len(handlers) >= 20, f"the sweep found {len(handlers)} handlers; it has stopped working"
+    kinds = {kind for kind, _, _ in handlers}
+    assert kinds == {"dragover", "drop"}, f"the sweep is reading the wrong field: {sorted(kinds)}"
+    drops = [h for h in handlers if h[0] == "drop"]
+    assert len(drops) >= 10, f"only {len(drops)} drop handlers seen; the sweep is blind"
+
+    for kind, fn, body in handlers:
+        if kind != "drop":
+            continue
+        if any(marker in body for marker in PAYLOAD_READERS):
+            continue
+        assert 'getData("text/plain")' not in body, (
+            f"a drop handler in {fn}() reads the payload directly; route it through draggedBoxRef"
+        )
+
+    # A highlight is a promise made while the pointer still moves, so every zone that paints one has
+    # to have tested the payload first. `tagBeingDragged` is the tag tree's own in-app flag.
+    for kind, fn, body in handlers:
+        if kind != "dragover":
+            continue
+        promised_by = ('.add("drop-target")', '.add("is-target")')
+        promise_at = min(
+            (body.find(marker) for marker in promised_by if marker in body), default=-1
+        )
+        if promise_at < 0:
+            continue
+        # Only what appears *before the promise* can be the gate. A payload test that shows up
+        # afterwards -- picking `copy` versus `move` for the cursor, say -- does not decide whether
+        # the zone lights, and a check on the whole body would wave that through. That is how this
+        # assertion passed while a mutation removed the gate and left the dropEffect line behind.
+        #
+        # Every accepted form tests the *payload*, the only thing that decides whether a drop can be
+        # finished. A bail-out on unrelated state ("is this a node?") is not a gate: the mindmap
+        # board had one and still promised every drag on the screen.
+        before_promise = body[:promise_at]
+        gates = (
+            "claimableHere(",
+            "carriesResources(",
+            "carriesFiles(",
+            "FILE_DRAG_TYPE",
+            "tagBeingDragged",
+        )
+        # Both halves, because a payload predicate that only picks the cursor shape (`copy` versus
+        # `move`) is not a gate: it never declines. A gate is a test *and* a way out -- a `return`
+        # that leaves the zone dark -- and dropping either half is exactly the regression that put a
+        # dashed outline around a mindmap that was about to ignore the file inside it.
+        assert any(g in before_promise for g in gates) and "return" in before_promise, (
+            f"{fn}() lights up for any drag at all: a highlight that lies is the bug this pins out"
+        )
+
+
+def test_only_the_page_own_uuid_is_accepted_as_a_box_reference(client: TestClient) -> None:
+    """A reference is a uuid, because a uuid is the only thing this page ever writes.
+
+    Membership in the loaded list would have been a stronger check and is not available:
+    `/api/boxes` is a page of 200, so it would refuse legitimate drags in a bigger library.
+    Shape is sound and
+    cheap: the app writes a uuid at both drag sources, so prose, a name, a path and an address are
+    each evidence that the payload did not come from a box.
+    """
+    script = client.get("/static/app.js").text
+    assert "return UUID_SHAPE.test(ref) ? ref : null;" in script
+    # Counted *and* read: a drag source that writes something else -- a name, a path -- would keep
+    # the count at two and start losing its own drags at the gate below it.
+    writes = re.findall(r'setData\("text/plain", ([^)]+)\)', script)
+    assert len(writes) == 2, f"expected the page's two drag sources, found {writes}"
+    for value in writes:
+        assert "uuid" in value, f"a drag source writes {value!r}; the gate accepts only a uuid"
+    assert "UUID_SHAPE = /^[0-9a-f]{8}" in script
+
+
+def test_error_bodies_keep_the_detail_envelope(client: TestClient) -> None:
+    """Every refusal travels as `{"detail": {...}}`, because that is what the page unwraps.
+
+    Rewriting a handler's *sentence* is one thing; changing the shape around it silently turns every
+    legible refusal back into `HTTP 409`, which is what a dropped file here read for a minute. The
+    shape is the contract with the client, so it is asserted next to the words.
+    """
+    made = client.post("/api/boxes", json={"name": "Envelope", "box_type": "note", "text": "a"})
+    assert made.status_code == 201
+    clash = client.post("/api/boxes", json={"name": "Envelope", "box_type": "note", "text": "b"})
+    assert clash.status_code == 409
+    detail = clash.json()["detail"]
+    assert detail["error"] == "duplicate_name"
+    assert "already in this library" in detail["reason"]
+
+    ghost = client.post(
+        f"/api/boxes/{made.json()['uuid']}/children", json={"child": "https://x.invalid/a.png"}
+    )
+    assert ghost.status_code == 422
+    ghost_detail = ghost.json()["detail"]
+    assert ghost_detail["error"] == "box_not_found"
+    assert ghost_detail["reason"]
