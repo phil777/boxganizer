@@ -2326,7 +2326,7 @@ def test_a_box_opened_out_of_a_search_opens_in_that_search(client: TestClient) -
     carrier = script[script.index("function openBoxWithSearchTerm(box) {") :]
     carrier = carrier[: carrier.index("async function openBox(")]
     assert 'const term = field ? field.value.trim() : "";' in carrier
-    assert 'if (term) searchHandoff = { boxUuid: box.uuid, term };' in carrier, (
+    assert "searchHandoff = { boxUuid: box.uuid, term, at: performance.now() };" in carrier, (
         "the term travels on the handoff the next tag line consumes"
     )
     assert "if (term)" in carrier, "no term, no handoff: an ordinary open stays ordinary"
@@ -2334,12 +2334,20 @@ def test_a_box_opened_out_of_a_search_opens_in_that_search(client: TestClient) -
     # both doors into a box carry it — the row and its menu
     assert 'item.addEventListener("click", () => openBoxWithSearchTerm(box));' in script
     assert 'item.addEventListener("dblclick", () => openBoxWithSearchTerm(box));' in script
-    assert '{ label: "Open", run: openBoxWithSearchTerm(box) }' in script
+    assert '{ label: "Open", run: () => openBoxWithSearchTerm(box) }' in script, (
+        "a menu entry that calls instead of describing opens the box while the menu is being built"
+    )
+    # the same mistake, swept for: every `run:` must be a function, never a call
+    eager = re.findall(r"run: ([a-zA-Z_$][\w$.]*)\(", script)
+    assert not eager, f"menu entries that run at build time: {eager}"
 
     # and the tag line is where it is spent: filled in, run, and remembered
     tag = script[script.index("async function renderTagLine(") :]
-    assert "searchHandoff.boxUuid === box.uuid" in tag
-    assert "widget.run(handoff.term);" in tag
+    assert "const pending = pendingHandoffFor(box.uuid);" in tag, (
+        "the tag line must ask for the pending term rather than consuming a shared variable: a "
+        "double-click rebuilds it three times and the first consumer left the last build empty"
+    )
+    assert "if (pending) widget.run(pending.term);" in tag
 
 
 def test_the_tag_line_field_narrows_the_folder_and_it_keeps_no_field_of_its_own(
@@ -5948,3 +5956,34 @@ def test_the_docs_describe_the_live_filter_and_the_withdrawn_window(client: Test
         encoding="utf-8"
     )
     assert "ADR 39" in old, "ADR 34 still reads as wholly current while 39 withdraws part of it"
+
+
+def test_a_term_arriving_with_a_search_survives_one_gesture_and_no_longer(
+    client: TestClient,
+) -> None:
+    """A double-click is one gesture and three events; the first of them must not eat the term.
+
+    The tag line is rebuilt on click, click and dblclick within a couple of milliseconds. The
+    handoff used to be consumed by the first build, so the build the reader actually sees -- the
+    last -- rendered an empty field: double-click lost the term single-click kept. It is now keyed
+    to the box and expires by time, which keeps the term for the burst and refuses to resurrect it
+    afterwards: the term is what the reader arrived with, not a filter that persists.
+    """
+    script = client.get("/static/app.js").text
+    assert "searchHandoff = { boxUuid: box.uuid, term, at: performance.now() };" in script
+    helper = script[script.index("function pendingHandoffFor(boxUuid) {") :]
+    helper = helper[: helper.index("\n}\n")]
+    assert "searchHandoff.boxUuid !== boxUuid" in helper
+    assert "performance.now() - (searchHandoff.at || 0) > 700" in helper, (
+        "without an expiry the term becomes a filter that never lets go"
+    )
+    line = script[script.index("const pending = pendingHandoffFor(box.uuid);") :]
+    assert line.index("widget.run(pending.term)") < 80, "the render must apply it, not merely look"
+    # the reader taking over the field cancels what arrived
+    assert 'field.addEventListener("input", () => clearHandoffFor(ownerOf().uuid));' in script
+    # and one gesture must not write the same remembered term three times
+    remember = script[script.index("function rememberFolderSearch(box, term) {") :]
+    remember = remember[: remember.index("\n}\n")]
+    assert "toLowerCase() === clean.toLowerCase()) return" in remember, (
+        "the burst re-PUTs the same config on every rebuild"
+    )

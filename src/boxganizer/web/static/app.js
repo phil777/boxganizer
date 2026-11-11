@@ -438,8 +438,31 @@ function status(message, isError = false) {
 function openBoxWithSearchTerm(box) {
   const field = el("search");
   const term = field ? field.value.trim() : "";
-  if (term) searchHandoff = { boxUuid: box.uuid, term };
+  if (term) searchHandoff = { boxUuid: box.uuid, term, at: performance.now() };
   return openBox(box.uuid);
+}
+
+/** The term waiting for this box's field, if the wait has not gone stale.
+ *
+ * One double-click reaches the page as three events (measured: click, click, dblclick inside 2 ms),
+ * so the tag line is rebuilt three times. The first build used to *eat* the handoff and the last
+ * build -- the one the reader actually looks at -- rendered an empty field: double-click lost the term
+ * that single-click kept. So the handoff is not consumed by the first taker; it stays available for
+ * the length of that gesture and for nothing longer. The term is a thing the reader arrived with, not
+ * a filter that persists, and a repaint a second from now must not resurrect it.
+ */
+function pendingHandoffFor(boxUuid) {
+  if (!searchHandoff || searchHandoff.boxUuid !== boxUuid) return null;
+  if (performance.now() - (searchHandoff.at || 0) > 700) {
+    searchHandoff = null;
+    return null;
+  }
+  return searchHandoff;
+}
+
+/** The reader took over the field: whatever arrived with the search is no longer pending. */
+function clearHandoffFor(boxUuid) {
+  if (searchHandoff && searchHandoff.boxUuid === boxUuid) searchHandoff = null;
 }
 
 async function openBox(ref, options = {}) {
@@ -1857,6 +1880,9 @@ function mountBoxSearch(mount, owner, open, options = {}) {
     ask(term);
   });
   field.addEventListener("change", remember);
+  // Once the reader types in this field, the term that arrived with a search is theirs to overwrite:
+  // dropping the handoff here stops a repaint seconds later from putting it back.
+  field.addEventListener("input", () => clearHandoffFor(ownerOf().uuid));
 
   field.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -1937,7 +1963,7 @@ async function renderTagLine(box) {
       widget.run(term); // the file is in the box already on screen: unroll here, do not navigate
       return;
     }
-    if (foundAFile) searchHandoff = { boxUuid: hit.uuid, term };
+    if (foundAFile) searchHandoff = { boxUuid: hit.uuid, term, at: performance.now() };
     openBox(hit.uuid, { trail: [...state.trail, box] });
   }, {
     // The field filters what this surface shows, and remembers what was typed in it — both of which
@@ -1948,11 +1974,8 @@ async function renderTagLine(box) {
       remember: (term) => rememberFolderSearch(box, term),
     },
   });
-  if (searchHandoff && searchHandoff.boxUuid === box.uuid) {
-    const handoff = searchHandoff;
-    searchHandoff = null;
-    widget.run(handoff.term);
-  }
+  const pending = pendingHandoffFor(box.uuid);
+  if (pending) widget.run(pending.term);
   let held;
   try {
     held = await api.boxTags(box.uuid);
@@ -3024,7 +3047,11 @@ function markSelected() {
 function boxMenuItems(box, extra = []) {
   const items = [
     // The menu opens the box the same way the click does, term and all: two doors, one room.
-    { label: "Open", run: openBoxWithSearchTerm(box) },
+    // `() =>`, not a call: an entry is a *description* of what clicking it does. Written as a call,
+    // the box opened the moment the menu was built -- right-clicking a row to ask a question moved the
+    // pane to that row's box, and fired the search handoff on the way. Two doors, one room, and
+    // neither of them opens by itself.
+    { label: "Open", run: () => openBoxWithSearchTerm(box) },
     { separator: true },
     { label: "Modify…", run: () => openEditBoxModal(box) },
     ...extra,
@@ -5895,6 +5922,10 @@ function filesMatchedIn(boxUuid, hits) {
 function rememberFolderSearch(box, term) {
   const clean = term.trim();
   if (!clean) return folderOptions(box).history;
+  // Already the first thing this box remembers: nothing to write. A double-click rebuilds the tag
+  // line three times and each rebuild runs the term it arrived with, so without this one gesture
+  // PUTs the same config three times over.
+  if ((folderOptions(box).history || [])[0]?.toLowerCase() === clean.toLowerCase()) return folderOptions(box).history;
   const rest = folderOptions(box).history.filter((entry) => entry.toLowerCase() !== clean.toLowerCase());
   const next = [clean, ...rest].slice(0, FOLDER_HISTORY);
   saveSectionFor(box, "folder", { history: next }, {}, { rerender: false });
