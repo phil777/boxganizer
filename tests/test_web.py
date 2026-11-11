@@ -6020,3 +6020,39 @@ def test_the_side_menu_puts_about_last_behind_a_separator(client: TestClient) ->
     )
     for run in actions:
         assert run in menu, f"an entry lost its action: {run}"
+
+
+def test_the_back_button_climbs_the_main_pane_and_never_leaves(client: TestClient) -> None:
+    """The mouse back button is a history navigation; hold something on the stack.
+
+    Chromium sends no cancelable input event for it: by the time the page hears anything, the tab is
+    already going away — taking the panes, the walk in sessionStorage and any half-typed note with
+    it. A sentinel `pushState` at startup, re-armed after every `popstate`, means there is always an
+    entry to pop that is *ours*, which is what turns "leave the app" into "go up one level". At root
+    the climb does nothing and the sentinel is re-armed just the same: doing nothing must not mean
+    leaving.
+    """
+    script = client.get("/static/app.js").text
+    assert "function setupBackButton()" in script
+    assert "setupBackButton();" in script, "wired or it is a definition of nothing"
+    guard = script[script.index("function setupBackButton()") :]
+    guard = guard[: guard.index("\n}\n", guard.index("popstate"))]
+    assert 'window.history.pushState({ boxganizer: true }, "")' in guard
+    assert 'window.addEventListener("popstate"' in guard
+    # re-armed before the await, or a second press during the climb falls off the page
+    assert guard.index("if (armed) arm();") < guard.index("goUpHierarchy()"), (
+        "the sentinel must be back on the stack before anything is awaited"
+    )  # ordering matters, not just presence
+
+    climb = script[script.index("async function goUpHierarchy()") :]
+    climb = climb[: climb.index("\n}\n")]
+    assert "if (!current || isRootType(current)) return;" in climb, (
+        "at root the button does nothing — and must not even try to go home"
+    )
+    assert "state.trail.length > 1" in climb, (
+        "the displayed walk comes first: a box under two parents goes back the way it was reached"
+    )
+    assert "await goToRoot();" in climb, "a box with no parent is still one level below the root"
+    # the main pane only: panes own their own walk (ADR 29) and the button must not touch it
+    for forbidden in ("PANE_PATHS_KEY", "viewports/", "vp-pane"):
+        assert forbidden not in climb, f"the climb reaches into pane state: {forbidden}"

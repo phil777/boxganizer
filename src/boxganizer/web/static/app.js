@@ -2876,6 +2876,67 @@ async function goUp() {
 }
 
 /**
+ * Up one level in the filing hierarchy, for the mouse "back" button.
+ *
+ * The **main pane** moves; viewport panes are nobody's business but their own. A box with a parent
+ * goes to that parent, a box without one goes to the root (it is still one level up from where the
+ * person is standing), and the root itself does nothing — there is nowhere above it, and "go home"
+ * from home would be the app disagreeing with itself.
+ *
+ * "Up" follows the hierarchy **as displayed**: the walk in the crumb line first, because that is the
+ * path the person is standing on and the only one that says which of several parents they came
+ * through. Only when the walk has nothing above does the filing hierarchy take over -- a box may sit
+ * in several parents, and picking `parents[0]` ahead of the visible crumb path sends the reader to a
+ * folder they never opened (measured: a box filed under both `cabinet` and `root` climbed to
+ * `cabinet`, which was true of the graph and useless to the person).
+ */
+async function goUpHierarchy() {
+  const current = state.current;
+  if (!current || isRootType(current)) return;
+  if (state.trail.length > 1) {
+    openTo(state.trail.length - 2);
+    return;
+  }
+  const parents = current.parents || [];
+  if (parents.length) {
+    await openBox(parents[0].uuid);
+    return;
+  }
+  await goToRoot();
+}
+
+/**
+ * Keep the browser's own Back from leaving the app, and make it mean "up one level".
+ *
+ * Chromium fires no cancelable input event for the mouse back button: it is a session-history
+ * navigation, indistinguishable from Alt+Left by the time the page hears about it. The only way to
+ * answer it instead of being unloaded is to **hold something on the stack** so there is always an
+ * entry to pop — a sentinel pushed at startup and re-pushed after every pop. Without it the tab
+ * navigates away and takes the panes, the walk in sessionStorage and any half-typed note with it;
+ * with it, the pop lands here, the pane climbs one level, and the sentinel goes back so the next
+ * press does the same. At root nothing moves, but the sentinel is re-armed just the same: "do
+ * nothing" must still not mean "leave".
+ */
+function setupBackButton() {
+  let armed = false;
+  const arm = () => {
+    try {
+      window.history.pushState({ boxganizer: true }, "");
+      armed = true;
+    } catch {
+      // A browser that refuses the push (a sandboxed frame, a quota) simply keeps its own behaviour.
+    }
+  };
+  arm();
+  window.addEventListener("popstate", () => {
+    // Re-arm first: the handler below awaits, and a second press during that await must not fall
+    // off the page while the first one is still walking up.
+    if (armed) arm();
+    goUpHierarchy().catch((error) => status(error.message, true));
+  });
+}
+
+/**
  * Merge one view's settings into `config.<section>` and save the box.
  * Each view owns a namespace, so the grid's cells never collide with a text
  * view's font size.
@@ -4582,6 +4643,7 @@ async function init() {
     refreshSide();
   });
   el("up").addEventListener("click", goUp);
+  setupBackButton();
   el("new-box").addEventListener("click", () => openNewBoxModal());
   el("go-root").addEventListener("click", goToRoot);
   el("index-status").addEventListener("click", openIndexModal);
