@@ -131,6 +131,11 @@ body {
 /* The list takes a dropped file as an unfiled box, so it says so while the drag is over it. */
 #box-list.drop-target { outline: 1px dashed var(--accent); outline-offset: -3px; background: var(--panel); }
 #box-list li[aria-selected="true"] { outline: 1px solid var(--accent); }
+/* A row in the left panel is a folder the size of a line, so it takes the same two signals every
+   other target gives: accent when the drop would be filed, amber when it is turned down. Without
+   these the row handlers would be invisible, which is the exact failure ADR 38 is about. */
+#box-list li.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
+#box-list li.drop-refused { outline: 2px dashed var(--warn, #b45309); outline-offset: -2px; }
 #box-list li .kind { font-size: 0.72rem; opacity: 0.55; margin-left: auto; }
 
 /* ---------- main pane ---------- */
@@ -579,6 +584,11 @@ pre.text {
 
 .child:hover { background: var(--line); }
 .child.selected { border-color: var(--accent); }
+/* Rows in a folder list are drop targets now, and a target that cannot be seen is the failure
+   ADR 38 exists to prevent. These follow the row's own border rather than an outline, because the
+   row is a bordered card and a second box around it reads as a different widget. */
+.child.drop-target { border-color: var(--accent); outline: 1px dashed var(--accent); outline-offset: 1px; }
+.child.drop-refused { border-color: var(--warn, #b45309); outline: 1px dashed var(--warn, #b45309); outline-offset: 1px; }
 .child-icon { font-size: 1.4rem; }
 .children-view[data-layout="grid"] .child-icon { font-size: 2.2rem; }
 .child-name { overflow-wrap: anywhere; font-size: 0.9rem; }

@@ -496,6 +496,12 @@ async function saveSectionFor(box, section, patch, { onSaved } = {}, options = {
  */
 function dragBox(event, uuid, fromUuid) {
   event.dataTransfer.setData("text/plain", uuid);
+  // Announced in the *type list* as well as in a value, because a browser will not let a receiver
+  // read a value until the drop lands -- see `claimableHere`. Without this marker a zone cannot tell
+  // a dragged box from a selected sentence while the pointer is still moving, and every option is
+  // bad: light for both (a promise that lies to prose) or light for neither (dragging boxes stops
+  // working, which is exactly the regression this line undoes).
+  event.dataTransfer.setData(BOX_DRAG_TYPE, uuid);
   if (fromUuid) event.dataTransfer.setData("application/x-boxganizer-from", fromUuid);
   event.dataTransfer.effectAllowed = "copyMove";
 }
@@ -641,7 +647,11 @@ function setupResourceDropZone() {
   const zone = el("drop-resources");
   if (!zone) return;
   zone.addEventListener("dragover", (event) => {
-    if (!carriesResources(event)) return; // not ours: let the strip stay plain and the list take it
+    // `dragIsResource`, not `carriesResources`: while the pointer is still moving a browser will not
+    // hand over any value, so the only honest test is the type list. With the value-based check a
+    // link dragged out of a browser carried `text/uri-list` and an empty `getData`, and the one
+    // zone built for arrivals stayed dark for it.
+    if (!dragIsResource(event)) return; // not ours: let the strip stay plain and the list take it
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
     zone.classList.add("drop-target");
@@ -706,7 +716,7 @@ function setupLibraryListFileDrop() {
   const list = el("box-list");
   if (!list) return;
   list.addEventListener("dragover", (event) => {
-    if (!carriesResources(event)) return;
+    if (!dragIsResource(event)) return; // types only: values are unreadable until the drop
     event.preventDefault();
     event.stopPropagation();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
@@ -2070,6 +2080,16 @@ const tagUi = {
 };
 
 const TAG_DRAG_TYPE = "application/x-boxganizer-tag";
+
+/**
+ * What this page writes when it drags a box, alongside the uuid in `text/plain`.
+ *
+ * A private type is the only honest way to say "this drag carries a box reference", because the
+ * value itself is unreadable until the drop. `text/plain` is shared with every text selection in
+ * the operating system, and nothing in the type list distinguishes the uuid of a box from a phrase
+ * somebody highlighted in another window.
+ */
+const BOX_DRAG_TYPE = "application/x-boxganizer-box";
 /* What is being dragged, kept here as well as in the drag payload. `getData` answers "" during
  * dragover — the browser will not let a page read what is coming until the drop — and "may I drop
  * here, and what would it mean" is exactly a dragover question. Without this the tree could not
@@ -2905,8 +2925,51 @@ function renderSide() {
     item.addEventListener("click", () => openBoxWithSearchTerm(box));
     item.addEventListener("dblclick", () => openBoxWithSearchTerm(box));
     item.addEventListener("dragstart", (event) => {
-      event.dataTransfer.setData("text/plain", box.uuid);
-      event.dataTransfer.effectAllowed = "move";
+      // One drag source for a box, so the marker that lets a zone recognise it is written in one
+      // place. This row used to set `text/plain` by hand, which is invisible to a receiver while
+      // the pointer moves, and it said "move" unconditionally, which contradicted the Shift rule
+      // every other box drag follows.
+      dragBox(event, box.uuid);
+    });
+    // A row is a folder the size of a line, and the left panel is where a person goes to choose
+    // one. Filing by drag therefore has to work here as it does in the main pane: the row the
+    // pointer is over is the box being filed into. No version of this page had a handler on the
+    // row, which is why a drop between two rows of the same list did nothing at all.
+    item.addEventListener("dragover", (event) => {
+      const target = filingTarget(box);
+      if (!target.ok) {
+        // Refusal is drawn, not withheld: an absent outline reads as a missed target.
+        if (carriesABox(event)) {
+          item.classList.remove("drop-target");
+          item.classList.add("drop-refused");
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+          if (target.reason) status(target.reason, true);
+        }
+        return;
+      }
+      if (!claimableHere(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = event.shiftKey ? "move" : "copy";
+      item.classList.remove("drop-refused");
+      item.classList.add("drop-target");
+    });
+    item.addEventListener("dragleave", () => item.classList.remove("drop-target", "drop-refused"));
+    item.addEventListener("drop", async (event) => {
+      item.classList.remove("drop-target", "drop-refused");
+      if (!filingTarget(box).ok) return;
+      if (!claimableHere(event)) return;
+      if (draggedBoxRef(event) === box.uuid) return; // a box is not filed inside itself
+      event.preventDefault();
+      event.stopPropagation();
+      // A file lands here the same way it lands anywhere: made, captured, filed where it was aimed.
+      const made = await ingestDroppedResources(event, box.uuid, status);
+      if (made && made.length) {
+        await refreshSide();
+        return;
+      }
+      const landed = await dropBox(event, { status }, box.uuid, { label: `filed in ${box.name}` });
+      if (landed) await refreshSide();
     });
     item.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -4370,7 +4433,7 @@ function wirePaneDrops() {
     // file marker and `text/plain`, so a file dragged in from another window neither lit here nor
     // was ingested — and the `text/plain` half meant *any* selected text was treated as a box.
     if (!claimableHere(event)) return;
-    const draggingResource = carriesResources(event);
+    const draggingResource = dragIsResource(event);
     if (!draggingResource && !paneAcceptsDrops()) return;
     event.preventDefault(); // a candidate, not a claim: a view may still take this drop
     event.dataTransfer.dropEffect = draggingResource ? "copy" : "move";
@@ -5028,7 +5091,7 @@ function gridCell(box, ctx, row, column, child, depth) {
   cell.addEventListener("dragover", (event) => {
     if (!claimableHere(event)) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = carriesResources(event) ? "copy" : "move";
+    event.dataTransfer.dropEffect = dragIsResource(event) ? "copy" : "move";
     cell.classList.add("drop-target");
   });
   cell.addEventListener("dragleave", () => cell.classList.remove("drop-target"));
@@ -5284,7 +5347,7 @@ registerView("desktop", {
     surface.addEventListener("dragover", (event) => {
       if (!claimableHere(event)) return;
       event.preventDefault();
-      event.dataTransfer.dropEffect = carriesResources(event) ? "copy" : "move";
+      event.dataTransfer.dropEffect = dragIsResource(event) ? "copy" : "move";
       surface.classList.add("drop-target");
     });
     surface.addEventListener("dragleave", () => surface.classList.remove("drop-target"));
@@ -5747,7 +5810,7 @@ registerView("root", {
     holder.addEventListener("dragover", (event) => {
       if (!claimableHere(event)) return;
       event.preventDefault();
-      event.dataTransfer.dropEffect = carriesResources(event) ? "copy" : "move";
+      event.dataTransfer.dropEffect = dragIsResource(event) ? "copy" : "move";
       holder.classList.add("drop-target");
     });
     holder.addEventListener("dragleave", () => holder.classList.remove("drop-target"));
@@ -5896,7 +5959,7 @@ const folderView = {
     // view, would take the box as its own child instead.
     wrap.addEventListener("dragover", (event) => {
       if (!claimableHere(event)) return;
-      if (!canFile.ok && !carriesResources(event)) {
+      if (!canFile.ok && !dragIsResource(event)) {
         // Say it once per pass over the sheet, not once per pixel: the pointer sends a hundred
         // dragover events a second and the sentence is the same the whole time it is hovering.
         if (!wrap.classList.contains("drop-refused") && event.dataTransfer) {
@@ -5912,7 +5975,7 @@ const folderView = {
       // the library is not membership, and the library has to be able to receive a file wherever
       // the pointer happens to be over one.
       event.preventDefault();
-      event.dataTransfer.dropEffect = carriesResources(event) ? "copy" : "move";
+      event.dataTransfer.dropEffect = dragIsResource(event) ? "copy" : "move";
       wrap.classList.remove("drop-refused");
       wrap.classList.add("drop-target");
     });
@@ -5920,7 +5983,7 @@ const folderView = {
     wrap.addEventListener("drop", async (event) => {
       wrap.classList.remove("drop-target", "drop-refused");
       if (!claimableHere(event)) return;
-      if (!canFile.ok && !carriesResources(event)) return; // the server would say the same thing
+      if (!canFile.ok && !dragIsResource(event)) return; // the server would say the same thing
       event.preventDefault();
       if (!canFile.ok) {
         // Filtering folder, real file: bring it in, do not file it here, and say which happened.
@@ -6448,6 +6511,44 @@ function childTile(child, parent, ctx) {
     ctx.open(child.uuid, { trail: ctx.trail() });
   });
   item.addEventListener("dragstart", (event) => dragBox(event, child.uuid, parent.uuid));
+  // A row is a box the pointer can be aimed at. Dropping on it therefore files *into that box*, not
+  // into the folder being listed -- which is what happened before, because the row claimed nothing
+  // and the sheet behind it answered for the whole pane. Two targets, one gesture, two different
+  // parents, and the one the person was pointing at lost.
+  item.addEventListener("dragover", (event) => {
+    const accepts = filingTarget(child);
+    if (!accepts.ok) {
+      if (carriesABox(event) || dragIsResource(event)) {
+        item.classList.remove("drop-target");
+        item.classList.add("drop-refused");
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        if (accepts.reason) ctx.status(accepts.reason, true);
+      }
+      return;
+    }
+    if (!claimableHere(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = event.shiftKey ? "move" : "copy";
+    item.classList.remove("drop-refused");
+    item.classList.add("drop-target");
+  });
+  item.addEventListener("dragleave", () => item.classList.remove("drop-target", "drop-refused"));
+  item.addEventListener("drop", async (event) => {
+    item.classList.remove("drop-target", "drop-refused");
+    if (!filingTarget(child).ok) return;
+    if (!claimableHere(event)) return;
+    if (draggedBoxRef(event) === child.uuid) return; // a box is not filed inside itself
+    event.preventDefault();
+    event.stopPropagation();
+    const made = await ingestDroppedResources(event, child.uuid, ctx.status);
+    if (made && made.length) {
+      ctx.reload();
+      return;
+    }
+    const landed = await dropBox(event, ctx, child.uuid, { label: `filed in ${child.name}` });
+    if (landed) ctx.reload();
+  });
   item.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -6611,7 +6712,38 @@ function carriesResources(event) {
  * the payload, not just against whether the zone exists.
  */
 function claimableHere(event) {
-  return carriesResources(event) || Boolean(draggedBoxRef(event));
+  return dragIsResource(event) || carriesABox(event);
+}
+
+/**
+ * Does this drag carry a box reference, as far as a receiver can tell *while it moves*?
+ *
+ * `draggedBoxRef` is still the authority at drop time -- it reads the value and insists on a uuid --
+ * but it cannot be used to decide a highlight, because `getData()` answers the empty string until
+ * the gesture is over. This is the same rule that made the landing strip read `types` instead of
+ * `files` (ADR 38), learned twice: the first time it was an image that would not light the strip,
+ * the second time a box drag that lit nothing and filed nothing anywhere on the page.
+ */
+function carriesABox(event) {
+  const transfer = event.dataTransfer;
+  return Boolean(transfer) && dragTypes(transfer).includes(BOX_DRAG_TYPE);
+}
+
+/**
+ * The type-list half of `carriesResources`: bytes, a file dragged out of a directory box, or a
+ * uri-list (which is how a browser hands over a link and a file manager hands over a path).
+ *
+ * Deliberately not `text/plain` on its own: that is what a selected sentence looks like, and a zone
+ * that highlights for prose is the lie this page was rewritten to stop telling. A bare path typed
+ * into a terminal's selection is therefore not recognised as a resource -- the cost is stated in
+ * ADR 38, and it is smaller than the alternative of promising something for every piece of text.
+ */
+function dragIsResource(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer) return false;
+  if (carriesFiles(event)) return true;
+  const types = dragTypes(transfer);
+  return types.includes(FILE_DRAG_TYPE) || types.includes("text/uri-list");
 }
 
 /**
@@ -8424,7 +8556,7 @@ async function mindmapView(canvas, box, ctx, opts = {}) {
       // one thing a person looks at while deciding where to let go.
       if (!claimableHere(event)) return;
       event.preventDefault();
-      event.dataTransfer.dropEffect = carriesResources(event) ? "copy" : "move";
+      event.dataTransfer.dropEffect = dragIsResource(event) ? "copy" : "move";
       tile.classList.add("drop-target");
     });
     tile.addEventListener("dragleave", () => tile.classList.remove("drop-target"));
@@ -8731,7 +8863,7 @@ async function mindmapView(canvas, box, ctx, opts = {}) {
     if (event.target.closest(".mindmap-node")) return; // the node answers for itself
     if (!claimableHere(event)) return; // the same rule as the tile: no promise the drop cannot keep
     event.preventDefault();
-    event.dataTransfer.dropEffect = carriesResources(event) ? "copy" : "move";
+    event.dataTransfer.dropEffect = dragIsResource(event) ? "copy" : "move";
     board.classList.add("drop-target");
   });
   board.addEventListener("dragleave", () => board.classList.remove("drop-target"));
@@ -9461,7 +9593,7 @@ async function noteView(canvas, box, ctx, opts = {}) {
     editor.addEventListener("dragover", (event) => {
       // A file is refused below, so the pointer says so while the hand is still holding it: the
       // amber line is the same signal a dynamic folder gives, not an absence someone reads as "missed".
-      if (carriesFiles(event) || readDraggedFile(event) || droppedFilePath(event)) {
+      if (dragIsResource(event)) { // types only -- a value cannot be read mid-drag
         if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
         editor.classList.remove("drop-target");
         editor.classList.add("drop-refused");
@@ -9814,7 +9946,7 @@ async function checklistView(canvas, box, ctx, opts = {}) {
     line.addEventListener("dragover", (event) => {
       // This line takes a box and refuses a file, so it must not light like a welcome for the one
       // it is about to turn down.
-      if (carriesFiles(event) || readDraggedFile(event) || droppedFilePath(event)) {
+      if (dragIsResource(event)) { // types only -- a value cannot be read mid-drag
         if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
         line.classList.remove("is-target");
         line.classList.add("drop-refused");

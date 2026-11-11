@@ -853,12 +853,15 @@ def test_every_drop_goes_through_one_copy_or_move_rule(client: TestClient) -> No
         ("checklist", "await api.link(box.uuid, uuid, from);"),
     ):
         assert needle in script, f"{view} drop does not go through the rule"
-    # the side list starts a drag with no origin, so Shift there cannot unfile anything
-    start = script.index('item.addEventListener("dragstart"')
-    assert "dragBox(event, box.uuid)" not in script[start : start + 200], (
-        "a library row has no single origin"
-    )
-    assert 'event.dataTransfer.setData("text/plain", box.uuid);' in script[start : start + 200]
+    # A library row has no single origin -- the box may sit in several parents (ADR 19) -- so a
+    # drag from it carries no `from` marker, and Shift there cannot unfile anything. It goes through
+    # `dragBox` with one argument now, which is what makes that explicit; the invariant is the
+    # absence of the origin marker, not the absence of the shared drag helper.
+    assert "dragBox(event, box.uuid);" in script, "the library row no longer starts a box drag"
+    assert "dragBox(event, box.uuid," not in script, "a library row has no single origin to pass"
+    panel_drag = script[script.index("dragBox(event, box.uuid);") - 400 :]
+    panel_drag = panel_drag[: panel_drag.index("});")]
+    assert "application/x-boxganizer-from" not in panel_drag
 
 
 def test_a_link_between_two_boxes_can_be_deleted(client: TestClient, populated: BoxStore) -> None:
@@ -3285,7 +3288,7 @@ def test_a_box_that_holds_no_boxes_offers_no_drop_zone(client: TestClient) -> No
     sheet = sheet[: sheet.index("let children = []")]
     assert 'wrap.classList.add("drop-refused");' in sheet
     assert "if (canFile.reason) ctx.status(canFile.reason, true);" in sheet
-    assert "if (!canFile.ok && !carriesResources(event)) return;" in sheet, (
+    assert "if (!canFile.ok && !dragIsResource(event)) return;" in sheet, (
         "ADR 25 refuses to file a box into a folder that chooses its own members; a file being "
         "brought into the library is not membership, so it must not be turned away alike"
     )
@@ -5637,9 +5640,13 @@ def test_no_drop_zone_reads_a_drag_payload_to_decide_what_to_file(client: TestCl
         # finished. A bail-out on unrelated state ("is this a node?") is not a gate: the mindmap
         # board had one and still promised every drag on the screen.
         before_promise = body[:promise_at]
+        # Type-based predicates only. `carriesResources` is deliberately absent: it reads values, so
+        # it is correct at drop time and forbidden here -- and the sibling test fails the file if a
+        # dragover calls it. Keeping both lists honest is what makes the pair say something.
         gates = (
             "claimableHere(",
-            "carriesResources(",
+            "dragIsResource(",
+            "carriesABox(",
             "carriesFiles(",
             "FILE_DRAG_TYPE",
             "tagBeingDragged",
@@ -5664,12 +5671,12 @@ def test_only_the_page_own_uuid_is_accepted_as_a_box_reference(client: TestClien
     """
     script = client.get("/static/app.js").text
     assert "return UUID_SHAPE.test(ref) ? ref : null;" in script
-    # Counted *and* read: a drag source that writes something else -- a name, a path -- would keep
-    # the count at two and start losing its own drags at the gate below it.
+    # Counted *and* read. One write site, because every box drag goes through `dragBox`. A view
+    # writing `text/plain` by hand would be a second source invisible to the marker rule -- which is
+    # exactly what the library row used to be -- and a source writing a name or a path instead of a
+    # uuid would keep the count while losing its own drags at the gate under it.
     writes = re.findall(r'setData\("text/plain", ([^)]+)\)', script)
-    assert len(writes) == 2, f"expected the page's two drag sources, found {writes}"
-    for value in writes:
-        assert "uuid" in value, f"a drag source writes {value!r}; the gate accepts only a uuid"
+    assert writes == ["uuid"], f"box drags must funnel through dragBox; found {writes}"
     assert "UUID_SHAPE = /^[0-9a-f]{8}" in script
 
 
@@ -5695,3 +5702,86 @@ def test_error_bodies_keep_the_detail_envelope(client: TestClient) -> None:
     ghost_detail = ghost.json()["detail"]
     assert ghost_detail["error"] == "box_not_found"
     assert ghost_detail["reason"]
+
+
+def test_a_dragover_may_only_read_the_type_list(client: TestClient) -> None:
+    """While the pointer is still moving, a browser hands over **no values** — only `types`.
+
+    This is the rule that broke box dragging from the left panel. A gate written as
+    `if (!draggedBoxRef(event)) return;` looks correct, reads `getData("text/plain")`, gets the
+    empty string in a real drag, and therefore refuses every box on screen: nothing lights, nothing
+    is prevented, and the browser fires no `drop` at all. Synthetic `DataTransfer` tests cannot see
+    it, because a dispatch built in the page *can* read its own values mid-drag — which is exactly
+    how it survived a green suite and a green probe run. So the invariant is checked structurally: a
+    `dragover` body may mention `types`, never a payload value.
+    """
+    script = client.get("/static/app.js").text
+    handlers = _drag_handlers(script)
+    value_readers = (
+        "getData(",
+        "carriesResources(",  # reads values: correct at drop, wrong at dragover
+        "draggedBoxRef(",
+        "droppedLinkUrl(",
+        "droppedFilePath(",
+        "readDraggedFile(",
+    )
+    offenders = []
+    for kind, fn, body in handlers:
+        if kind != "dragover":
+            continue
+        hits = [name for name in value_readers if name in body]
+        if hits:
+            offenders.append(f"{fn}(): {hits}")
+    assert not offenders, (
+        f"a dragover reads payload values, so it will refuse every real drag: {offenders}"
+    )
+
+
+def test_a_dragged_box_announces_itself_in_the_type_list(client: TestClient) -> None:
+    """`text/plain` is shared with every text selection in the OS, so it cannot mean "a box".
+
+    The page writes its own marker type next to the uuid. Without it a zone has to choose between
+    lighting for prose (a promise that lies) and lighting for nothing (drag-and-drop stops working);
+    the marker is the third option, and it is the only one that is decidable mid-drag.
+    """
+    script = client.get("/static/app.js").text
+    assert 'const BOX_DRAG_TYPE = "application/x-boxganizer-box";' in script
+    drag_box = script[script.index("function dragBox(") :]
+    drag_box = drag_box[: drag_box.index("\n}\n")]
+    assert "event.dataTransfer.setData(\"text/plain\", uuid);" in drag_box
+    assert "event.dataTransfer.setData(BOX_DRAG_TYPE, uuid);" in drag_box
+    # one drag source for a box: the panel rows go through dragBox rather than writing text/plain
+    assert 'event.dataTransfer.setData("text/plain", box.uuid);' not in script
+
+
+def test_a_list_row_is_a_filing_target_in_both_lists(client: TestClient) -> None:
+    """A row is a folder the size of a line, in the left panel and in the folder's own list.
+
+    Neither list had a handler on the row, which is why "drag a box into a folder" had no answer at
+    all in the panel, and in the main pane a drop on a row filed into the *displayed* folder — the
+    box the pointer was on lost to the box behind it.
+    """
+    script = client.get("/static/app.js").text
+    panel = script[script.index('item.addEventListener("dragover", (event) => {') :]
+    panel = panel[: panel.index("item.addEventListener(\"dragleave\"")]
+    assert "const target = filingTarget(box);" in panel
+    assert 'item.classList.add("drop-refused");' in panel
+    assert "if (!claimableHere(event)) return;" in panel
+
+    tile = script[script.index("function childTile(") :]
+    tile = tile[: tile.index("item.addEventListener(\"contextmenu\"")]
+    assert "const accepts = filingTarget(child);" in tile
+    assert 'item.classList.add("drop-target");' in tile
+    assert "await dropBox(event, ctx, child.uuid," in tile, (
+        "the row files into the row's own box, not into the folder being listed"
+    )
+    assert "await ingestDroppedResources(event, child.uuid, ctx.status);" in tile
+
+    css = client.get("/static/app.css").text
+    for rule in (
+        "#box-list li.drop-target",
+        "#box-list li.drop-refused",
+        ".child.drop-target",
+        ".child.drop-refused",
+    ):
+        assert rule in css, f"{rule} missing: a handler that paints nothing is the ADR 38 failure"
