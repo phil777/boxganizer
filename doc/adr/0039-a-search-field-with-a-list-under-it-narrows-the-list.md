@@ -76,3 +76,40 @@ like the same to whoever has to fix it, so the conversion is explicit and this s
 - `childTile` gained an optional fourth argument (the "below" note). It defaults to empty, so every
   existing caller still compiles and draws nothing extra; the marker appears only where a filter is
   active and the match is genuinely below.
+
+## Amendment, found while re-verifying the whole tree
+
+The rule above — withdraw the window when a surface underneath is listening — is **wrong for a
+view whose list is not made of boxes**, and the error is the exact one this ADR exists to prevent.
+
+A directory, and an indexed directory, answer their field by filtering **file entries**. The library
+search those fields run answers with **boxes**. So a box filed under a directory, matching the term,
+had no row it could be drawn into: the listing narrowed, the window had been withdrawn, and the hit
+existed in no surface at all. Measured after the change, against the pre-change fixture: `directory:
+via "nothing"`, zero rows, no window, no route — a match the reader was told about and could never
+reach, which is ADR 34's dead end with the sign turned around.
+
+**The predicate is therefore "did the surface take this hit", not "is a surface listening".** A
+handler returns the number of hits it put on screen; the window paints for whatever is left:
+
+    const shownLive = emit(term, hits);
+    if (shownLive >= hits.length) close(); else paint();
+
+Two consequences worth stating plainly:
+
+- **A handler that returns no number counts as having shown nothing.** The failure mode of an
+  unreported handler is a window nobody needed; the failure mode of an over-reported one is an answer
+  nobody can open. The default points at the harmless one, and the structural test names both views
+  that report today, so a third that forgets shows up as a window rather than a lost hit.
+- **A filesystem listing claims only its own box.** It can show the directory's own content hits (the
+  file is the row), and nothing else — not another box filed underneath. Measured on the corrected
+  rule: `folder / cabinet / dynamic-folder → via "live list"` with no window, `directory /
+  indexed-directory → via "window"` for a box hit, and the same two directory types closing the
+  window again when the term matches their own files (`carryall`: `windowOpen: false`,
+  `carried: true`, 87 assertions true).
+
+**Counting on the handler's return value changed an argument the views never read, and that bit
+once.** Clearing the field has always emitted `("", null)` — null meaning "no answer, show
+everything" — and `null.length` inside a counting handler threw three `TypeError`s on the first
+Backspace. `emit` normalises the list in one place now, because the alternative is every future view
+having to remember a quirk of a funnel it does not own.

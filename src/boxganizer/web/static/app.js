@@ -451,6 +451,18 @@ function openBoxWithSearchTerm(box) {
  * the length of that gesture and for nothing longer. The term is a thing the reader arrived with, not
  * a filter that persists, and a repaint a second from now must not resurrect it.
  */
+/** Put a term in the queue for a box that is about to be opened.
+ *
+ * The left pane uses `openBoxWithSearchTerm`, which reads the library field. A view that holds its
+ * own term -- a folder narrowing its list -- needs the same handoff without reaching past the pane
+ * for a field that is not its own, so it stages one directly: same expiry, same single pickup.
+ */
+function stageSearchHandoff(boxUuid, term) {
+  const clean = (term || "").trim();
+  if (!clean) return;
+  searchHandoff = { boxUuid, term: clean, at: performance.now() };
+}
+
 function pendingHandoffFor(boxUuid) {
   if (!searchHandoff || searchHandoff.boxUuid !== boxUuid) return null;
   if (performance.now() - (searchHandoff.at || 0) > 700) {
@@ -1739,10 +1751,31 @@ function mountBoxSearch(mount, owner, open, options = {}) {
     paintHistory();
   };
 
-  // One answer, two uses: the window shows it, and the content under the field narrows to it.
+  /** One answer, two uses: the window shows it, and the content under the field narrows to it.
+   *
+   * Returns how many hits the view underneath put on screen. This is the difference between *a view
+   * is listening* and *the answer is visible*: a view that lists boxes can show every hit, a view
+   * that lists files on disk cannot show a box at all, and a hit that is neither in the list nor in
+   * the window is an answer the reader was given and cannot open (ADR 34). So the window is
+   * withdrawn for what the list actually took, not for the type of box it happens to be.
+   *
+   * A handler that returns no number counts as having shown nothing. The safe mistake is a window
+   * the reader did not need; the unsafe one is a hit that exists and is displayed nowhere.
+   */
   const emit = (term, hits) => {
-    if (!sink) return;
-    for (const handler of sink.handlers) handler(term, hits);
+    if (!sink) return 0;
+    // Emptying the field emits `("", null)` — null means "no answer, show everything" — and a
+    // handler that counts what it displayed will read `.length` on it. Normalised here, once, so no
+    // view has to remember: three `TypeError: Cannot read properties of null` lines were thrown on
+    // the first Backspace after this rule landed, which is the clearest argument for putting the
+    // guard in the funnel rather than in each handler.
+    const answer = hits || [];
+    let shown = 0;
+    for (const handler of sink.handlers) {
+      const took = handler(term, answer);
+      if (typeof took === "number") shown += took;
+    }
+    return shown;
   };
 
   let hits = [];
@@ -1750,21 +1783,19 @@ function mountBoxSearch(mount, owner, open, options = {}) {
   let token = 0;
   const generation = paneGeneration; // which box this widget was mounted for
 
-  /**
-   * Is the surface under this field narrowing itself in answer to the term?
+  /*
+   * When the window is noise, and when it is the only way to an answer (ADR 39).
    *
-   * When it is, the window is noise: the reader can already see the rows they are going to click,
-   * in the place they will click them, with the surrounding folder still around them. A second copy
-   * of the same answers, floating over the pane, hides the thing it is describing. The window stays
-   * for the case where nothing underneath is listening — a note, an image, a sensor — because there
-   * the hit is somewhere else in the library and there is no list to narrow.
-   *
-   * This asks rather than remembering a type list, because the sink is replaced on every render of
-   * the box and views add their handler as they draw: whoever is answering *now* is exactly who is
-   * registered now. A hard-coded set of "folder-ish types" would drift the moment a view learned to
-   * filter, and drift silently.
+   * A view that lists boxes narrows its own rows in answer to the term, and a second copy of those
+   * answers floating over the pane hides the thing it is describing: no window. A note, an image or
+   * a sensor has no list to narrow, so the window is the answer. And a view that lists *files* -- a
+   * directory, an indexed directory -- can narrow its rows and still be unable to show a hit,
+   * because the hit is a box and the rows are paths. That case is why the rule is "did the surface
+   * take this hit", counted by the handler, rather than "is a surface listening": the type of box
+   * was never what determined reachability, and asking the type would have hidden box matches in
+   * filesystem views entirely. Measured, before the count existed: an indexed-directory answered
+   * with zero rows, no window and no route to the box that matched.
    */
-  const filteringLive = () => Boolean(sink && sink.handlers.size);
 
   const close = () => {
     results.hidden = true;
@@ -1856,12 +1887,16 @@ function mountBoxSearch(mount, owner, open, options = {}) {
       // The list under the field is the answer when there is one; the window is only for when there
       // is not. `aria-expanded` follows, so the field does not claim a popup a screen reader cannot
       // find.
-      if (filteringLive()) {
+      // The list under the field is the answer when it can carry the answer; the window is for the
+      // rest of it. Measured before this rule existed: typing a box's name into an indexed-directory
+      // (whose list is files) narrowed the file rows to nothing and swallowed the box hit with them
+      // -- `via: "nothing"`, no rows, no window, no way to get there.
+      const shownLive = emit(term, hits);
+      if (shownLive >= hits.length) {
         close();
       } else {
         paint();
       }
-      emit(term, hits);
     }, 180);
   };
 
@@ -6199,9 +6234,15 @@ const folderView = {
 
     if (ctx.filterSink) {
       ctx.filterSink.handlers.add((term, hits) => {
-        if (!document.contains(wrap)) return; // this view has been replaced; a newer one answers now
-        filter = term ? { term, keep: visibleUnder(hits), below: matchedBelow(hits) } : null;
+        if (!document.contains(wrap)) return 0; // replaced; this view shows nothing any more
+        filter = term
+          ? { term, keep: visibleUnder(hits), below: matchedBelow(hits), why: reasonsFor(hits) }
+          : null;
         draw();
+        // Every hit is either a row here or folded into the note on the ancestor row that stayed.
+        // The ones that are neither -- the folder itself matching its own name, say -- are reported
+        // as not shown, so the window keeps them reachable instead of the list quietly eating them.
+        return filter ? hits.filter((hit) => filter.keep.has(hit.uuid)).length : hits.length;
       });
     }
 
@@ -6221,7 +6262,12 @@ const folderView = {
       }
       shown.forEach((child) => {
         const under = filter && filter.below ? filter.below.get(child.uuid) : null;
-        holder.append(childTile(child, box, ctx, under ? describeBelow(under) : ""));
+        // Why the row is here: matches hanging under it, or the file of its own that spoke. A row
+        // that simply appeared, with no reason on it, reads as a filter that is broken.
+        const note = under ? describeBelow(under) : (filter && filter.why.get(child.uuid)) || "";
+        holder.append(
+          childTile(child, box, ctx, note, filter ? filter.term : ""),
+        );
       });
     }
 
@@ -6651,6 +6697,17 @@ function expressionFromRows(rows, join) {
     .join(` ${join} `);
 }
 
+/** For each hit that answered out of a file it holds, a phrase naming that file. */
+function reasonsFor(hits) {
+  const why = new Map();
+  for (const hit of hits || []) {
+    const match = hit.match;
+    if (!match || match.how !== "content") continue;
+    why.set(hit.uuid, match.in_file ? `words in ${match.in_file}` : "words in its own text");
+  }
+  return why;
+}
+
 /** A phrase for "N matches hang under this row", naming the first couple. */
 function describeBelow(under) {
   const who = (under.names || []).join(", ");
@@ -6658,7 +6715,7 @@ function describeBelow(under) {
   return who ? `${head}: ${who}${under.count > under.names.length ? " …" : ""}` : head;
 }
 
-function childTile(child, parent, ctx, belowNote = "") {
+function childTile(child, parent, ctx, belowNote = "", carryTerm = "") {
   const item = document.createElement("div");
   item.className = "child";
   item.dataset.uuid = child.uuid;
@@ -6687,6 +6744,10 @@ function childTile(child, parent, ctx, belowNote = "") {
   });
   item.addEventListener("dblclick", (event) => {
     event.stopPropagation(); // claimed: nothing outside this row also opens a box
+    // A row that survived a filter did so because of a match — in it or under it. Opening it while
+    // the reason stays behind is the dead end ADR 34 forbids, so the term rides into the child's own
+    // field the same way it rides from a hit in the left pane (ADR 33).
+    if (carryTerm) stageSearchHandoff(child.uuid, carryTerm);
     ctx.open(child.uuid, { trail: ctx.trail() });
   });
   item.addEventListener("dragstart", (event) => dragBox(event, child.uuid, parent.uuid));
@@ -7215,11 +7276,20 @@ const directoryView = {
     let filter = null;
     if (ctx.filterSink) {
       ctx.filterSink.handlers.add((term, hits) => {
-        if (!document.contains(wrap)) return; // replaced by a newer view
+        if (!document.contains(wrap)) return 0; // replaced by a newer view
         filter = term
           ? { term: term.toLowerCase(), files: filesMatchedIn(box.uuid, hits) }
           : null;
         draw();
+        // What this listing can show: files on disk, by name, plus the files the index says hold the
+        // words -- which is what `filesMatchedIn` collected from this box's own content hits. A hit
+        // that is some *other* box filed under this directory has no row here and says so; the window
+        // stays open for it. Claiming otherwise would withdraw the only surface that can reach it.
+        // A hit is representable here only when it is *this* box matching on the content of one of
+        // its own files; the row for it is the file, drawn by `filter.files`. Any other hit is a
+        // different box, and a directory's listing has no row a box could sit in.
+        if (!filter) return hits.length;
+        return hits.filter((hit) => hit.uuid === box.uuid).length;
       });
     }
 

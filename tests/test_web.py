@@ -2379,13 +2379,17 @@ def test_the_tag_line_field_narrows_the_folder_and_it_keeps_no_field_of_its_own(
     assert "children.filter((child) => filter.keep.has(child.uuid))" in folder
     # a match three levels down stays reachable: the row above it is kept, never filtered away
     assert "for (const step of (hit.route || []).slice(0, -1)) keep.add(step.uuid);" in folder
-    # a view that has been replaced stops answering, or a stale list would repaint over a new one
-    assert "if (!document.contains(wrap)) return;" in folder
+    # a view that has been replaced stops answering, or a stale list would repaint over a new one;
+    # it reports `0`, which means "I show nothing", and the window stays up for the hits
+    assert "if (!document.contains(wrap)) return 0;" in folder
 
     widget = script[
         script.index("function mountBoxSearch(") : script.index("async function renderTagLine(")
     ]
-    assert "for (const handler of sink.handlers) handler(term, hits);" in widget
+    assert "const took = handler(term, answer);" in widget
+    assert 'if (typeof took === "number") shown += took;' in widget, (
+        "a handler that reports nothing must count as showing nothing, or a hit disappears"
+    )
     # emptying the field is the way out of a filter, and it says so with no window to paint
     assert 'if (!term) emit("", null);' in widget
 
@@ -3372,7 +3376,9 @@ def test_the_child_menu_does_not_offer_to_file_into_a_folder_that_refuses_it(
     still offered "New box in …", which is the refusal arriving one dialog later.
     """
     script = client.get("/static/app.js").text
-    tile = script[script.index("function childTile(child, parent, ctx, belowNote = \"\")") :]
+    tile = script[
+        script.index("function childTile(child, parent, ctx, belowNote = \"\", carryTerm = \"\")") :
+    ]
     tile = tile[: tile.index("registerView(\"folder\", folderView);")]
     assert "...(filingTarget(parent).ok" in tile
     assert '{ label: "New box in " + parent.name' in tile
@@ -5881,19 +5887,38 @@ def test_a_placement_that_cannot_happen_is_said_instead_of_thrown(client: TestCl
 
 
 def test_a_field_with_a_list_under_it_narrows_the_list_not_a_window(client: TestClient) -> None:
-    """ADR 39: the popup is withdrawn wherever a surface is filtering, asked not remembered.
+    """ADR 39: the popup is withdrawn for the hits the surface underneath actually displayed.
 
-    The predicate is `sink.handlers.size`, because the sink is rebuilt on every render and views
-    register as they draw -- so "who answers now" is "who is registered now". A list of folder-ish
-    types would have drifted the first time another view learned to narrow, and drifted silently:
-    the symptom is a popup nobody asked for, never an error.
+    The first version asked whether *a* view was listening (`sink.handlers.size`) and closed the
+    window for all of them. That was wrong in a way only a filesystem view shows: a directory lists
+    files, so a hit that is a box has no row to sit in -- the list narrowed, the window withdrew,
+    and the answer existed nowhere on screen (`via: "nothing"`, measured). So the question is now
+    "did the surface take this hit", answered by the handler returning a count, and the window
+    paints for the remainder. Views that report nothing count as showing nothing: a redundant window
+    is a harmless mistake, a hidden answer is not.
     """
     script = client.get("/static/app.js").text
     widget = script[script.index("function mountBoxSearch(") :]
-    assert "const filteringLive = () => Boolean(sink && sink.handlers.size);" in widget
-    asked = widget[widget.index("hits = answer;") : widget.index("hits = answer;") + 400]
-    assert "if (filteringLive()) {" in asked and "close();" in asked, (
+    assert "filteringLive" not in widget, (
+        "the withdrawal must be counted per hit, not inferred from a view existing"
+    )
+    asked = widget[widget.index("hits = answer;") : widget.index("hits = answer;") + 1200]
+    assert "const shownLive = emit(term, hits);" in asked
+    assert "if (shownLive >= hits.length) {" in asked and "close();" in asked, (
         "the answer reaches the list but the window is still painted over it"
+    )
+    assert "} else {" in asked and "paint();" in asked, (
+        "what the list could not take has to be painted, or it is unreachable"
+    )
+    # the two views that answer report honestly what they showed
+    assert (
+        "return filter ? hits.filter((hit) => filter.keep.has(hit.uuid)).length : hits.length;"
+        in script
+    ), "the box-list view must report the rows it kept"
+    fs = script[script.index("// What this listing can show") :]
+    assert "return hits.filter((hit) => hit.uuid === box.uuid).length;" in fs, (
+        "a filesystem listing can only ever show this box's own content hits -- saying otherwise\n"
+        "     is what hid a box match inside a directory"
     )
     # the field must not claim a popup that is not there
     assert 'field.setAttribute("aria-expanded", "false");' in widget
@@ -6082,3 +6107,25 @@ def test_enter_in_the_library_field_opens_the_box_a_click_would_open(client: Tes
     assert script.count("openBoxWithSearchTerm(box)") >= 3, (
         "click, double-click, the menu's Open and Enter must not drift into four different routes"
     )
+
+
+def test_the_filter_funnel_hands_views_a_list_even_when_the_field_was_emptied(
+    client: TestClient,
+) -> None:
+    """`emit("", null)` is a real call, and a handler that counts will read `.length` on it.
+
+    Clearing the field means "no answer, show everything", which the funnel has always spelled as
+    `null`. That was harmless while handlers ignored their return value; the moment they report how
+    many hits they displayed, `null.length` throws -- and it threw three times on the first
+    Backspace in a folder's field, in a `TypeError` out of the view code that looked like a filter
+    bug. Normalising in the funnel means a new view cannot get this wrong.
+    """
+    script = client.get("/static/app.js").text
+    widget = script[script.index("function mountBoxSearch(") :]
+    emit = widget[widget.index("const emit = (term, hits) => {") :]
+    emit = emit[: emit.index("\n  };")]
+    assert "const answer = hits || [];" in emit
+    assert "handler(term, answer);" in emit, (
+        "the raw argument must not reach a handler once handlers count on it"
+    )
+    assert 'if (!term) emit("", null);' in widget, "the empty-field call still spells it null"
