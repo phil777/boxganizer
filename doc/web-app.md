@@ -138,27 +138,37 @@ at a document still leaves that document exactly where it was.
 **Every box has a search of its own**, on the tag line: the field sits on the left and the tags stay
 right of centre. It asks the library's existing full-text question restricted to that box and whatever
 is filed below it — same ranking, same passage, same widening, one extra set clause — so nothing is
-re-read to answer it, and a cycle in the graph terminates instead of looping (ADR 33). A window unrolls
-under the field as results arrive: each row says *via* which boxes you would reach it, and a row that
-matched inside a file names the file and quotes the words. Escape closes it, clicking away closes it,
-and the rows are reachable with the arrow keys and **Enter**.
+re-read to answer it, and a cycle in the graph terminates instead of looping (ADR 33).
 
-The same field also **narrows what the box is showing**. Typing does not only unroll a window of matches
-to jump to — the list, icons, or directory listing underneath closes down to what matches, and says
-`2 of 4 inside` while it is doing it. One search, one answer, two uses, so the window and the list can
-never disagree. A box three levels down that matches keeps the drawers above it on screen, because a
-match you cannot reach is not a filter but a dead end; and in a directory, a file whose *contents* matched
-stays listed even when its name says nothing about the word. Escape clears the field and brings the whole
-shelf back.
+**If the box has a list to narrow, that list is the answer, and nothing unrolls over it.** In a folder,
+a directory, an indexed-directory or a cabinet, typing closes the displayed rows down to what matches —
+list, icons or file listing — and says `2 of 4 inside` while it does. A second copy of those same
+matches floating on top would hide the rows you are about to click, in the only place that shows them
+in order and in context, so the popup is withdrawn wherever a surface is listening (ADR 39). The page
+decides by asking whether anything underneath is filtering, not by consulting a list of types.
+
+**A match deeper than a row is shown by the row that holds it, and the row says so.** A box three levels
+down keeps the drawers above it on screen — a match you cannot reach is not a filter but a dead end — and
+the ancestor now carries a line naming what matched below it: *1 match inside: Boiler Notes*. In a
+directory you get the same for a subtree (`1 match inside`) and, for a file whose contents matched while
+its name says nothing about the word, *the words are in this file*. Without those lines a surviving row
+looks like a filter that is broken, because the term appears nowhere on it.
+
+**A box with no list keeps the window.** A note, an image, a sensor: there is nothing on screen to
+narrow, so results unroll under the field, each row saying *via* which boxes you would reach it, and a
+row that matched inside a file naming the file and quoting the words. Escape closes it, clicking away
+closes it, and the rows are reachable with the arrow keys and **Enter**. Escape anywhere clears the field
+and brings the whole shelf back.
 
 **A box opened out of a search opens *in* that search.** Click a result in the left pane and the term
-comes with it: it lands in the box's own field, the window is already unrolled, and a folder shows the
-children that answered rather than the whole shelf — so you arrive where the match was, with the reason
-still on screen. The term is read at the click, not remembered from when the list was drawn, and it joins
+comes with it: it lands in the box's own field — whatever kind of box it is, list-bearing or not — and
+the box shows the children that answered rather than the whole shelf, so you arrive where the match was
+with the reason still on screen. Where there is no list to narrow, the window is already unrolled on the
+term instead. The term is read at the click, not remembered from when the list was drawn, and it joins
 the box's list of searched-for terms. It is not remembered as a *filter*: navigate away and back with an
 empty search box and the shelf is whole again.
  There is no second search box: the folder used to carry its own `name or type` field, and one
-field per box replaced it (ADR 34).
+field per box replaced it (ADR 34, with the window's role narrowed by ADR 39).
 
 Where a result opens depends on where you asked. From the library, it becomes the current box and the
 box you searched from stays in the crumb line. Inside a viewport, it replaces that pane's box and the

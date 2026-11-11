@@ -592,6 +592,9 @@ pre.text {
 .child-icon { font-size: 1.4rem; }
 .children-view[data-layout="grid"] .child-icon { font-size: 2.2rem; }
 .child-name { overflow-wrap: anywhere; font-size: 0.9rem; }
+/* Why a row survived a term it does not itself contain: the match is below it. Small and muted, but
+   on the row rather than in a popup, because the popup it replaces hid the list it was describing. */
+.child-below { flex-basis: 100%; font-size: 0.72rem; opacity: 0.75; margin-left: 1.5rem; }
 
 /* The search box takes the room the toolbar has left, so a long name does not push
    the layout buttons off the pane. */
@@ -1607,6 +1610,7 @@ pre.text {
 .fs-row.selected { outline: 1px solid var(--accent); }
 .fs-icon { text-align: center; }
 .fs-name { overflow-wrap: anywhere; }
+.fs-below { font-size: 0.72rem; opacity: 0.75; margin-left: auto; padding-left: 0.6rem; }
 .fs-kind { font-size: 0.75rem; opacity: 0.65; }
 .fs-size { font-size: 0.75rem; font-variant-numeric: tabular-nums; }
 .video-view { height: 100%; display: flex; align-items: center; justify-content: center; }

@@ -1,7 +1,9 @@
 # 34. One search field per box, and it filters what the box shows
 
 Date: 2026-11-07
-Status: accepted
+Status: accepted, in part — ADR 39 withdraws the unrolled window for any surface that has a list to
+narrow. The one field, the `filterSink`, the per-surface handlers and "a match you cannot reach is a
+dead end" all stand.
 
 ## Context
 

@@ -2365,7 +2365,9 @@ def test_the_tag_line_field_narrows_the_folder_and_it_keeps_no_field_of_its_own(
 
     folder = script[script.index("const folderView = {") : script.index("function childTile(")]
     assert "ctx.filterSink.handlers.add((term, hits) =>" in folder
-    assert "filter = term ? { term, keep: visibleUnder(hits) } : null;" in folder
+    assert "keep: visibleUnder(hits), below: matchedBelow(hits)" in folder, (
+        "the kept-row note was dropped: a deep match becomes an unexplained omission"
+    )
     assert "children.filter((child) => filter.keep.has(child.uuid))" in folder
     # a match three levels down stays reachable: the row above it is kept, never filtered away
     assert "for (const step of (hit.route || []).slice(0, -1)) keep.add(step.uuid);" in folder
@@ -3362,7 +3364,7 @@ def test_the_child_menu_does_not_offer_to_file_into_a_folder_that_refuses_it(
     still offered "New box in …", which is the refusal arriving one dialog later.
     """
     script = client.get("/static/app.js").text
-    tile = script[script.index("function childTile(child, parent, ctx)") :]
+    tile = script[script.index("function childTile(child, parent, ctx, belowNote = \"\")") :]
     tile = tile[: tile.index("registerView(\"folder\", folderView);")]
     assert "...(filingTarget(parent).ok" in tile
     assert '{ label: "New box in " + parent.name' in tile
@@ -5868,3 +5870,81 @@ def test_a_placement_that_cannot_happen_is_said_instead_of_thrown(client: TestCl
 
     # the two drop routes declare their names inferred, which is what unlocks the content rule
     assert "inferred_name: true," in script
+
+
+def test_a_field_with_a_list_under_it_narrows_the_list_not_a_window(client: TestClient) -> None:
+    """ADR 39: the popup is withdrawn wherever a surface is filtering, asked not remembered.
+
+    The predicate is `sink.handlers.size`, because the sink is rebuilt on every render and views
+    register as they draw -- so "who answers now" is "who is registered now". A list of folder-ish
+    types would have drifted the first time another view learned to narrow, and drifted silently:
+    the symptom is a popup nobody asked for, never an error.
+    """
+    script = client.get("/static/app.js").text
+    widget = script[script.index("function mountBoxSearch(") :]
+    assert "const filteringLive = () => Boolean(sink && sink.handlers.size);" in widget
+    asked = widget[widget.index("hits = answer;") : widget.index("hits = answer;") + 400]
+    assert "if (filteringLive()) {" in asked and "close();" in asked, (
+        "the answer reaches the list but the window is still painted over it"
+    )
+    # the field must not claim a popup that is not there
+    assert 'field.setAttribute("aria-expanded", "false");' in widget
+
+
+def test_a_deep_match_is_explained_on_the_row_that_holds_it(client: TestClient) -> None:
+    """The row that survives because something *below* it matched says what matched.
+
+    Two bugs live here and both were shipped once. First: `route` starts at the box that was
+    searched, so the child on the way to a match is the step *after* this folder -- `steps[0]` reads
+    the folder's own uuid, matches no row, and the note silently never appears. Second: a directory
+    listing that keeps a file by name but not a *directory* holding the match removes the one row
+    that could reach it.
+    """
+    script = client.get("/static/app.js").text
+    folder_view = script[script.index("function matchedBelow(") :]
+    folder_view = folder_view[: folder_view.index("\n    }", folder_view.index("return below;"))]
+    assert "steps.findIndex((step) => step.uuid === box.uuid)" in folder_view, (
+        "route[0] is the searched box itself, not the child on the way down"
+    )
+    assert "steps[here + 1]" in folder_view
+    assert "function describeBelow(under)" in script
+    assert "hint.className = \"child-below muted\";" in script
+
+    listing = script[script.index("function entryShows(entry)") :]
+    listing = listing[: listing.index("\n    }", listing.index("return false;"))]
+    assert "found.startsWith(`${via}/`)" in listing, (
+        "a directory whose subtree holds the match must survive the filter"
+    )
+    assert "function matchesUnder(entry, active)" in script
+    # `files` is a Set; `.filter` on a Set throws and blanks the listing
+    assert "instanceof Set ? [...active.files]" in script, (
+        "filter.files is a Set -- calling array methods on it throws inside the draw"
+    )
+    css = client.get("/static/app.css").text
+    assert ".child-below" in css and ".fs-below" in css
+
+
+def test_the_docs_describe_the_live_filter_and_the_withdrawn_window(client: TestClient) -> None:
+    """The behaviour changed, so the two documents people read have to change with it."""
+    root = Path(__file__).resolve().parent.parent
+    web_app = (root / "doc" / "web-app.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    for label, text in (("doc/web-app.md", web_app), ("README.md", readme)):
+        lowered = text.lower()
+        assert (
+            "nothing unrolls" in lowered
+            or "no window" in lowered
+            or "does not unroll" in lowered
+        ), f"{label} still describes the popup as always appearing"
+        assert (
+            "match inside" in text
+            or "matches inside" in text
+            or "words are in this file" in text
+        ), f"{label} does not say a deep match is explained on the row"
+    adr = Path(__file__).resolve().parent.parent / "doc" / "adr"
+    assert (adr / "0039-a-search-field-with-a-list-under-it-narrows-the-list.md").exists()
+    assert "0039" in (adr / "README.md").read_text(encoding="utf-8")
+    old = (adr / "0034-one-search-field-per-box-and-it-filters-what-the-box-shows.md").read_text(
+        encoding="utf-8"
+    )
+    assert "ADR 39" in old, "ADR 34 still reads as wholly current while 39 withdraws part of it"

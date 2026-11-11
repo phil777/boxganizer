@@ -312,15 +312,23 @@ that can be checked later. A folder, a remote address, and a copy someone edited
 with a sentence, and the box isn't created. ADR 35.
 
 **Every box can also search itself.** On the same line, the field sits on the left and the tags stay
-right of centre: type a word and a window unrolls underneath with everything matching anywhere below
-that box, while the list or listing on screen closes down to the same answer — its children, their children, and the words inside their files. It is the same search the
-left pane runs, restricted to a set, so the ranking, the passage and the widening are identical and no
-file is re-read to answer (ADR 33). Each row says *via* which boxes you would reach the match, and a row
-that matched inside a file names the file. Where it opens depends on where you asked: from the library it
-becomes the current box, *carrying the term with it*, so a folder opened from a search result shows the
-children that answered; inside a viewport it replaces that pane's box and the crumb line shows the route
-down to it, each crumb clickable, and a search in one pane never moves another. Click a match that is a
-file and the box holding it opens with the word already typed and the results already unrolled on it.
+right of centre, and it asks the library's own question restricted to that box — so the ranking, the
+passage and the widening are identical and no file is re-read to answer (ADR 33).
+
+What you see depends on whether the box has a list to narrow. In a **folder, directory, indexed
+directory or cabinet** the rows on screen close down to the answer in real time and **nothing unrolls
+over them** — a floating copy of the same matches would hide the only place they are shown in order and
+in context (ADR 39). A match deeper than a row is represented by the row that holds it, which says so:
+*1 match inside: Boiler Notes*, or in a directory, *the words are in this file* for a file whose name
+says nothing about the word. In a box with **no list** — a note, an image, a sensor — the results do
+unroll under the field, each row saying *via* which boxes you would reach it, reachable by arrow keys
+and Enter.
+
+Where a match opens depends on where you asked: from the library it becomes the current box, *carrying
+the term with it*, so the box you arrive at already holds the word in its field and shows the children
+that answered; inside a viewport it replaces that pane's box and the crumb line shows the route down to
+it, each crumb clickable, and a search in one pane never moves another. Click a match that is a file and
+the box holding it opens with the word already typed.
 
 ☰ **Manage tags…** is a tree, read as a tree (ADR 26): one row per tag — caret, swatch, name, how many
 boxes carry it and how many answer to it counting the branches below — with the tags ordered

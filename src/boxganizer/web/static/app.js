@@ -1727,6 +1727,22 @@ function mountBoxSearch(mount, owner, open, options = {}) {
   let token = 0;
   const generation = paneGeneration; // which box this widget was mounted for
 
+  /**
+   * Is the surface under this field narrowing itself in answer to the term?
+   *
+   * When it is, the window is noise: the reader can already see the rows they are going to click,
+   * in the place they will click them, with the surrounding folder still around them. A second copy
+   * of the same answers, floating over the pane, hides the thing it is describing. The window stays
+   * for the case where nothing underneath is listening — a note, an image, a sensor — because there
+   * the hit is somewhere else in the library and there is no list to narrow.
+   *
+   * This asks rather than remembering a type list, because the sink is replaced on every render of
+   * the box and views add their handler as they draw: whoever is answering *now* is exactly who is
+   * registered now. A hard-coded set of "folder-ish types" would drift the moment a view learned to
+   * filter, and drift silently.
+   */
+  const filteringLive = () => Boolean(sink && sink.handlers.size);
+
   const close = () => {
     results.hidden = true;
     results.textContent = "";
@@ -1814,7 +1830,14 @@ function mountBoxSearch(mount, owner, open, options = {}) {
       if (mine !== token || !stillOnScreen(generation)) return;
       hits = answer;
       active = hits.length ? 0 : -1;
-      paint();
+      // The list under the field is the answer when there is one; the window is only for when there
+      // is not. `aria-expanded` follows, so the field does not claim a popup a screen reader cannot
+      // find.
+      if (filteringLive()) {
+        close();
+      } else {
+        paint();
+      }
       emit(term, hits);
     }, 180);
   };
@@ -6036,10 +6059,37 @@ const folderView = {
       return keep;
     }
 
+    /**
+     * Which kept rows are kept because something *below* them matched, and what matched.
+     *
+     * Keeping the ancestor is what makes a deep hit reachable; leaving it unmarked is what makes it
+     * look like a mistake -- a folder sitting in a filtered list for no visible reason, which the
+     * reader reads as a filter that does not work. So the row says how many matches hang under it
+     * and names the first couple, which is also the information the withdrawn dropdown used to give.
+     */
+    function matchedBelow(hits) {
+      const below = new Map();
+      for (const hit of hits || []) {
+        const steps = hit.route || [];
+        // The route starts at the box that was searched -- this one -- so the child on the way to
+        // the match is the step *after* this folder, not the first step. Taking `steps[0]` reads the
+        // folder's own uuid, never matches a row, and the marker silently never appears: the deep
+        // hit stays an unexplained omission, which is the exact thing this note exists to prevent.
+        const here = steps.findIndex((step) => step.uuid === box.uuid);
+        const through = here >= 0 ? steps[here + 1] : steps[0];
+        if (!through || through.uuid === hit.uuid) continue; // the row itself matched
+        const entry = below.get(through.uuid) || { count: 0, names: [] };
+        entry.count += 1;
+        if (entry.names.length < 2) entry.names.push(hit.name);
+        below.set(through.uuid, entry);
+      }
+      return below;
+    }
+
     if (ctx.filterSink) {
       ctx.filterSink.handlers.add((term, hits) => {
         if (!document.contains(wrap)) return; // this view has been replaced; a newer one answers now
-        filter = term ? { term, keep: visibleUnder(hits) } : null;
+        filter = term ? { term, keep: visibleUnder(hits), below: matchedBelow(hits) } : null;
         draw();
       });
     }
@@ -6058,7 +6108,10 @@ const folderView = {
         holder.append(emptyMessage(`Nothing inside matches “${filter.term}”.`));
         return;
       }
-      shown.forEach((child) => holder.append(childTile(child, box, ctx)));
+      shown.forEach((child) => {
+        const under = filter && filter.below ? filter.below.get(child.uuid) : null;
+        holder.append(childTile(child, box, ctx, under ? describeBelow(under) : ""));
+      });
     }
 
     // The members of a filtered folder are decided by tags, and a tag can move while this folder is
@@ -6487,7 +6540,14 @@ function expressionFromRows(rows, join) {
     .join(` ${join} `);
 }
 
-function childTile(child, parent, ctx) {
+/** A phrase for "N matches hang under this row", naming the first couple. */
+function describeBelow(under) {
+  const who = (under.names || []).join(", ");
+  const head = under.count === 1 ? "1 match inside" : `${under.count} matches inside`;
+  return who ? `${head}: ${who}${under.count > under.names.length ? " …" : ""}` : head;
+}
+
+function childTile(child, parent, ctx, belowNote = "") {
   const item = document.createElement("div");
   item.className = "child";
   item.dataset.uuid = child.uuid;
@@ -6499,6 +6559,14 @@ function childTile(child, parent, ctx) {
   name.className = "child-name";
   name.textContent = child.name;
   item.append(glyph, name);
+  if (belowNote) {
+    // Why this row survived a filter it does not itself satisfy. Without it the folder looks like a
+    // bug in the filter, and the match under it stays unfound.
+    const hint = document.createElement("span");
+    hint.className = "child-below muted";
+    hint.textContent = belowNote;
+    item.append(hint);
+  }
   // One click selects, a double click replaces this pane's box with the child.
   item.addEventListener("click", () => {
     ctx.status(`${child.name} selected — double-click to open it`);
@@ -7044,12 +7112,34 @@ const directoryView = {
       });
     }
 
+    /** Why this entry survived: the words are in it, or somewhere below it. "" when the name says it. */
+    function matchesUnder(entry, active) {
+      if (!active) return "";
+      if (entry.name.toLowerCase().includes(active.term)) return ""; // the name is the reason, visibly
+      const path = entry.sub || entry.name;
+      // `files` is a Set of relative paths that hold the words. Arrays have .filter, Sets do not,
+      // and calling the former on the latter throws inside the draw -- which left the whole listing
+      // empty and looked like a filter that finds nothing rather than a filter that crashed.
+      const found = active.files instanceof Set ? [...active.files] : Array.from(active.files || []);
+      if (entry.kind === "dir") {
+        const deeper = found.filter((f) => f !== path && f.startsWith(`${path}/`));
+        if (!deeper.length) return "";
+        return deeper.length === 1 ? "1 match inside" : `${deeper.length} matches inside`;
+      }
+      return found.includes(path) ? "the words are in this file" : "";
+    }
+
     /** Whether one listing entry survives the filter. */
     function entryShows(entry) {
       if (!filter) return true;
       if (entry.name.toLowerCase().includes(filter.term)) return true;
       for (const found of filter.files) {
         if (found === entry.sub || found === entry.name || found.endsWith(`/${entry.name}`)) return true;
+        // A directory the words live *under*. Without this the folder holding the only match is
+        // filtered away and the term looks broken: the file is there, its name is not, and the one
+        // row that could have led to it was removed for not matching.
+        const via = entry.sub || entry.name;
+        if (via && found.startsWith(`${via}/`)) return true;
       }
       return false;
     }
@@ -7200,6 +7290,18 @@ const directoryView = {
         size.className = "fs-size muted";
         size.textContent = entry.kind === "dir" ? "" : formatSize(entry.size);
         row.append(glyph, name, kind, size);
+        // Why this row survived the term. A directory kept because a file deep inside it matched, and
+        // a file kept because the index found the words in its body, both look like mistakes from the
+        // outside -- the term is nowhere on the row -- so the row says which of the two it is.
+        if (filter) {
+          const under = matchesUnder(entry, filter);
+          if (under) {
+            const hint = document.createElement("span");
+            hint.className = "fs-below muted";
+            hint.textContent = under;
+            row.append(hint);
+          }
+        }
         row.addEventListener("dblclick", (event) => {
           event.stopPropagation();
           if (entry.kind === "dir") enter(entry);
