@@ -6129,3 +6129,37 @@ def test_the_filter_funnel_hands_views_a_list_even_when_the_field_was_emptied(
         "the raw argument must not reach a handler once handlers count on it"
     )
     assert 'if (!term) emit("", null);' in widget, "the empty-field call still spells it null"
+
+
+def test_a_reused_box_says_it_was_reused_and_a_suffixed_one_says_its_new_name(
+    client: TestClient,
+) -> None:
+    """A path drop has three outcomes and the line must distinguish all three.
+
+    The library behaviour was right from the start -- three drops of one path leave **one** box --
+    but the status line said "made a markdown box from report" every time, including the two times
+    it made nothing. A person who reads "made" twice and finds one box stops believing the line. The
+    bytes route already reported `box_reused`; the path route had been left behind, and the server
+    has been sending `reused_box` the whole time.
+    """
+    script = client.get("/static/app.js").text
+    ingest = script[script.index("inferred_name: true,") :]
+    ingest = ingest[: ingest.index("\n  return made;")]
+    assert "if (made.reused_box) {" in ingest, "the reuse the server reports has to reach the line"
+    assert "already in the library with these bytes" in ingest
+    assert "was taken, so it went in as" in ingest, (
+        "a suffixed newcomer must name the name it actually got"
+    )
+    assert "made.name !== payload.name" in ingest, (
+        "the rename is read from the response, not assumed from the file"
+    )
+    # the plain sentence survives for the case that really did make a box
+    assert "made a ${type} box from ${payload.name}" in ingest
+
+
+def test_the_server_marks_the_reused_box_on_the_create_route(client: TestClient) -> None:
+    """`reused_box` is the wire contract the sentence depends on, so it is pinned at both ends."""
+    app_py = Path(__file__).resolve().parents[1] / "src" / "boxganizer" / "web" / "app.py"
+    server = app_py.read_text(encoding="utf-8")
+    assert 'return holder.to_dict() | {"reused_box": True}' in server
+    assert "box.name = _next_free_name(store, box.name)" in server

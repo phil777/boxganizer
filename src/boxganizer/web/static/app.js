@@ -6882,11 +6882,25 @@ async function createBoxFromDraggedFile(payload, parent, { keep = false } = {}) 
     ...(keep ? { capture_resource: true } : {}),
   });
   await refreshSide();
-  status(
-    keep
-      ? `made a ${type} box from ${payload.name} and kept a copy in the library`
-      : `made a ${type} box from ${payload.name}`
-  );
+  // The server settled the name by content (ADR 35 route), and it says which way: reuse comes back
+  // as `reused_box`, a suffixed newcomer arrives under a different `name` than the file that was
+  // dragged. Saying "made a box" over a drop that made nothing is a lie the person can check -- the
+  // library holds one box, not two -- and the sentence is the only place this gesture reports. The
+  // bytes route already did this; the path route had been left behind.
+  if (made.reused_box) {
+    status(`“${made.name}” was already in the library with these bytes — filed it here, no second copy`);
+  } else if (made.name !== payload.name) {
+    status(
+      `“${payload.name}” was taken, so it went in as “${made.name}”` +
+        (keep ? " and a copy was kept in the library" : ""),
+    );
+  } else {
+    status(
+      keep
+        ? `made a ${type} box from ${payload.name} and kept a copy in the library`
+        : `made a ${type} box from ${payload.name}`,
+    );
+  }
   return made;
 }
 
