@@ -68,3 +68,4 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0037   | A dropped file arrives as bytes, so the page posts them and the server decides what it is | accepted |
 | 0038   | A drop zone promises only what it can finish, and an address is never a filing instruction | accepted |
 | 0039   | A search field with a list under it narrows the list; the window is only for when there is none | accepted |
+| 0040   | A drag announces its kind in the type list, because values arrive only at the drop | accepted |

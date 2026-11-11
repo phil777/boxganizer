@@ -97,9 +97,17 @@ the thing you found.
 
 **Left: the library.** The root is pinned first, then every box, each with its icon and type.
 The field above it searches by a box's own fields *and* by the words inside its text and PDF
-files, shows the passage that answered, and says what your words were widened to. ☰ beside
-the library name holds what belongs to the library rather than to one box: About, Check the
-library, and the two index passes. Along the bottom, in front of the count, the index reports
+files, shows the passage that answered, and says what your words were widened to.
+
+Open a result from that field and the box opens **carrying the term with it**. What happens next
+depends on the box, not on a second decision: a box that shows a list of its own narrows it there
+and then, with no popup unrolling over it, while a note, an image or a sensor keeps the separate
+window, because it has **no list to narrow**. A box filed later with the same words inside does not
+appear until you press enter, so the list you are reading cannot move under your cursor. ☰ beside
+the library name holds what belongs to the library rather than to one box, in this order: Manage
+tags…, Check the library, a line, Index what changed, Re-read the whole library, a line, and About
+last — About is the entry that leaves the work to describe the tool, so it sits at the end rather
+than at the place every click passes through. Along the bottom, in front of the count, the index reports
 itself permanently — `75 indexed`, or `2 out of date`, or `indexing…`.
 
 **Right: one box, content first.** This note is being *read*, not edited: a note shows an
@@ -298,6 +306,16 @@ would be a scraper with a search box, and would let any web page make your serve
 you can reach. A drag carrying both a picture and its URL takes the picture: you were filing it, not
 pointing at somebody else's copy. A file manager that hands over a path rather than bytes works too —
 `file:///notes.md` is read as a path, typed by its suffix, and captured.
+
+**A taken name is settled by content, not by an error.** Drop the same photo on two folders and the
+library holds **one** box, filed in both — the bytes match, so there is nothing new to make, and the
+line says it was already in the library. Same filename, different bytes, and the newcomer takes the next
+number (`notes`, `notes 2`). A name you *typed* in the dialog is still refused when it clashes,
+because you meant that name and only you can decide what to do about it.
+
+The **mouse back button** goes up one level in the main pane — along the path you walked,
+otherwise to the parent, otherwise to the root — and nowhere at the root, and it never takes the tab
+away with the panes and the walk in it.
 
 A zone lights only for what it can finish, and the two that take a box but not a file (the note
 editor, a checklist line) show an amber refusal instead of a welcome. Miss every zone and nothing

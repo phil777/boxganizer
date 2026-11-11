@@ -4640,6 +4640,20 @@ async function init() {
   setupDropNavigationGuard();
   el("search-form").addEventListener("submit", (event) => {
     event.preventDefault();
+    // Enter in a search field means "take me to the first thing that answered". It used to mean
+    // `refreshSide()`, which redrew the list the reader is already looking at and moved nothing:
+    // measured with a real keyboard, `current` and the box's own field were byte-identical either
+    // side of the keypress, so the term a click would have carried was simply lost. A match you
+    // cannot reach with the key you were told to press is a dead end (ADR 34), so Enter opens the
+    // top row through the same funnel a click uses — including the handoff that fills "search
+    // inside" (ADR 33). Roots are pinned first by `orderedForSide`, so on an ordinary library Enter
+    // on an empty-ish term lands where the person would have clicked.
+    const first = el("box-list").querySelector("li[role=option]");
+    const box = first ? state.boxes.find((entry) => entry.uuid === first.dataset.uuid) : null;
+    if (box) {
+      openBoxWithSearchTerm(box);
+      return;
+    }
     refreshSide();
   });
   el("up").addEventListener("click", goUp);

@@ -6056,3 +6056,29 @@ def test_the_back_button_climbs_the_main_pane_and_never_leaves(client: TestClien
     # the main pane only: panes own their own walk (ADR 29) and the button must not touch it
     for forbidden in ("PANE_PATHS_KEY", "viewports/", "vp-pane"):
         assert forbidden not in climb, f"the climb reaches into pane state: {forbidden}"
+
+
+def test_enter_in_the_library_field_opens_the_box_a_click_would_open(client: TestClient) -> None:
+    """Enter is a way of reaching a result, not a way of redrawing the list that shows it.
+
+    The submit handler used to call `refreshSide()` and nothing else: measured with a real keyboard
+    on a library with a root, the pane was identical on both sides of the keypress and the term the
+    reader had just typed never reached the box's own field. Whatever the mouse can open, Enter must
+    open -- through `openBoxWithSearchTerm`, so the handoff that fills "search inside" (ADR 33)
+    rides along, and so a match is not a dead end (ADR 34). With no row, Enter stays a search.
+    """
+    script = client.get("/static/app.js").text
+    handler = script[script.index('el("search-form").addEventListener("submit"') :]
+    handler = handler[: handler.index("\n  });")]
+    assert "event.preventDefault();" in handler, "the form must not navigate the tab"
+    assert 'el("box-list").querySelector("li[role=option]")' in handler, (
+        "the top row is what Enter takes -- the same row a click would have hit"
+    )
+    assert "openBoxWithSearchTerm(box)" in handler, (
+        "opening without the handoff would lose the term the reader typed"
+    )
+    assert "refreshSide();" in handler, "a search with no result stays a search"
+    # the result row's own gestures use the same funnel -- one route from a hit to a box
+    assert script.count("openBoxWithSearchTerm(box)") >= 3, (
+        "click, double-click, the menu's Open and Enter must not drift into four different routes"
+    )

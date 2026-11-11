@@ -161,3 +161,48 @@ def test_the_docs_answer_all_three_drop_questions() -> None:
     assert "0038" in (ROOT / "doc" / "adr" / "README.md").read_text(encoding="utf-8"), (
         "ADR 38 is not in the index, so nobody finds it"
     )
+
+
+def test_the_docs_answer_the_five_questions_this_round_asked() -> None:
+    """Five behaviours changed; each has to be readable in the tour *and* the reference.
+
+    Not prose policing — these are the sentences a person needs before they try the gesture, and the
+    kind that rot by paraphrase rather than deletion: a document that still describes the old popup,
+    or the old `duplicate_name` error, is worse than none because it is trusted.
+    """
+    # Prose is compared with runs of whitespace collapsed: a sentence that wraps mid-phrase is the
+    # same sentence, and a test that fails on a line break trains everyone to delete it.
+    def flat(text: str) -> str:
+        # markdown emphasis stripped too: **About** last and About last are one sentence
+        return " ".join(text.replace("*", "").split())
+
+    readme = flat(README.read_text(encoding="utf-8"))
+    web_app = flat((ROOT / "doc" / "web-app.md").read_text(encoding="utf-8"))
+
+    checks = {
+        # a dropped resource whose name is taken is settled by its bytes
+        "content decides a taken name": ("already in the library", "next number"),
+        # folder-type search narrows the list; no window over it
+        "live filter, no dropdown": ("nothing unrolls", "match inside"),
+        # the term a box was opened with is carried, for every kind of box
+        "the term is carried": ("carrying the term with it", "no list to narrow"),
+        # the mouse back button climbs the main pane and never leaves
+        "back button climbs": ("back button", "up one level"),
+        # ☰ order, with About last
+        "menu order": ("About last", "a line, and About last"),
+    }
+    for label, needles in checks.items():
+        for text, name in ((readme, "README.md"), (web_app, "doc/web-app.md")):
+            for needle in needles:
+                assert needle in text, (
+                    f"{name} does not say anything about {label} (looked for {needle!r})"
+                )
+
+    # the two ADRs this round turned on exist and are indexed
+    index = (ROOT / "doc" / "adr" / "README.md").read_text(encoding="utf-8")
+    for number, slug in (
+        ("0039", "0039-a-search-field-with-a-list-under-it-narrows-the-list"),
+        ("0040", "0040-a-drag-announces-its-kind-in-the-type-list"),
+    ):
+        assert (ROOT / "doc" / "adr" / f"{slug}.md").exists(), f"ADR {number} is missing"
+        assert number in index, f"ADR {number} is not in the index"

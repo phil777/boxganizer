@@ -52,7 +52,12 @@ file list — which is empty at exactly the moment you are deciding whether to d
 a grid cell, the desktop, a viewport pane, a mindmap (the bare picture files it as a branch, a node
 hangs it on that node) or the library list and the same happens *plus* the filing or placement you
 aimed at — the box is created first and then placed by the uuid the create returned, which is the only
-order in which placing it can mean anything. A file manager that hands over a **path** instead of bytes
+order in which placing it can mean anything. **A name that is already taken is settled by content,
+not by an error**: if the box carrying that name already holds these exact bytes, nothing new is
+made — the existing box is filed where you dropped it, and the line says it was already in the
+library. Different bytes under the same name are two things that happen to share a filename, so the
+newcomer takes the next number (`notes`, `notes 2`). A name you *typed* in the dialog is still
+refused when it clashes, because you meant that name and only you can choose what to do about it. A file manager that hands over a **path** instead of bytes
 (`file:///…`) is the same case: the path is read as a path, typed by its real suffix — `notes.md` is a
 markdown box, not "a file" — named without the extension, and captured like any other file. A **link**
 (a URL dragged out of a browser, with or without its title) becomes a link box pointing at that
@@ -82,6 +87,14 @@ turned down, says what it looked like (an address, a file name, an id that is no
 that never was), and says nothing changed; a name clash says which name and that names are kept unique.
 A create that cannot be finished leaves no half-finished box behind (ADR 38).
 
+**The mouse back button goes up one level, and never leaves the app.** Back on the mouse moves the *main
+pane* up the hierarchy: along the crumb path you walked if there is one, otherwise to the box's
+parent, otherwise to the root — and at the root it does nothing, because there is nothing above it.
+It never navigates the tab away, which matters more than it sounds: the alternative takes the panes,
+the walk remembered for each of them and anything half-typed with it. Viewport panes keep their own
+walks untouched. Keyboard Back and the browser's own Back do the same thing, because by the time the
+page hears about them they are the same navigation.
+
 **A stray drop cannot take the page away.** Release a file anywhere the app did not claim — a heading,
 a crumb, the gap between panes — and the browser's own behaviour (open the file, navigate away, lose
 the tab's panes and any unsaved editing) is cancelled quietly, with no message, because you were not
@@ -102,7 +115,10 @@ full-text search, and **Keep a copy in the library** captures it — a copy besi
 named by its sha256 and stored once however many boxes capture the same bytes (ADR 35). Both are
 off unless you say otherwise, and the capture box starts unticked every time the dialog opens, so
 an unrelated edit can't copy a file by accident. ☰ beside the name at the top of that panel is what belongs to the library rather than
-to one box: **About**, **Check the library**, and the two index passes. Along the bottom,
+to one box, in this order: **Manage tags…**, **Check the library**, a line, **Index what changed**,
+**Re-read the whole library**, a line, and **About** last — About is the entry that leaves the work to
+describe the tool, so it sits at the end rather than at the place every click passes through.
+Along the bottom,
 in front of the box count, the index reports itself all the time — `75 indexed`, or `2 out
 of date`, or `reading 12 of 80…` — with the detail on hover, including which files hold nothing to
 read. **Saving a box does not wait for its file to be read**: the rows are written, the answer comes
@@ -160,8 +176,8 @@ row that matched inside a file naming the file and quoting the words. Escape clo
 closes it, and the rows are reachable with the arrow keys and **Enter**. Escape anywhere clears the field
 and brings the whole shelf back.
 
-**A box opened out of a search opens *in* that search.** Click a result in the left pane and the term
-comes with it: it lands in the box's own field — whatever kind of box it is, list-bearing or not — and
+**A box opened out of a search opens *in* that search.** Click a result in the left pane and the box
+opens carrying the term with it: it lands in the field of whatever kind of box it is — whatever kind of box it is, list-bearing or not — and
 the box shows the children that answered rather than the whole shelf, so you arrive where the match was
 with the reason still on screen. Where there is no list to narrow, the window is already unrolled on the
 term instead. The term is read at the click, not remembered from when the list was drawn, and it joins
