@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import mimetypes
 import os
@@ -165,6 +166,15 @@ class BoxCreate(BaseModel):
         description="Keep this box's file in the full-text index. Omitted: the default"
         " for what it points at — a text or PDF, and a local file whose ending says"
         " words, yes; anything else no.",
+    )
+    inferred_name: bool = Field(
+        default=False,
+        description=(
+            "The name came from a dropped object rather than from a person. A clash is then "
+            "resolved by content -- reuse the box holding these bytes, or take the next free "
+            "number -- instead of refused. The dialog leaves this false, because a typed name is "
+            "something the person meant."
+        ),
     )
     capture_resource: bool = Field(
         default=False,
@@ -2583,29 +2593,47 @@ def create_app(
                 raise HTTPException(
                     status_code=422, detail={"error": "bad_viewport", "reason": problem}
                 )
+        def _attach(target: Box) -> None:
+            """File and place the box the drop asked for, undoing the create if that fails.
+
+            The request was for one thing: "a note, in that grid, at that cell". A library holding
+            the note and not the placement is not half a result, it is a stray box with an error on
+            the screen, and the person has to notice it and clean it up themselves. Whatever the
+            layout layer rejected, the box is taken back out and the refusal is handed on
+            unchanged -- so a refused create leaves the library exactly as it was.
+            """
+            if parent_box is None:
+                return
+            try:
+                store.link(parent_box.uuid, target.uuid)
+                if payload.cell is not None:
+                    _grid_place(store, parent_box.uuid, target.uuid, payload.cell)
+                elif payload.place is not None:
+                    _desktop_place(
+                        store, parent_box.uuid, target.uuid, payload.place.x, payload.place.y
+                    )
+            except Exception:
+                _undo_create(store, target)
+                raise
+
+        # A dropped resource whose name is already taken: the content decides, not the file name.
+        # Same bytes means the library already holds this thing, so the existing box is filed where
+        # the pointer was and no second box appears; different bytes means two different things that
+        # happen to share a name, and the newcomer takes the next number. Only for inferred names --
+        # a name somebody typed is refused, because they meant it.
+        if payload.inferred_name and store.exists(box.name):
+            holder = store.resolve(box.name)
+            if _same_content(holder.resource_uri, resource_uri):
+                _attach(holder)
+                return holder.to_dict() | {"reused_box": True}
+            box.name = _next_free_name(store, box.name)
+
         saved = store.add(box, index_it=payload.index_resource, read_now=False)
         # A text or PDF box goes into the full-text index as soon as it exists, so it is findable by
         # what it says without anyone remembering to rebuild anything — but the reading happens in
         # the queue rather than inside this response.
         _sync_index(request, saved)
-        if parent_box is not None:
-            try:
-                store.link(parent_box.uuid, saved.uuid)
-                if payload.cell is not None:
-                    _grid_place(store, parent_box.uuid, saved.uuid, payload.cell)
-                elif payload.place is not None:
-                    _desktop_place(
-                        store, parent_box.uuid, saved.uuid, payload.place.x, payload.place.y
-                    )
-            except Exception:
-                # The request was for one thing: "a note, in that grid, at that cell". A library
-                # holding the note and not the placement is not half a result, it is a stray box
-                # with an error on the screen, and the person has to notice it and clean it up
-                # themselves. Whatever the layout layer rejected, the box is taken back out and the
-                # refusal is handed on unchanged -- so a refused create leaves the library exactly
-                # as it was -- the promise a legible refusal is only worth making.
-                _undo_create(store, saved)
-                raise
+        _attach(saved)
         return saved.to_dict()
 
     @app.put("/api/boxes/{ref}")
@@ -2757,23 +2785,22 @@ def create_app(
         proposal = infer.suggest(got.reference)
         if proposal is not None:
             box_type = proposal.key
-        box = Box(
-            name=box_name or stem,
-            box_type=box_type,
-            icon=DEFAULT_ICON,
+        container = store.resolve(parent) if parent else None
+        # The name came from the dropped object, not from a person, so a clash is resolved by
+        # content rather than answered with an error: same bytes reuses the box that already holds
+        # them (and takes the link this drop asked for), different bytes take the next free number.
+        saved, box_reused = _file_captured_bytes(
+            store,
+            wanted=box_name or stem,
             resource_uri=got.reference,
+            box_type=box_type,
+            parent_uuid=container.uuid if container else None,
         )
-        boxtypes.adopt_type_icon(box)
-        thumbs.icon_from_resource(box)
-        saved = store.add(box, read_now=False)
         _sync_index(request, saved)
-        filed_in: str | None = None
-        if parent:
-            container = store.resolve(parent)
-            store.link(container.uuid, saved.uuid)
-            filed_in = container.name
+        filed_in: str | None = container.name if container else None
         return {
             "box": saved.to_dict(),
+            "box_reused": box_reused,
             "captured": str(got.path),
             "reused": got.reused,
             "filed_in": filed_in,
@@ -2964,6 +2991,111 @@ def _grid_place(
     )
     parent.config = grid.to_config(parent.config, size=size, cells=placed)
     return store.update(parent).to_dict()
+
+
+def _content_digest(resource_uri: str | None) -> str | None:
+    """sha256 of the bytes a local resource names, or None when it names none of them.
+
+    `None` for a remote URI, a missing file, or anything unreadable. The question this answers is
+    "are these the same content", and an unanswerable question is answered *different* rather than
+    guessed at, because the safe consequence of "different" is a new box with a numbered name.
+    """
+    if not resource_uri:
+        return None
+    if "://" in resource_uri and not resource_uri.lower().startswith("file:"):
+        return None
+    try:
+        path = _local_path(resource_uri)
+    except (ValueError, OSError):
+        return None
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _same_content(left: str | None, right: str | None) -> bool:
+    """Do these two references name the same bytes?
+
+    Identical strings are the common case and cost nothing: a captured file is named by its own hash
+    (ADR 35), so two references that match *are* the same content. Otherwise the files are hashed,
+    and only after a size check, because reading a large file to discover it is not the same file is
+    a waste one `stat` prevents.
+    """
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    try:
+        a, b = _local_path(left), _local_path(right)
+    except (ValueError, OSError):
+        return False
+    if not (a.is_file() and b.is_file()) or a.stat().st_size != b.stat().st_size:
+        return False
+    right_digest = _content_digest(right)
+    return right_digest is not None and _content_digest(left) == right_digest
+
+
+def _next_free_name(store: BoxStore, base: str) -> str:
+    """`base`, or `base 2`, `base 3` … the first that is not taken."""
+    for attempt in range(2, 100):
+        candidate = f"{base} {attempt}"
+        if not store.exists(candidate):
+            return candidate
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "duplicate_name",
+            "name": base,
+            "reason": (
+                f"a hundred boxes are already named {base!r} or close to it; "
+                "give this one its own name."
+            ),
+        },
+    )
+
+
+def _file_captured_bytes(
+    store: BoxStore,
+    *,
+    wanted: str,
+    resource_uri: str,
+    box_type: str,
+    parent_uuid: str | None,
+) -> tuple[Box, bool]:
+    """Give a drop's bytes a box: reuse the one that holds them, else take a free name.
+
+    A dropped file's name is **inferred**, not typed, so a clash is not a person's mistake and must
+    not come back at them as an error. The content decides instead, which is what a person means
+    when they drop the same photo on a folder twice: one box holding it, filed where they pointed,
+    not a refusal and not a duplicate. Different content under the same name is a different thing
+    that happens to share a file name, so it gets a number -- the rule a dropped link follows.
+
+    When somebody *does* type a name (the new-box dialog) the clash stays a refusal: they meant that
+    name, and silently renaming it or quietly adopting a stranger's box would be the wrong courtesy.
+    """
+    try:
+        clash = store.resolve(wanted)
+    except BoxNotFound:
+        clash = None
+    if clash is not None and _same_content(clash.resource_uri, resource_uri):
+        if parent_uuid and parent_uuid != clash.uuid:
+            store.link(parent_uuid, clash.uuid)
+        return clash, True
+    name = wanted if clash is None else _next_free_name(store, wanted)
+    box = Box(name=name, box_type=box_type, icon=DEFAULT_ICON, resource_uri=resource_uri)
+    boxtypes.adopt_type_icon(box)
+    thumbs.icon_from_resource(box)
+    saved = store.add(box, read_now=False)
+    if parent_uuid:
+        store.link(parent_uuid, saved.uuid)
+    return saved, False
 
 
 def _undo_create(store: BoxStore, created: Box) -> None:

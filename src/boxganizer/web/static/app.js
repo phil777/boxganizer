@@ -6631,6 +6631,10 @@ async function createBoxFromDraggedFile(payload, parent, { keep = false } = {}) 
     name: payload.name || "untitled",
     box_type: type,
     resource_uri: payload.path,
+    // The name is read off the dropped file, so a clash is settled by content on the server: same
+    // bytes reuse the existing box, different bytes take the next number. Never an error back at
+    // the person who just moved a mouse.
+    inferred_name: true,
     ...(parent ? { parent } : {}),
     // Only a *drop* keeps a copy: the same inference reached from the right-click menu is "make a box
     // out of this file", and quietly copying the file in that gesture would surprise the person who
@@ -6789,20 +6793,31 @@ async function ingestDroppedResources(event, parent, report = status, options = 
   for (const file of files) {
     try {
       const answer = await api.captureFile(file.name, file, parent);
-      made.push(answer.box);
+      made.push({ ...answer.box, reused: Boolean(answer.box_reused) });
     } catch (error) {
       report(`could not capture ${file.name}: ${error.message}`, true);
     }
   }
   if (!made.length) return [];
   await refreshSide();
-  const names = made.map((box) => box.name);
-  report(
-    `${names.length === 1 ? `captured ${names[0]}` : `captured ${names.length} files: ${names.join(", ")}`}${
-      parent ? " and filed it here" : ""
-    }`
-  );
-  return await placeMade(made, options);
+  const names = made.map((item) => item.name);
+  const already = made.filter((item) => item.reused).map((item) => item.name);
+  if (already.length && already.length === made.length) {
+    // The bytes were already in the library under this name, so there is nothing new to make: the
+    // existing box is what gets filed, placed, or hung on the node, and the sentence says so rather
+    // than claiming a capture that did not happen.
+    report(
+      `${names.join(", ")} ${names.length === 1 ? "was" : "were"} already in the library` +
+        (parent ? " — filed there again" : "")
+    );
+  } else {
+    report(
+      `${names.length === 1 ? `captured ${names[0]}` : `captured ${names.length} files: ${names.join(", ")}`}${
+        parent ? " and filed it here" : ""
+      }`
+    );
+  }
+  return await placeMade(made, options, report);
 }
 
 /**
@@ -6857,11 +6872,23 @@ async function createLinkBox(url, event, parent) {
  * `for...of` on an object throws `TypeError: ... is not iterable` -- which is exactly what this did
  * from the moment the path branch became reachable. A route nobody could reach is not tested, and
  * an untested route is a crash with its ticket pending.
+ *
+ * A placement that fails is **said, not thrown**. By this point the file has been captured and the
+ * box exists, so the failure is partial success, and the two ways of ending that were both wrong:
+ * throwing left an uncaught error in the console with the status line still reading "captured X and
+ * filed it here" -- a lie and a stack trace at once -- and swallowing it left a box nobody could see
+ * until they navigated away and back. Now the sentence names both halves: what was kept, and why it
+ * is not sitting where the pointer put it.
  */
-async function placeMade(made, options) {
+async function placeMade(made, options, report = status) {
   const list = Array.isArray(made) ? made : made ? [made] : [];
+  if (!(options.cell && typeof options.cell === "function")) return list;
   for (const box of list) {
-    if (options.cell && typeof options.cell === "function") await options.cell(box);
+    try {
+      await options.cell(box);
+    } catch (error) {
+      report(`${box.name} is kept in the library but could not be placed: ${error.message}`, true);
+    }
   }
   return list;
 }

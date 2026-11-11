@@ -5785,3 +5785,86 @@ def test_a_list_row_is_a_filing_target_in_both_lists(client: TestClient) -> None
         ".child.drop-refused",
     ):
         assert rule in css, f"{rule} missing: a handler that paints nothing is the ADR 38 failure"
+
+
+def test_a_dropped_file_is_named_by_its_content_not_by_its_filename(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Drop the same photo on two folders and the library holds **one** box, filed twice.
+
+    A dropped file's name is inferred from the object, so a clash is not a mistake the person made
+    and must not come back as an error. Content decides instead: identical bytes reuse the box that
+    already holds them and take the link this drop asked for; different bytes under the same name
+    are two things that happen to share a filename, so the newcomer takes the next number, which is
+    the rule a dropped link already follows. A name somebody *typed* is still refused — they meant
+    it, and silently renaming or quietly adopting a stranger's box would be the wrong courtesy.
+    """
+    for folder in ("Content-A", "Content-B"):
+        made = client.post("/api/boxes", json={"name": folder, "box_type": "folder"})
+        assert made.status_code == 201
+
+    first = client.post(
+        "/api/capture-file?name=photo.png&parent=Content-A", content=b"identical bytes"
+    )
+    assert first.status_code == 201
+    assert first.json()["box"]["name"] == "photo"
+    assert first.json()["box_reused"] is False
+
+    again = client.post(
+        "/api/capture-file?name=photo.png&parent=Content-B", content=b"identical bytes"
+    )
+    assert again.status_code == 201
+    body = again.json()
+    assert body["box_reused"] is True, "the same bytes made a second box"
+    assert body["box"]["uuid"] == first.json()["box"]["uuid"]
+    names = [b["name"] for b in client.get("/api/boxes").json()]
+    assert names.count("photo") == 1, f"one photo in, two boxes out: {names}"
+    uuid_a = client.get("/api/boxes/Content-A").json()["uuid"]
+    uuid_b = client.get("/api/boxes/Content-B").json()["uuid"]
+    assert "photo" in [c["name"] for c in client.get(f"/api/boxes/{uuid_a}/children").json()]
+    assert "photo" in [c["name"] for c in client.get(f"/api/boxes/{uuid_b}/children").json()]
+
+    other = client.post("/api/capture-file?name=photo.png", content=b"a different photo entirely")
+    assert other.status_code == 201
+    assert other.json()["box"]["name"] == "photo 2"
+    assert other.json()["box"]["resource_uri"] != first.json()["box"]["resource_uri"]
+
+    third = client.post("/api/capture-file?name=photo.png", content=b"yet another photo")
+    assert third.json()["box"]["name"] == "photo 3"
+
+
+def test_a_typed_name_is_still_refused_when_it_clashes(client: TestClient) -> None:
+    """The dialog is the one place a name is *chosen*, so a clash there stays an error.
+
+    Same library state as the drop test, opposite policy: a person who typed `photo` and hit save
+    needs to know the name is taken, because the two courses of action — rename mine, or use the
+    one that exists — are theirs to pick and the app cannot guess between them.
+    """
+    assert client.post(
+        "/api/capture-file?name=ticket.png", content=b"the stub of a ticket"
+    ).status_code == 201
+    typed = client.post("/api/boxes", json={"name": "ticket", "box_type": "note", "text": "mine"})
+    assert typed.status_code == 409
+    detail = typed.json()["detail"]
+    assert detail["error"] == "duplicate_name"
+    assert "already in this library" in detail["reason"]
+
+
+def test_a_placement_that_cannot_happen_is_said_instead_of_thrown(client: TestClient) -> None:
+    """A captured file the grid cannot hold is a *partial success*, and has to be described as one.
+
+    Reaching this point means the bytes are in the library and a box exists; the layout layer then
+    said no (every cell taken, nowhere to displace anybody into). Throwing left an uncaught error in
+    the console with the status line still reading "captured X and filed it here" — a lie and a
+    stack trace at once — and the box only appeared after navigating away and back.
+    """
+    script = client.get("/static/app.js").text
+    placed = script[script.index("async function placeMade(") :]
+    placed = placed[: placed.index("\n}\n", placed.index("for (const box of list)"))]
+    assert "try {" in placed and "catch (error)" in placed, "a failed placement must not escape"
+    assert "could not be placed" in placed, (
+        "the sentence has to say what did happen, not only what did not"
+    )
+
+    # the two drop routes declare their names inferred, which is what unlocks the content rule
+    assert "inferred_name: true," in script
