@@ -4382,12 +4382,16 @@ function openSideMenu(event) {
   });
   const where = button.getBoundingClientRect();
   showMenu(where.left, where.bottom + 4, [
-    { label: "About", run: showAbout },
     { label: "Manage tags…", run: openTagsModal },
     { label: "Check the library", run: openCheckModal },
     { separator: true },
     { label: "Index what changed", run: () => runIndexation("outstanding") },
     { label: "Re-read the whole library", run: () => runIndexation("everything") },
+    // About last, behind a line: it is the one entry that leaves the work and describes the tool,
+    // so it belongs at the end of the list rather than at the place every click passes through.
+    // A separator, not a gap, because "last" has to be legible as a group of one.
+    { separator: true },
+    { label: "About", run: showAbout },
   ]);
 }
 

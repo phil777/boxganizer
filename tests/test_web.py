@@ -5987,3 +5987,36 @@ def test_a_term_arriving_with_a_search_survives_one_gesture_and_no_longer(
     assert "toLowerCase() === clean.toLowerCase()) return" in remember, (
         "the burst re-PUTs the same config on every rebuild"
     )
+
+
+def test_the_side_menu_puts_about_last_behind_a_separator(client: TestClient) -> None:
+    """About is the entry that leaves the work, so it sits at the end of the list, not at the top.
+
+    Pinned structurally because the order is the whole requirement: an item reordered by accident is
+    invisible to every other test, and a separator that is missing turns "a group of one" back into
+    "the last thing in the pile". The rendered order was also read out of a real open menu.
+    """
+    script = client.get("/static/app.js").text
+    menu = script[script.index("showMenu(where.left, where.bottom + 4, [") :]
+    menu = menu[: menu.index("\n  ]);")]
+    labels = re.findall(r'\{ (?:separator: true|label: "([^"]+)")', menu)
+    order = ["#SEP" if item == "" else item for item in labels]
+    assert order == [
+        "Manage tags…",
+        "Check the library",
+        "#SEP",
+        "Index what changed",
+        "Re-read the whole library",
+        "#SEP",
+        "About",
+    ], f"the side menu reads {order}"
+    # every entry keeps what it does; only the order moved
+    actions = (
+        "run: openTagsModal",
+        "run: openCheckModal",
+        'runIndexation("outstanding")',
+        'runIndexation("everything")',
+        "run: showAbout",
+    )
+    for run in actions:
+        assert run in menu, f"an entry lost its action: {run}"
