@@ -1881,6 +1881,19 @@ pre.text {
   align-items: center;
   gap: 0.35rem;
   flex-wrap: wrap;
+  /* The surface is taken out of the flow at the top-left of this same box and painted over what
+     comes after it, so a press aimed at a chip landed on the wallpaper: the strip's chips could be
+     seen and could not be grabbed. Lifted above the surface so they take their own presses, and left
+     transparent to events everywhere it draws nothing -- a band of invisible intercept across the
+     desk would be a worse bug than the one it cures, because dropping on the wallpaper is how a box
+     gets placed at all. */
+  position: relative;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.desktop-unplaced .chip {
+  pointer-events: auto;
 }
 
 /* A desktop drawn inside a cell keeps its proportions and loses its toolbar. Only the
