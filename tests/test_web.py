@@ -5776,22 +5776,36 @@ def test_a_list_row_is_a_filing_target_in_both_lists(client: TestClient) -> None
     Neither list had a handler on the row, which is why "drag a box into a folder" had no answer at
     all in the panel, and in the main pane a drop on a row filed into the *displayed* folder — the
     box the pointer was on lost to the box behind it.
+
+    Both lists now call one helper. Two copies of the same twelve lines is how they drifted in the
+    first place: the panel's version answered a dragged box and stayed dark for a dragged file,
+    while the main pane's answered both. So the assertion here is that both sites reach the same
+    function, and that the function still carries the rules the copies used to paraphrase.
     """
     script = client.get("/static/app.js").text
-    panel = script[script.index('item.addEventListener("dragover", (event) => {') :]
-    panel = panel[: panel.index("item.addEventListener(\"dragleave\"")]
-    assert "const target = filingTarget(box);" in panel
-    assert 'item.classList.add("drop-refused");' in panel
-    assert "if (!claimableHere(event)) return;" in panel
+
+    panel = script[script.index("function renderSide(") :]
+    panel = panel[: panel.index("function markSelected(")]
+    assert "wireRowFilingTarget(item, box, {" in panel, "the left panel's rows are not targets"
 
     tile = script[script.index("function childTile(") :]
-    tile = tile[: tile.index("item.addEventListener(\"contextmenu\"")]
-    assert "const accepts = filingTarget(child);" in tile
-    assert 'item.classList.add("drop-target");' in tile
-    assert "await dropBox(event, ctx, child.uuid," in tile, (
-        "the row files into the row's own box, not into the folder being listed"
+    tile = tile[: tile.index('item.addEventListener("contextmenu"')]
+    assert "wireRowFilingTarget(item, child, {" in tile, (
+        "the row must file into the row's own box, not into the folder being listed"
     )
-    assert "await ingestDroppedResources(event, child.uuid, ctx.status);" in tile
+
+    helper = script[script.index("function wireRowFilingTarget(") :]
+    helper = helper[: helper.index("\n}\n")]
+    for rule in (
+        "const accepts = filingTarget(row);",  # the same predicate as the pane behind it
+        "if (carriesABox(event) || dragIsResource(event)) {",  # a refusal is drawn for both kinds
+        'element.classList.add("drop-refused");',
+        "if (!claimableHere(event)) return;",
+        "if (draggedBoxRef(event) === row.uuid) return;",  # not inside itself
+        "await ingestDroppedResources(event, row.uuid, report)",
+        "await dropBox(event, ctx || { status: report }, row.uuid,",
+    ):
+        assert rule in helper, f"the shared row target lost {rule!r}"
 
     css = client.get("/static/app.css").text
     for rule in (

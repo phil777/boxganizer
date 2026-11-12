@@ -3085,44 +3085,12 @@ function renderSide() {
       dragBox(event, box.uuid);
     });
     // A row is a folder the size of a line, and the left panel is where a person goes to choose
-    // one. Filing by drag therefore has to work here as it does in the main pane: the row the
-    // pointer is over is the box being filed into. No version of this page had a handler on the
-    // row, which is why a drop between two rows of the same list did nothing at all.
-    item.addEventListener("dragover", (event) => {
-      const target = filingTarget(box);
-      if (!target.ok) {
-        // Refusal is drawn, not withheld: an absent outline reads as a missed target.
-        if (carriesABox(event)) {
-          item.classList.remove("drop-target");
-          item.classList.add("drop-refused");
-          if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
-          if (target.reason) status(target.reason, true);
-        }
-        return;
-      }
-      if (!claimableHere(event)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = event.shiftKey ? "move" : "copy";
-      item.classList.remove("drop-refused");
-      item.classList.add("drop-target");
-    });
-    item.addEventListener("dragleave", () => item.classList.remove("drop-target", "drop-refused"));
-    item.addEventListener("drop", async (event) => {
-      item.classList.remove("drop-target", "drop-refused");
-      if (!filingTarget(box).ok) return;
-      if (!claimableHere(event)) return;
-      if (draggedBoxRef(event) === box.uuid) return; // a box is not filed inside itself
-      event.preventDefault();
-      event.stopPropagation();
-      // A file lands here the same way it lands anywhere: made, captured, filed where it was aimed.
-      const made = await ingestDroppedResources(event, box.uuid, status);
-      if (made && made.length) {
-        await refreshSide();
-        return;
-      }
-      const landed = await dropBox(event, { status }, box.uuid, { label: `filed in ${box.name}` });
-      if (landed) await refreshSide();
+    // one, so filing by drag has to work here exactly as it does in the main pane. No version of
+    // this page had a handler on the row, which is why a drop between two rows of the same list
+    // did nothing at all.
+    wireRowFilingTarget(item, box, {
+      report: status,
+      reload: refreshSide,
     });
     item.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -4583,6 +4551,69 @@ function filingTarget(box) {
     return { ok: false, reason: kind.filing_refusal || "that folder chooses its own members" };
   }
   return { ok: true, reason: null };
+}
+
+/**
+ * Make one element a filing target for the box drawn on it, in either list.
+ *
+ * A row is a box the pointer can be aimed at, so a drop on it files into *that* box -- the box on
+ * the line, not the box the pane happens to be listing. The left panel and a folder's own children
+ * both need exactly this, and both had their own copy of it, which is how the two drifted: the
+ * panel's version painted a refusal for a dragged box only, so a file arriving over a row that
+ * cannot hold one got no answer at all while the same row in the main pane lit amber for it. One
+ * copy, one rule, both lists.
+ *
+ * `row` is the box on the line, `report` says what happened in whichever status line owns this
+ * list, `reload` redraws whichever list the row lives in, and `ctx` is the pane context a view
+ * hands its drops -- the left panel has no pane, so it gets the status line and nothing else.
+ *
+ * A row that refuses leaves the event unprevented on purpose: the sheet behind it is a different
+ * target with a different answer, and "not into this box" is not the same as "nowhere". Proven by
+ * instrumenting both handlers in a real pointer drag -- the row's drop runs alone when the row
+ * accepts, and only the sheet's runs when the row turns the box down.
+ */
+function wireRowFilingTarget(element, row, { report, reload, ctx = null }) {
+  element.addEventListener("dragover", (event) => {
+    const accepts = filingTarget(row);
+    if (!accepts.ok) {
+      // Refusal is drawn, not withheld: an absent outline reads as a missed target. Both kinds of
+      // arrival are answered, because "not into this box" is true of a file as much as of a box.
+      if (carriesABox(event) || dragIsResource(event)) {
+        element.classList.remove("drop-target");
+        element.classList.add("drop-refused");
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        if (accepts.reason) report(accepts.reason, true);
+      }
+      return; // not claimed: the sheet behind the row may still take this drop
+    }
+    if (!claimableHere(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = event.shiftKey ? "move" : "copy";
+    element.classList.remove("drop-refused");
+    element.classList.add("drop-target");
+  });
+  element.addEventListener("dragleave", () =>
+    element.classList.remove("drop-target", "drop-refused"),
+  );
+  element.addEventListener("drop", async (event) => {
+    element.classList.remove("drop-target", "drop-refused");
+    if (!filingTarget(row).ok) return; // the server would say the same thing
+    if (!claimableHere(event)) return;
+    if (draggedBoxRef(event) === row.uuid) return; // a box is not filed inside itself
+    event.preventDefault();
+    event.stopPropagation();
+    // A file lands here the same way it lands anywhere: made, captured, filed where it was aimed.
+    const made = await ingestDroppedResources(event, row.uuid, report);
+    if (made && made.length) {
+      await reload();
+      return;
+    }
+    const landed = await dropBox(event, ctx || { status: report }, row.uuid, {
+      label: `filed in ${row.name}`,
+    });
+    if (landed) await reload();
+  });
 }
 
 function wirePaneDrops() {
@@ -6772,43 +6803,14 @@ function childTile(child, parent, ctx, { belowNote = "", carryTerm = "" } = {}) 
     ctx.open(child.uuid, { trail: ctx.trail() });
   });
   item.addEventListener("dragstart", (event) => dragBox(event, child.uuid, parent.uuid));
-  // A row is a box the pointer can be aimed at. Dropping on it therefore files *into that box*, not
-  // into the folder being listed -- which is what happened before, because the row claimed nothing
-  // and the sheet behind it answered for the whole pane. Two targets, one gesture, two different
-  // parents, and the one the person was pointing at lost.
-  item.addEventListener("dragover", (event) => {
-    const accepts = filingTarget(child);
-    if (!accepts.ok) {
-      if (carriesABox(event) || dragIsResource(event)) {
-        item.classList.remove("drop-target");
-        item.classList.add("drop-refused");
-        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
-        if (accepts.reason) ctx.status(accepts.reason, true);
-      }
-      return;
-    }
-    if (!claimableHere(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = event.shiftKey ? "move" : "copy";
-    item.classList.remove("drop-refused");
-    item.classList.add("drop-target");
-  });
-  item.addEventListener("dragleave", () => item.classList.remove("drop-target", "drop-refused"));
-  item.addEventListener("drop", async (event) => {
-    item.classList.remove("drop-target", "drop-refused");
-    if (!filingTarget(child).ok) return;
-    if (!claimableHere(event)) return;
-    if (draggedBoxRef(event) === child.uuid) return; // a box is not filed inside itself
-    event.preventDefault();
-    event.stopPropagation();
-    const made = await ingestDroppedResources(event, child.uuid, ctx.status);
-    if (made && made.length) {
-      ctx.reload();
-      return;
-    }
-    const landed = await dropBox(event, ctx, child.uuid, { label: `filed in ${child.name}` });
-    if (landed) ctx.reload();
+  // A row is a box the pointer can be aimed at, so a drop on it files *into that box*, not into the
+  // folder being listed -- which is what happened before, because the row claimed nothing and the
+  // sheet behind it answered for the whole pane. Two targets, one gesture, two different parents,
+  // and the one the person was pointing at lost.
+  wireRowFilingTarget(item, child, {
+    report: (message, isError) => ctx.status(message, isError),
+    reload: ctx.reload,
+    ctx,
   });
   item.addEventListener("contextmenu", (event) => {
     event.preventDefault();
