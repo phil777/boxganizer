@@ -6179,12 +6179,54 @@ def test_a_reused_box_says_it_was_reused_and_a_suffixed_one_says_its_new_name(
     assert "made a ${type} box from ${payload.name}" in ingest
 
 
-def test_the_server_marks_the_reused_box_on_the_create_route(client: TestClient) -> None:
-    """`reused_box` is the wire contract the sentence depends on, so it is pinned at both ends."""
-    app_py = Path(__file__).resolve().parents[1] / "src" / "boxganizer" / "web" / "app.py"
-    server = app_py.read_text(encoding="utf-8")
-    assert 'return holder.to_dict() | {"reused_box": True}' in server
-    assert "box.name = _next_free_name(store, box.name)" in server
+def test_the_reuse_flag_arrives_on_the_wire_from_both_drop_routes(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The status line reads one field to decide what to say, so both routes have to send it.
+
+    A drop reaches the server by two doors -- a path the browser could read, and bytes it handed
+    over -- and the sentence the page prints differs in the third case: a box was made, an existing
+    box was reused, or the name was taken so the newcomer went in numbered. Each door answers with
+    its own flag (`reused_box` on the create route, `box_reused` on the capture route), and the
+    absence of the flag on a fresh create matters as much as its presence on a reuse: the page tests
+    it with `if`, so a field that lied would print "already in the library" over a box that was
+    never in it.
+    """
+    first = tmp_path / "one.md"
+    first.write_bytes(b"the same document twice")
+    fresh = client.post(
+        "/api/boxes",
+        json={
+            "name": "memo",
+            "box_type": "text",
+            "resource_uri": str(first),
+            "inferred_name": True,
+        },
+    )
+    assert fresh.status_code == 201, fresh.text
+    assert not fresh.json().get("reused_box"), "a box that was just made came back as one to reuse"
+
+    again = tmp_path / "two.md"
+    again.write_bytes(b"the same document twice")
+    reuse = client.post(
+        "/api/boxes",
+        json={
+            "name": "memo",
+            "box_type": "text",
+            "resource_uri": str(again),
+            "inferred_name": True,
+        },
+    )
+    assert reuse.status_code == 201, reuse.text
+    assert reuse.json()["reused_box"] is True
+    assert reuse.json()["uuid"] == fresh.json()["uuid"]
+
+    bytes_first = client.post("/api/capture-file?name=flyer.png", content=b"one flyer")
+    assert bytes_first.status_code == 201
+    assert bytes_first.json()["box_reused"] is False
+    bytes_again = client.post("/api/capture-file?name=flyer.png", content=b"one flyer")
+    assert bytes_again.json()["box_reused"] is True
+    assert bytes_again.json()["box"]["uuid"] == bytes_first.json()["box"]["uuid"]
 
 
 def test_a_refused_placement_of_a_reused_box_leaves_the_library_untouched(

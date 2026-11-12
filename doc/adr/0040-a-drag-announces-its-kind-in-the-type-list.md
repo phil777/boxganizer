@@ -79,6 +79,29 @@ the folder under the pointer lost to the folder being displayed.
   prove a drop handler works and simultaneously prove nothing about whether the drop was ever allowed
   to happen. Real-pointer drags (`page.dragAndDrop`, or CDP `Input.dispatchMouseEvent`) are the
   evidence for anything on this path, and the harness keeps a probe that uses them.
+
+## Amendment, found while making the harness keep that promise
+
+The sentence above was written before it was true. `tools/verify_web_ui.py` had no box drag at all,
+and while adding one it turned out the harness could not finish a run against the current page: it
+still clicked `#mode-toggle`, a control the app no longer draws, so the first section after the shell
+spent thirty seconds timing out and the rest of the file never executed. Two more stale steps behind
+it asked a desktop's settings row for a button that is folded away until the gear is turned, and
+read the wallpaper off `.desktop-view` when it hangs on `.desktop-surface`.
+
+The chip strip was a real defect, not a stale test. `.desktop-surface` is `position: absolute`, so it
+is painted over the strip that follows it in the flow, and `elementFromPoint` at the centre of a chip
+answered `desktop-surface`. An unplaced icon could be seen and could not be grabbed: every pointer
+press aimed at it landed on the wallpaper, which is the ADR 38 failure wearing a different hat -- a
+target that is drawn, and unreachable. The strip is now lifted above the surface and made transparent
+to events where it draws nothing, so the chips take their presses and a drop on the wallpaper is
+still a drop on the desk.
+
+`make test` stayed green through all of this, which is the point of the rule above: none of it is
+reachable from a synthetic event, and none of it is in CI, because a browser download in the test
+pipeline is a dependency nobody asked for. So the harness is where this class of evidence lives, and
+the harness has to be run. It re-seeds nothing: several checks read absolute state that the previous
+run moved, so the recipe now says to re-seed between runs.
 - The two lists painting row targets need their own CSS — `#box-list li.drop-target`,
   `.child.drop-target`, and the amber `-drop-refused` pair — because a handler that highlights nothing
   is this page's recurring failure, not a new one.
