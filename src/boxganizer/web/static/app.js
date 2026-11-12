@@ -1892,7 +1892,18 @@ function mountBoxSearch(mount, owner, open, options = {}) {
       // (whose list is files) narrowed the file rows to nothing and swallowed the box hit with them
       // -- `via: "nothing"`, no rows, no window, no way to get there.
       const shownLive = emit(term, hits);
-      if (shownLive >= hits.length) {
+      if (!hits.length) {
+        // Nothing answered, which is not the same as the list having shown everything: `0 >= 0` is
+        // true, and closing on it left the reader with a typed term and no reply anywhere. A surface
+        // that narrows its own rows already says "nothing inside matches" where the rows were, so it
+        // keeps the window away; a note, an image or a sensor has no list to say it with, and the
+        // window is the only voice that kind of box has.
+        if (sink && sink.handlers.size) {
+          close();
+        } else {
+          paint();
+        }
+      } else if (shownLive >= hits.length) {
         close();
       } else {
         paint();
@@ -6239,10 +6250,16 @@ const folderView = {
           ? { term, keep: visibleUnder(hits), below: matchedBelow(hits), why: reasonsFor(hits) }
           : null;
         draw();
-        // Every hit is either a row here or folded into the note on the ancestor row that stayed.
-        // The ones that are neither -- the folder itself matching its own name, say -- are reported
-        // as not shown, so the window keeps them reachable instead of the list quietly eating them.
-        return filter ? hits.filter((hit) => filter.keep.has(hit.uuid)).length : hits.length;
+        // Every hit is represented on this surface, either as its own row or -- for one living
+        // deeper -- folded into the "N matches inside" note on the ancestor row that survived, which
+        // is what `visibleUnder` guarantees by keeping every step of every route. So the whole answer
+        // counts as shown and the window stays away.
+        //
+        // Counting `keep.has(hit.uuid)` here would read as per-hit accounting while measuring
+        // nothing at all: `visibleUnder` adds every hit's own uuid, so that filter keeps everything
+        // and the expression is `hits.length` written the long way. Saying `hits.length` plainly, and
+        // saying why underneath it, is the honest form of the same claim.
+        return hits.length;
       });
     }
 
@@ -6266,7 +6283,10 @@ const folderView = {
         // that simply appeared, with no reason on it, reads as a filter that is broken.
         const note = under ? describeBelow(under) : (filter && filter.why.get(child.uuid)) || "";
         holder.append(
-          childTile(child, box, ctx, note, filter ? filter.term : ""),
+          childTile(child, box, ctx, {
+            belowNote: note,
+            carryTerm: filter ? filter.term : "",
+          }),
         );
       });
     }
@@ -6715,7 +6735,8 @@ function describeBelow(under) {
   return who ? `${head}: ${who}${under.count > under.names.length ? " …" : ""}` : head;
 }
 
-function childTile(child, parent, ctx, belowNote = "", carryTerm = "") {
+/** Extra context one row draws when a filter is on: why it survived, and the term to carry down. */
+function childTile(child, parent, ctx, { belowNote = "", carryTerm = "" } = {}) {
   const item = document.createElement("div");
   item.className = "child";
   item.dataset.uuid = child.uuid;

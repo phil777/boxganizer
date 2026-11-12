@@ -3002,6 +3002,16 @@ def _grid_place(
     return store.update(parent).to_dict()
 
 
+#: How many numbered copies of one name the content rule will try before giving up. The number is
+#: said back to the person in the refusal, so it is written once here rather than once in a `range`
+#: and once in a sentence that can quietly stop matching it.
+_MAX_NUMBERED_COPIES = 100
+
+#: Bytes read per pass while hashing a resource: large enough that a photograph costs one read,
+#: small enough that a multi-gigabyte one does not arrive in memory all at once.
+_DIGEST_CHUNK_BYTES = 1 << 20
+
+
 def _content_digest(resource_uri: str | None) -> str | None:
     """sha256 of the bytes a local resource names, or None when it names none of them.
 
@@ -3022,7 +3032,7 @@ def _content_digest(resource_uri: str | None) -> str | None:
     digest = hashlib.sha256()
     try:
         with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1 << 20), b""):
+            for chunk in iter(lambda: handle.read(_DIGEST_CHUNK_BYTES), b""):
                 digest.update(chunk)
     except OSError:
         return None
@@ -3053,7 +3063,7 @@ def _same_content(left: str | None, right: str | None) -> bool:
 
 def _next_free_name(store: BoxStore, base: str) -> str:
     """`base`, or `base 2`, `base 3` … the first that is not taken."""
-    for attempt in range(2, 100):
+    for attempt in range(2, _MAX_NUMBERED_COPIES):
         candidate = f"{base} {attempt}"
         if not store.exists(candidate):
             return candidate
@@ -3063,7 +3073,7 @@ def _next_free_name(store: BoxStore, base: str) -> str:
             "error": "duplicate_name",
             "name": base,
             "reason": (
-                f"a hundred boxes are already named {base!r} or close to it; "
+                f"{_MAX_NUMBERED_COPIES} boxes are already named {base!r} or close to it; "
                 "give this one its own name."
             ),
         },
@@ -3103,7 +3113,15 @@ def _file_captured_bytes(
     thumbs.icon_from_resource(box)
     saved = store.add(box, read_now=False)
     if parent_uuid:
-        store.link(parent_uuid, saved.uuid)
+        try:
+            store.link(parent_uuid, saved.uuid)
+        except Exception:
+            # The rule the create route already follows, and for the same reason: this box is this
+            # request's own, so a filing that fails takes it back out rather than leaving an unfiled
+            # box the person finds only by wandering the library. Anything this request captured
+            # still retires to the trash, as ADR 36 has it.
+            _undo_create(store, saved)
+            raise
     return saved, False
 
 

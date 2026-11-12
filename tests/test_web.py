@@ -3377,7 +3377,7 @@ def test_the_child_menu_does_not_offer_to_file_into_a_folder_that_refuses_it(
     """
     script = client.get("/static/app.js").text
     tile = script[
-        script.index("function childTile(child, parent, ctx, belowNote = \"\", carryTerm = \"\")") :
+        script.index('function childTile(child, parent, ctx, { belowNote = "", carryTerm = "" }') :
     ]
     tile = tile[: tile.index("registerView(\"folder\", folderView);")]
     assert "...(filingTarget(parent).ok" in tile
@@ -5902,19 +5902,27 @@ def test_a_field_with_a_list_under_it_narrows_the_list_not_a_window(client: Test
     assert "filteringLive" not in widget, (
         "the withdrawal must be counted per hit, not inferred from a view existing"
     )
-    asked = widget[widget.index("hits = answer;") : widget.index("hits = answer;") + 1200]
+    asked = widget[widget.index("hits = answer;") : widget.index("hits = answer;") + 1700]
     assert "const shownLive = emit(term, hits);" in asked
-    assert "if (shownLive >= hits.length) {" in asked and "close();" in asked, (
+    assert "if (!hits.length) {" in asked, (
+        "an empty answer is not 'the list showed them all': 0 >= 0 closed the window and left a "
+        "typed term with no reply anywhere on the screen"
+    )
+    assert "if (sink && sink.handlers.size) {" in asked, (
+        "only a surface that narrows its own rows may swallow an empty answer -- it says so in "
+        "place; a note or an image has no list to say it with, so the window is its only voice"
+    )
+    assert "} else if (shownLive >= hits.length) {" in asked and "close();" in asked, (
         "the answer reaches the list but the window is still painted over it"
     )
     assert "} else {" in asked and "paint();" in asked, (
         "what the list could not take has to be painted, or it is unreachable"
     )
     # the two views that answer report honestly what they showed
-    assert (
-        "return filter ? hits.filter((hit) => filter.keep.has(hit.uuid)).length : hits.length;"
-        in script
-    ), "the box-list view must report the rows it kept"
+    assert "filter.keep.has(hit.uuid)).length" not in script, (
+        "the folder's count must not pretend to measure per-hit reachability: `visibleUnder` adds "
+        "every hit's own uuid, so filtering by it is `hits.length` written the long way"
+    )
     fs = script[script.index("// What this listing can show") :]
     assert "return hits.filter((hit) => hit.uuid === box.uuid).length;" in fs, (
         "a filesystem listing can only ever show this box's own content hits -- saying otherwise\n"
@@ -6329,3 +6337,30 @@ def test_content_that_cannot_be_read_is_answered_different_not_guessed(
     )
     assert vanished.json()["uuid"] != made.json()["uuid"]
 
+
+
+def test_a_capture_that_cannot_be_filed_leaves_no_box_nobody_asked_for(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drop that made its box and then failed to file it has to take the box back out.
+
+    The create route already did this; the capture route made the box and linked it with no such
+    guard, so a failure in between -- a locked library under a background index pass is the real
+    way this happens -- left a box filed nowhere, findable only by wandering the library. Same
+    promise, same place: nothing this request made survives a refusal it did not ask for.
+    """
+    assert (
+        client.post("/api/boxes", json={"name": "Crate", "box_type": "folder"}).status_code == 201
+    )
+
+    def refuse_link(self: object, parent: str, child: str) -> None:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(BoxStore, "link", refuse_link)
+    with pytest.raises(RuntimeError):
+        client.post("/api/capture-file?name=ticket.png&parent=Crate", content=b"the stub")
+
+    monkeypatch.undo()
+    names = [b["name"] for b in client.get("/api/boxes").json()]
+    assert "ticket" not in names, f"the capture left a box nobody filed, in the library: {names}"
+    assert client.get("/api/boxes/Crate").json()["name"] == "Crate"
