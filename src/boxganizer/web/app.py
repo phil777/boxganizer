@@ -2594,27 +2594,25 @@ def create_app(
                     status_code=422, detail={"error": "bad_viewport", "reason": problem}
                 )
         def _attach(target: Box) -> None:
-            """File and place the box the drop asked for, undoing the create if that fails.
+            """File `target` under the parent the drop was aimed at, and place it when asked to.
 
-            The request was for one thing: "a note, in that grid, at that cell". A library holding
-            the note and not the placement is not half a result, it is a stray box with an error on
-            the screen, and the person has to notice it and clean it up themselves. Whatever the
-            layout layer rejected, the box is taken back out and the refusal is handed on
-            unchanged -- so a refused create leaves the library exactly as it was.
+            This rolls nothing back, deliberately: only the caller knows whether the box is this
+            request's own creation or one the library already held. Taking a box back out is how a
+            *create* is withdrawn, and doing that to a reused box deletes something the person had
+            before they moved the mouse -- which is what this helper used to do on a refused
+            placement, and what the two callers below now decide for themselves. The worst a refusal
+            here leaves behind is a filing link: the box is a member of the parent, shown with the
+            children that have no cell yet. Never a lost box, never a lost file.
             """
             if parent_box is None:
                 return
-            try:
-                store.link(parent_box.uuid, target.uuid)
-                if payload.cell is not None:
-                    _grid_place(store, parent_box.uuid, target.uuid, payload.cell)
-                elif payload.place is not None:
-                    _desktop_place(
-                        store, parent_box.uuid, target.uuid, payload.place.x, payload.place.y
-                    )
-            except Exception:
-                _undo_create(store, target)
-                raise
+            store.link(parent_box.uuid, target.uuid)
+            if payload.cell is not None:
+                _grid_place(store, parent_box.uuid, target.uuid, payload.cell)
+            elif payload.place is not None:
+                _desktop_place(
+                    store, parent_box.uuid, target.uuid, payload.place.x, payload.place.y
+                )
 
         # A dropped resource whose name is already taken: the content decides, not the file name.
         # Same bytes means the library already holds this thing, so the existing box is filed where
@@ -2624,6 +2622,8 @@ def create_app(
         if payload.inferred_name and store.exists(box.name):
             holder = store.resolve(box.name)
             if _same_content(holder.resource_uri, resource_uri):
+                # Nothing to undo on the way out: this box was in the library before the request,
+                # and a placement the layout layer refused is no licence to delete it.
                 _attach(holder)
                 return holder.to_dict() | {"reused_box": True}
             box.name = _next_free_name(store, box.name)
@@ -2633,7 +2633,16 @@ def create_app(
         # what it says without anyone remembering to rebuild anything — but the reading happens in
         # the queue rather than inside this response.
         _sync_index(request, saved)
-        _attach(saved)
+        try:
+            _attach(saved)
+        except Exception:
+            # The request was for one thing: "a note, in that grid, at that cell". A library
+            # holding the note and not the placement is not half a result, it is a stray box with
+            # an error on the screen, and the person has to notice it and clean it up themselves.
+            # This box is this request's own, so the refusal takes it back out and hands the
+            # reason on unchanged -- a refused create leaves the library exactly as it was.
+            _undo_create(store, saved)
+            raise
         return saved.to_dict()
 
     @app.put("/api/boxes/{ref}")

@@ -6163,3 +6163,169 @@ def test_the_server_marks_the_reused_box_on_the_create_route(client: TestClient)
     server = app_py.read_text(encoding="utf-8")
     assert 'return holder.to_dict() | {"reused_box": True}' in server
     assert "box.name = _next_free_name(store, box.name)" in server
+
+
+def test_a_refused_placement_of_a_reused_box_leaves_the_library_untouched(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """A drop the layout layer turns down must not delete a box the library already held.
+
+    The create route unwinds a refused placement by taking the new box back out, which is right
+    for a box this request made and destructive for a box the content rule *reused* -- the same
+    bytes under a name that was already taken. That version destroyed a box and retired its
+    captured file because a grid cell was busy: a refusal that costs the person something they had
+    before they moved the mouse, and says nothing about it.
+    """
+    captured = client.post("/api/capture-file?name=photo.png", content=b"the one photo")
+    assert captured.status_code == 201
+    box = captured.json()["box"]
+    resource = Path(str(box["resource_uri"]))
+
+    grid = client.post(
+        "/api/boxes",
+        json={"name": "Board", "box_type": "grid", "config": {"grid": {"rows": 1, "columns": 1}}},
+    )
+    assert grid.status_code == 201
+    filler = client.post(
+        "/api/boxes",
+        json={"name": "Filler", "box_type": "note", "parent": "Board", "cell": [0, 0]},
+    )
+    assert filler.status_code == 201
+
+    twin = tmp_path / "loose-copy.png"
+    twin.write_bytes(b"the one photo")  # same content, so the drop resolves to the box above
+    refused = client.post(
+        "/api/boxes",
+        json={
+            "name": "photo",
+            "box_type": "image",
+            "resource_uri": str(twin),
+            "inferred_name": True,
+            "parent": "Board",
+            "cell": [0, 0],  # the grid's only cell, held by `Filler` with nowhere to displace it
+        },
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"]["error"] == "bad_grid_move"
+
+    assert client.get(f"/api/boxes/{box['uuid']}").status_code == 200, (
+        "the reused box was deleted by a refusal that had nothing to do with it"
+    )
+    assert resource.exists(), "the reused box's captured file was retired by a refusal"
+    names = [b["name"] for b in client.get("/api/boxes").json()]
+    assert names.count("photo") == 1, f"a refused drop made or removed a box: {names}"
+
+
+def test_a_refused_placement_of_a_box_the_request_made_still_takes_it_back_out(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The other half of the rule, which has to survive the fix above.
+
+    A stray box nobody asked for is a mess the person has to notice and delete one by one, which is
+    exactly why the undo was written. Saving the reused box must not quietly retire that guarantee.
+    """
+    grid = client.post(
+        "/api/boxes",
+        json={"name": "Frame", "box_type": "grid", "config": {"grid": {"rows": 1, "columns": 1}}},
+    )
+    assert grid.status_code == 201
+    assert (
+        client.post(
+            "/api/boxes",
+            json={"name": "Occupant", "box_type": "note", "parent": "Frame", "cell": [0, 0]},
+        )
+    ).status_code == 201
+
+    note = tmp_path / "fresh.md"
+    note.write_bytes(b"a note nobody had before")
+    refused = client.post(
+        "/api/boxes",
+        json={
+            "name": "Fresh",
+            "box_type": "text",
+            "resource_uri": str(note),
+            "parent": "Frame",
+            "cell": [0, 0],
+        },
+    )
+    assert refused.status_code == 422, refused.text
+    assert client.get("/api/boxes/Fresh").status_code == 404, (
+        "a create the layout refused left its box sitting in the library"
+    )
+
+
+def test_two_files_of_the_same_length_are_told_apart_by_their_content(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Same size is not the same thing, so the bytes get hashed before a name is reused.
+
+    The content rule answers "different" on a size check alone when lengths disagree, and every
+    earlier fixture happened to differ in length -- which meant the hashing was never executed on
+    any route. That is the one place a wrong answer would silently merge two different documents
+    into one box, so both answers are pinned here at a length the shortcut cannot decide.
+    """
+
+    def drop(path: Path) -> dict[str, object]:
+        made = client.post(
+            "/api/boxes",
+            json={"name": "report", "box_type": "text", "resource_uri": str(path),
+                  "inferred_name": True},
+        )
+        assert made.status_code == 201, made.text
+        return made.json()
+
+    first = tmp_path / "one.md"
+    first.write_bytes(b"aaaaaaaaaa")
+    original = drop(first)
+    assert original["name"] == "report"
+
+    same_length = tmp_path / "two.md"
+    same_length.write_bytes(b"bbbbbbbbbb")  # equal in size, different in every byte
+    other = drop(same_length)
+    assert other["name"] == "report 2", "two documents of one length were merged into one box"
+    assert other["uuid"] != original["uuid"]
+
+    twin = tmp_path / "three.md"
+    twin.write_bytes(b"aaaaaaaaaa")  # the first document's bytes again, at another path
+    again = drop(twin)
+    assert again.get("reused_box") is True, "identical content under another path made a second box"
+    assert again["uuid"] == original["uuid"]
+
+
+def test_content_that_cannot_be_read_is_answered_different_not_guessed(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """A name clash the content rule cannot resolve comes back as *different*, never as a merge.
+
+    A file that is not there is an unanswerable question, and the two ways to end it are not equal:
+    guessing "same" adopts a stranger's box and loses the newcomer silently, while guessing
+    "different" costs one numbered name. The earlier fixtures only ever offered two readable files,
+    so the unreadable half of the rule was never asked. A *remote* address would answer the same way
+    by the same argument, but the create route refuses one before the name rule is reached, so that
+    arm belongs to whichever route learns to accept it.
+    """
+    here = tmp_path / "real.md"
+    here.write_bytes(b"a document that exists")
+    made = client.post(
+        "/api/boxes",
+        json={"name": "doc", "box_type": "text", "resource_uri": str(here), "inferred_name": True},
+    )
+    assert made.status_code == 201
+    assert made.json()["name"] == "doc"
+
+    missing = tmp_path / "gone.md"
+    vanished = client.post(
+        "/api/boxes",
+        json={
+            "name": "doc",
+            "box_type": "text",
+            "resource_uri": str(missing),
+            "inferred_name": True,
+        },
+    )
+    assert vanished.status_code == 201, vanished.text
+    assert vanished.json()["name"] == "doc 2", (
+        "a file that is not on disk was treated as the same content as one that is"
+    )
+    assert vanished.json()["uuid"] != made.json()["uuid"]
+
