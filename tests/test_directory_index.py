@@ -467,7 +467,8 @@ def test_the_status_endpoint_names_the_gone_folder(tmp_path: Path) -> None:
             import shutil
 
             shutil.rmtree(old)
-            client.get("/api/index/status?check=1")  # what the panel asks on a fresh draw
+            # an explicit action, not a draw: reading the status no longer looks at the files
+            client.post("/api/index/check")
             status = client.get("/api/index/status").json()
             assert [gone["files"] for gone in status["missing_roots"]] == [2]
             # Both numbers, because they answer different questions: `files` is what lives

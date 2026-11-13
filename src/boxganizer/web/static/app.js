@@ -119,7 +119,7 @@ const api = {
     }),
   resolveFolder: (ref) =>
     request(`/api/boxes/${encodeURIComponent(ref)}/resolve`, { method: "POST" }),
-  indexStatus: (check) => request(`/api/index/status${check ? "?check=1" : ""}`),
+  indexStatus: () => request("/api/index/status"),
   suggestType: (resourceUri) =>
     request(`/api/types/suggest?resource_uri=${encodeURIComponent(resourceUri)}`),
   tags: () => request("/api/tags"),
@@ -148,9 +148,11 @@ const api = {
       body: JSON.stringify({ tags }),
     }),
   indexPending: () => request("/api/index/pending"),
-  // "Look at the files again" without reading any of them: the status endpoint is the one
-  // that stats, and `check=1` is what turns "to reindex" from old news into a fresh answer.
-  indexStatFiles: () => request("/api/index/status?check=1"),
+  // "Look at the files again": one stat per watched file, reading none of them. A POST, and a
+  // button, because it writes the freshness flags (ADR 42). It used to be `?check=1` on the
+  // status read, which the page sent every time the panel drew -- so opening a box quietly
+  // rewrote the library. Same data, same purpose; the change is that somebody decides.
+  indexStatFiles: () => request("/api/index/check", { method: "POST" }),
   indexRun: (scope) =>
     request("/api/index/run", { method: "POST", body: JSON.stringify({ scope }) }),
   health: () => request("/api/health"),
@@ -4236,6 +4238,7 @@ function indexDetail(status_) {
         (quiet.length ? ` (${quiet.join(", ")})` : "")
     );
   }
+  parts.push(observedSentence(status_));
   for (const gone of status_.missing_roots || []) {
     // Named, and counted, because the alternative is a headline that offers work no pass can
     // do -- and because "64 files are missing" without the folder reads as a warning about
@@ -4256,6 +4259,23 @@ function indexDetail(status_) {
     );
   }
   return parts.join(" · ");
+}
+
+function observedSentence(status_) {
+  // Said out loud because the alternative is a number that looks authoritative. "12 to reindex"
+  // derived from flags last set an hour ago is not a lie, but it is not the present tense
+  // either, and the honest version costs one clause.
+  const seen = status_.observed || {};
+  if (!seen.checked_at) {
+    return "the dates are what the index last believed — nothing has looked at the files since this server started";
+  }
+  const seconds = seen.age_seconds || 0;
+  if (seconds < 60) return "the files were looked at just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `the files were last looked at ${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `the files were last looked at ${hours} h ago`;
+  return `the files were last looked at ${Math.round(hours / 24)} days ago`;
 }
 
 let indexTimer = null;
@@ -4282,13 +4302,13 @@ function drawIndexProgress(status_) {
   bar.setAttribute("aria-label", `reading ${queue.done} of ${queue.total} files for the index`);
 }
 
-async function refreshIndexStatus({ check = false } = {}) {
+async function refreshIndexStatus() {
   const spot = el("index-status");
   let status_;
   try {
-    // Asked, not awaited, by the caller: a pass over the files is a stat per file, and the
-    // panel would rather draw now and correct itself a moment later.
-    status_ = await api.indexStatus(check);
+    // A read, and cheap: it says what the index believes and how old that belief is. Looking
+    // at the files is the button in the dialog, never something a draw does by itself.
+    status_ = await api.indexStatus();
   } catch (error) {
     spot.textContent = "index: unknown";
     spot.title = error.message;
@@ -4930,7 +4950,11 @@ async function init() {
   });
 
   await refreshSide();
-  refreshIndexStatus({ check: true }); // the panel draws first; the files are counted after
+  // The panel draws what the index already believes, and says when that was. Loading a page
+  // must not be the thing that walks the filesystem and writes flags: that is an action with a
+  // button, because on a library of 842 watched files it was the slowest request the app made
+  // and it happened on a *GET*.
+  refreshIndexStatus();
   // The way in is the root box, not the first box the list happens to show.
   const root = await findRoot();
   if (root) await openBox(root.uuid);

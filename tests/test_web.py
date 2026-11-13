@@ -3246,13 +3246,22 @@ def test_the_index_is_reported_on_every_panel_and_can_be_run_from_the_page(
     # polled. A request that read the whole library would look like a frozen page.
     script = client.get("/static/app.js").text
     assert "indexTimer = setInterval(() => refreshIndexStatus(), 1200)" in script
-    assert "refreshIndexStatus({ check: true })" in script
+    # ADR 42: drawing the panel must not be the thing that walks the filesystem and writes
+    # freshness flags. The check is a button that POSTs, so this asserts the absence.
+    assert "refreshIndexStatus({ check: true })" not in script
 
 
-def test_checking_the_status_looks_at_the_files_when_asked(
+def test_the_status_read_reports_what_was_last_observed_and_says_so(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """`?check=1` is the difference between what the database believes and what is true."""
+    """The read is a read. Looking at the files is an action somebody takes (ADR 42).
+
+    This used to be the same test with `?check=1` on the end of the third request, and that
+    line was the whole design: the panel sent it on every draw, so opening a page wrote to the
+    library. The distinction being protected here is between *what the index believes* and
+    *what the files say*, and a read may only answer the first -- while admitting how old it is,
+    so a number that is stale news is visibly stale news rather than a lie with a nicer font.
+    """
     from boxganizer import search as text_search
     from boxganizer.models import Box as _Box
     from boxganizer.store import BoxStore as _BoxStore
@@ -3264,10 +3273,75 @@ def test_checking_the_status_looks_at_the_files_when_asked(
         store.add(_Box(name="Note", box_type="markdown", resource_uri=str(note)))
         text_search.rebuild(store)
         with TestClient(create_app(store, content_root=tmp_path)) as fresh:
-            assert fresh.get("/api/index/status").json()["stale"] == 0
+            first = fresh.get("/api/index/status").json()
+            assert first["stale"] == 0
+            assert first["observed"]["checked_at"] is None, (
+                "a server that has not looked at the files must not claim to have"
+            )
+
             note.write_text("the second words about the boiler\n", encoding="utf-8")
-            assert fresh.get("/api/index/status").json()["stale"] == 0  # what it was told
-            assert fresh.get("/api/index/status", params={"check": True}).json()["stale"] == 1
+            # Asked twice, and it still says what it was told. That is the point of the read:
+            # it is cheap enough to poll, and polling it must not touch the disk.
+            assert fresh.get("/api/index/status").json()["stale"] == 0
+            assert fresh.get("/api/index/status").json()["stale"] == 0
+
+            checked = fresh.post("/api/index/check")
+            assert checked.status_code == 200
+            body = checked.json()
+            assert body["changed"] == 1 and body["stale"] == 1
+            assert body["observed"]["checked_at"] is not None
+
+            after = fresh.get("/api/index/status").json()
+            assert after["stale"] == 1, "the action looked, and the read must now say so"
+            assert after["observed"]["checked_at"] == body["observed"]["checked_at"]
+            assert after["observed"]["age_seconds"] >= 0
+    finally:
+        store.close()
+
+
+def test_reading_the_index_status_writes_nothing(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """A page load leaves no trace in the database -- not one commit, not one row.
+
+    Counted at the connection rather than timed, because "the panel wrote to my library" was
+    never about speed: the request was a GET that re-derived and re-stored the freshness flag of
+    every watched file, which is why a review of this code found it had been run against the
+    real library by someone merely opening the page.
+    """
+    from tests.test_store import _CommitSpy
+
+    from boxganizer import search as text_search
+    from boxganizer.models import Box as _Box
+    from boxganizer.store import BoxStore as _BoxStore
+
+    root = tmp_path / "quiet"
+    root.mkdir()
+    for index in range(3):
+        (root / f"n{index}.md").write_text(f"words about the boiler {index}\n", encoding="utf-8")
+    store = _BoxStore(tmp_path / "quiet.db", content_root=root)
+    try:
+        for index in range(3):
+            store.add(
+                _Box(
+                    name=f"N{index}",
+                    box_type="markdown",
+                    resource_uri=str(root / f"n{index}.md"),
+                )
+            )
+        text_search.rebuild(store, root=root)
+        store.check_observations()  # so the read has something to be tempted to refresh
+        spy = _CommitSpy(store._conn)
+        store._conn = spy  # type: ignore[assignment]
+        try:
+            with TestClient(create_app(store, content_root=root)) as quiet:
+                for _ in range(4):
+                    assert quiet.get("/api/index/status").status_code == 200
+                assert quiet.get("/api/index/pending").status_code == 200
+                assert quiet.get("/api/search?q=boiler").status_code == 200
+        finally:
+            store._conn = spy._connection  # type: ignore[assignment]
+        assert spy.commits == 0, f"a read committed {spy.commits} times"
     finally:
         store.close()
 
@@ -3970,10 +4044,10 @@ def test_the_pending_list_tells_work_apart_from_a_dead_end(
             assert test_client.get("/api/index/pending").json()["items"] == []
             note.write_text("words about plumbing and boilers", encoding="utf-8")
             os.utime(note, (note.stat().st_atime, note.stat().st_mtime + 5))
-            # the rows are what this answers from, so look at the files first — which is what
-            # the dialog's "Look at the files again" button does, and what opening the panel
-            # with `check=1` already did
-            test_client.get("/api/index/status?check=1")
+            # the rows are what this answers from, so look at the files first — which is an
+            # action somebody takes (ADR 42), the same one the dialog's "Look at the files
+            # again" button asks for; drawing the panel no longer does it
+            test_client.post("/api/index/check")
             body = test_client.get("/api/index/pending").json()
             items = body["items"]
             assert [item["why"] for item in items] == ["changed"]

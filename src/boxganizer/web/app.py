@@ -675,6 +675,19 @@ class _CachedStatic(StaticFiles):
         return response
 
 
+def _stamp_age_seconds(stamp: str) -> float:
+    """How long ago an ISO timestamp written by a running app was, for the panel's admission.
+
+    Module level because it knows nothing about a store or a request; the alternative was a
+    function defined inside `create_app`, which reads as if it needed the app and does not.
+    """
+    try:
+        when = datetime.fromisoformat(stamp)
+    except ValueError:  # pragma: no cover - only if the writer changes shape
+        return 0.0
+    return max(0.0, (datetime.now(UTC) - when).total_seconds())
+
+
 def create_app(
     store: BoxStore | None = None,
     *,
@@ -1785,29 +1798,29 @@ def create_app(
             request.app.state.index_job = job
         return job
 
+    def _status_snapshot(request: Request, store: BoxStore) -> dict[str, Any]:
+        """The status body, assembled in one place so `POST /api/index/check` cannot drift."""
+        return {**store.index_counts(), "missing_roots": store.gone_populations()}
+
     @app.get("/api/index/status")
-    def index_status(
-        request: Request,
-        store: StoreDep,
-        check: Annotated[
-            bool,
-            Query(description="Look at the files first, so 'out of date' is not stale news."),
-        ] = False,
-    ) -> dict[str, Any]:
+    def index_status(request: Request, store: StoreDep) -> dict[str, Any]:
         """What the index holds, what it is waiting for, and whether a pass is running.
 
-        `check=1` stats every watched file before counting. Without it the answer is what
-        the database was last told, which for a file edited in a text editor an hour ago is
-        a polite lie. The stat pass is one `stat` per file and reads nothing — the same
-        thing `box index --check` does — so the page asks for it when the panel is drawn,
-        and asks plainly while a pass is running and the numbers are moving anyway.
+        A read, and only a read: it writes nothing, so it can be asked as often as the panel
+        redraws. It used to stat every watched file first, on a `check=1` the page sent every
+        time the panel was drawn, because a number that says "out of date" from stale news is
+        a polite lie. That was a real concern wearing the wrong method — a GET that wrote, once
+        per file, per draw (ADR 42). Now the freshness pass lives behind `POST /api/index/check`
+        and the background pass, and this endpoint answers what the database was last told
+        *and says when that was*, so the panel can be candid about its own age instead of
+        silently looking authoritative.
 
-        It writes, and that is allowed here for one reason: what it writes is a cache of
-        what the filesystem says about a file, not anything a person typed. The stored flag
-        is not a decision and loses nothing if it is refreshed twice.
+        `observed` is that admission: when this process last looked at the files, or `null`
+        when it has not looked since starting. It lives in the process and not the database
+        because it describes this server's knowledge, and a restart legitimately forgetting it
+        is the honest answer — the files may have changed in the meantime, which is exactly
+        what the panel then says.
         """
-        if check:
-            store.check_observations()
         body: dict[str, Any] = dict(store.index_counts())
         if body["unreadable"]:
             # Named, because "1 could not be read" is a riddle: the useful part is which.
@@ -1835,7 +1848,39 @@ def create_app(
             "scope": job["scope"] or ("queued" if progress["reading"] else ""),
             "last": job["last"],
             "queue": progress,
+            "observed": _observed(request),
         }
+
+    def _observed(request: Request) -> dict[str, Any]:
+        """When this process last looked at the files, or `None` if it has not since starting."""
+        stamp = getattr(request.app.state, "index_observed_at", None)
+        if stamp is None:
+            return {"checked_at": None, "age_seconds": None}
+        return {"checked_at": stamp, "age_seconds": int(_stamp_age_seconds(stamp))}
+
+
+    def _record_observation() -> None:
+        """Mark that the files have been looked at, for the panel's honesty about its age."""
+        app.state.index_observed_at = datetime.now(UTC).isoformat(timespec="seconds")
+
+    @app.post("/api/index/check")
+    async def index_check(request: Request, store: StoreDep) -> dict[str, Any]:
+        """Look at every watched file and report what the index has to catch up with.
+
+        One `stat` per watched file, reading nothing — what `box index --check` does, and what
+        the panel's "Look at the files again" button asks for. It is a POST because it writes:
+        the freshness flags in the database are updated from what the filesystem said a moment
+        ago. That is the same data the old `?check=1` wrote on every page draw; moving it here
+        changes who asks and how often, not what is remembered.
+
+        The counts come back with the answer, because the person pressing the button is about to
+        look at them, and a confirmation that costs a second request is a confirmation that
+        draws a stale panel first.
+        """
+        stale = await asyncio.to_thread(store.check_observations)
+        _record_observation()
+        body = await asyncio.to_thread(_status_snapshot, request, store)
+        return {**body, "changed": len(stale), "observed": _observed(request)}
 
     @app.get("/api/index/pending")
     def index_pending(
@@ -1904,6 +1949,9 @@ def create_app(
                     "seconds": round(monotonic() - began, 2),
                     "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 }
+                # A pass over the library *has* looked at the files, so the panel's admission of
+                # how old its numbers are becomes true at the same moment the numbers do.
+                _record_observation()
             except Exception as exc:  # a pass that died must still be over
                 job["last"] = {"scope": scope, "error": str(exc) or type(exc).__name__}
             finally:
