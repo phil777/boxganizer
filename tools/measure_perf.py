@@ -147,11 +147,15 @@ def wait_for_server(base: str, seconds: float = 60.0) -> None:
 # -------------------------------------------------------------------------- the metrics
 
 
-def measure_writes(base: str, samples: int) -> float:
-    """A save, timed, and taken back out again.
+def measure_writes(base: str, samples: int) -> dict[str, float]:
+    """A save, timed, and taken back out again -- median *and* spread.
 
     The box is deleted afterwards because a baseline has to be comparable with the run after it:
     boxes left behind here change the row count every other number depends on.
+
+    The spread travels with the median on purpose. Seven samples of a ~100 ms request on this
+    box ranged 77-320 ms across two runs of *identical* code, and a first comparison called that
+    a 35% regression. A median with no spread next to it invites exactly that mistake.
     """
     timings = []
     for attempt in range(samples):
@@ -167,7 +171,11 @@ def measure_writes(base: str, samples: int) -> float:
         removed = fetch(base, f"/api/boxes/{uuid}", method="DELETE")
         if removed[1] not in (200, 204):
             print(f"  note: could not delete the probe box ({removed[1]})")
-    return round(statistics.median(timings), 4)
+    return {
+        "median_s": round(statistics.median(timings), 4),
+        "min_s": round(min(timings), 4),
+        "max_s": round(max(timings), 4),
+    }
 
 
 def measure_overlap(base: str) -> dict[str, float]:
@@ -191,12 +199,23 @@ def measure_overlap(base: str) -> dict[str, float]:
 
 
 def measure_lock_errors(db: Path) -> int:
-    """Concurrent writers against the real file, counting the ones SQLite turned away."""
+    """Concurrent writers against the real file, counting the ones SQLite turned away.
+
+    The connections are opened the way the store opens them, with its own busy timeout read
+    from the module rather than a number chosen here. Pinning a timeout in this file would
+    have measured the tool instead of the code: the first version hardcoded ``timeout=0``,
+    so it kept reporting the pre-fix behaviour after the fix landed and the number looked
+    like 93 refusals that no caller could cause any more.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from boxganizer.store import BUSY_TIMEOUT_MS
+
+    timeout_seconds = BUSY_TIMEOUT_MS / 1000
     errors: list[int] = []
 
     def writer() -> None:
         failed = 0
-        connection = sqlite3.connect(str(db), timeout=0.0)
+        connection = sqlite3.connect(str(db), timeout=timeout_seconds)
         try:
             for row in range(WRITES_PER_WRITER):
                 try:
@@ -272,17 +291,24 @@ def cmd_run(args: argparse.Namespace) -> int:
         "index_status_check_s": median_seconds(
             base, "/api/index/status?check=1", args.check_samples),
         "index_pending_s": median_seconds(base, "/api/index/pending", args.samples),
-        "write_s": measure_writes(base, args.samples),
+        "write_probe": measure_writes(base, args.write_samples),
         "search_content_s": median_seconds(base, "/api/search?q=fence", args.samples),
         "index_counts_ms": measure_index_counts(db, args.samples),
         "static": measure_static(base),
     }
+    probe = results.pop("write_probe")
+    results["write_s"] = probe["median_s"]
+    results["write_spread_s"] = [probe["min_s"], probe["max_s"]]
     results.update(measure_overlap(base))
     results["lock_errors_total"] = measure_lock_errors(db)
 
     for key, value in results.items():
-        if key not in ("static",):
+        if key not in ("static", "write_spread_s"):
             print(f"  {key:24s} {value}")
+    spread = results.get("write_spread_s")
+    if spread:
+        print(f"  {'write spread (min..max)':24s} {spread[0]:.3f} .. {spread[1]:.3f}"
+              "   <- a median inside this spread is not a difference")
     for key, value in results["static"].items():
         print(f"  {'static.' + key:24s} {value}")
 
@@ -315,13 +341,26 @@ def compare(baseline_path: Path, current: dict[str, Any]) -> int:
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     print(f"\n{'metric':26s} {'before':>12s} {'after':>12s} {'change':>9s}")
     problems: list[str] = []
+    before_spread = baseline.get("write_spread_s")
+    after_spread = current.get("write_spread_s")
+    if before_spread and after_spread:
+        print(f"{'write spread min..max':26s} {before_spread[0]:.3f}..{before_spread[1]:.3f}"
+              f"   {after_spread[0]:.3f}..{after_spread[1]:.3f}")
     for key in LOWER_BETTER:
         if key not in baseline or key not in current:
             continue
         before, after = float(baseline[key]), float(current[key])
         ratio = (after / before) if before else float("inf")
         mark = ""
-        if after > before * REGRESSION_RATIO and after - before > 0.02:
+        # A noisy metric gets a noisy threshold: for the save path, "worse" means the after
+        # median landed beyond where the before runs were ever observed, not merely that two
+        # medians differ -- they differed by 35% on unchanged code.
+        floor = max(before * REGRESSION_RATIO, float(before_spread[1]) if before_spread else 0.0)
+        if key == "write_s":
+            worse = after > floor and after - before > 0.02
+        else:
+            worse = after > before * REGRESSION_RATIO and after - before > 0.02
+        if worse:
             mark = "  WORSE"
             problems.append(f"{key}: {before} -> {after}")
         elif ratio < 1 / REGRESSION_RATIO:
@@ -355,6 +394,8 @@ def main() -> int:
     run.add_argument("--db", required=True, help="the scratch database it is serving")
     run.add_argument("--label", default="before")
     run.add_argument("--samples", type=int, default=7)
+    run.add_argument("--write-samples", dest="write_samples", type=int, default=15,
+                     help="more than the others: a save is ~100 ms and the box is busy")
     run.add_argument("--check-samples", dest="check_samples", type=int, default=3,
                      help="fewer, because the slow one is the point of the wait")
     run.add_argument("--json", help="write these numbers here")

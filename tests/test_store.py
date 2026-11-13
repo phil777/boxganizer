@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import pytest
 from boxganizer import search as indexing
 from boxganizer.errors import BoxNotFound, DuplicateBoxName, HandFilingRefused, StoreError
 from boxganizer.models import Box
-from boxganizer.store import SCHEMA_VERSION, BoxStore
+from boxganizer.store import BUSY_TIMEOUT_MS, SCHEMA_VERSION, BoxStore
 
 
 def test_add_then_get(store: BoxStore) -> None:
@@ -1256,5 +1257,194 @@ def test_descendants_of_an_empty_box_is_just_the_box(tmp_path: Path) -> None:
         found = store.descendants("Alone")
         assert list(found) == [store.resolve("Alone").uuid]
         assert [box.name for box in found[store.resolve("Alone").uuid]] == ["Alone"]
+    finally:
+        store.close()
+
+
+# --- where the writes stop: transactions, refused rows, and waiting for the lock ---
+
+
+class _CommitSpy:
+    """Wraps the connection and counts the commits that actually reach SQLite.
+
+    The point of these tests is how *often the process syncs to disk*, which no query result
+    shows. Timing a real fsync would make the suite depend on the machine, so the boundary is
+    counted instead: same writes, fewer durability points, provably.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+        self.commits = 0
+        self.rollbacks = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+        self._connection.commit()
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        self._connection.rollback()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._connection, name)
+
+
+def _watch(store: BoxStore, name: str, body: str, folder: Path) -> Path:
+    """A box pointing at a real file the index is being kept current for."""
+    path = folder / name
+    path.write_text(body, encoding="utf-8")
+    store.add(Box(name=name.title(), box_type="text", resource_uri=str(path)))
+    indexing.rebuild(store, root=folder)
+    return path
+
+
+def test_a_freshness_pass_writes_one_transaction(tmp_path: Path) -> None:
+    """Five watched files, two changed: one commit, not one per row.
+
+    The measurement this encodes is on a copy of a real library: a pass over 829 watched rows
+    cost 54 seconds at a commit per row and 0.09 seconds as a single transaction, with the
+    same rows written either way.
+    """
+    store = BoxStore(tmp_path / "one-commit.db", content_root=tmp_path)
+    try:
+        paths = [_watch(store, f"note{i}.txt", f"body {i}", tmp_path) for i in range(5)]
+        for path in paths[:2]:
+            path.write_text("edited outside boxganizer", encoding="utf-8")
+            os.utime(path, (path.stat().st_mtime + 30, path.stat().st_mtime + 30))
+        spy = _CommitSpy(store._conn)
+        store._conn = spy  # type: ignore[assignment]
+        try:
+            stale = store.check_observations()
+        finally:
+            store._conn = spy._connection  # type: ignore[assignment]
+        assert len(stale) == 2
+        assert spy.commits == 1, f"expected one durability point, got {spy.commits}"
+        assert [row.marked_stale for row in store.indexed_resources()] == [True] * 2 + [
+            False
+        ] * 3
+    finally:
+        store.close()
+
+
+def test_a_freshness_pass_leaves_rows_that_already_agree_alone(tmp_path: Path) -> None:
+    """A flag that already says the right thing is not rewritten.
+
+    Most passes change nothing -- the panel asks on every draw -- and the first version wrote
+    every watched row regardless: on the library this was measured on, 68 of 85 rows were
+    being set to the value they already held, once per request.
+    """
+    store = BoxStore(tmp_path / "quiet.db", content_root=tmp_path)
+    try:
+        notes = [_watch(store, f"n{i}.txt", f"body {i}", tmp_path) for i in range(4)]
+        written: list[list[tuple[int, int]]] = []
+        real = store._executemany
+
+        def spy(sql: str, rows: object) -> int:
+            written.append(list(rows))  # type: ignore[arg-type]
+            return real(sql, rows)
+
+        store._executemany = spy  # type: ignore[method-assign]
+        assert store.check_observations() == []
+        assert written == [[]] or written == [], f"quiet pass wrote: {written}"
+
+        os.utime(notes[1], (notes[1].stat().st_mtime + 60, notes[1].stat().st_mtime + 60))
+        written.clear()
+        stale = store.check_observations()
+        assert len(stale) == 1
+        assert len(written) == 1 and len(written[0]) == 1, f"expected one row, got {written}"
+        changed_id = int(next(item.id for item in stale))
+        assert written[0] == [(1, changed_id)]
+        # and asking again is silent: the flag is already correct
+        written.clear()
+        again = store.check_observations()
+        # It is still stale -- nothing has re-read the file -- but the flag no longer needs
+        # saying, so the second pass writes nothing. That is the whole point: the panel asks
+        # on every draw, and the answer is almost always "same as last time".
+        assert len(again) == 1
+        assert written == [[]] or written == []
+    finally:
+        store.close()
+
+
+def test_the_store_asks_sqlite_to_wait_for_the_lock(tmp_path: Path) -> None:
+    """``busy_timeout`` is set when the database opens, not left at SQLite's default of 0.
+
+    With no timeout a second writer is refused the instant it collides, and the web app swallows
+    that as a per-file note, so a library used by more than one request at a time silently did
+    less than it reported: 104 of 120 concurrent writes were refused on a copy of the real one.
+    """
+    store = BoxStore(tmp_path / "waits.db")
+    try:
+        timeout = int(store._conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        assert timeout == BUSY_TIMEOUT_MS
+        assert timeout > 0, "a zero timeout is the bug, not a setting"
+    finally:
+        store.close()
+
+
+def test_a_second_writer_waits_instead_of_being_refused(tmp_path: Path) -> None:
+    """The behaviour the timeout exists for: hold the lock, then let the other one through."""
+    store = BoxStore(tmp_path / "share.db", content_root=tmp_path)
+    other = sqlite3.connect(str(tmp_path / "share.db"), timeout=BUSY_TIMEOUT_MS / 1000)
+    try:
+        _watch(store, "one.txt", "first body", tmp_path)
+        other.execute("BEGIN IMMEDIATE")  # the lock, held by somebody else
+        held = threading.Event()
+        outcome: list[str] = []
+
+        def writer() -> None:
+            held.set()
+            try:
+                store.assign_tag(store.list_boxes()[0].name, "later")
+                outcome.append("written")
+            except StoreError as exc:
+                outcome.append(f"refused: {exc}")
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        held.wait(timeout=2)
+        time.sleep(0.2)  # long enough that a zero timeout would already have given up
+        other.rollback()
+        thread.join(timeout=10)
+        assert outcome == ["written"], outcome
+    finally:
+        other.close()
+        store.close()
+
+
+def test_filing_a_box_is_one_commit(tmp_path: Path) -> None:
+    """A save used to pay three or four fsyncs for about a millisecond of logic."""
+    store = BoxStore(tmp_path / "one-save.db", content_root=tmp_path)
+    try:
+        target = tmp_path / "gate.md"
+        target.write_text("Oil the gate.", encoding="utf-8")
+        spy = _CommitSpy(store._conn)
+        store._conn = spy  # type: ignore[assignment]
+        try:
+            store.add(Box(name="Gate", box_type="text", resource_uri=str(target)))
+        finally:
+            store._conn = spy._connection  # type: ignore[assignment]
+        assert spy.commits == 1, f"expected one durability point, got {spy.commits}"
+    finally:
+        store.close()
+
+
+def test_a_refused_add_leaves_nothing_behind(tmp_path: Path) -> None:
+    """The batch is also what makes a failed save a save that did not happen.
+
+    Statements committed one at a time, so the resource row written before the box was refused
+    stayed on disk: a name collision left a watched file with no box pointing at it.
+    """
+    store = BoxStore(tmp_path / "atomic.db", content_root=tmp_path)
+    try:
+        _watch(store, "taken.txt", "the first one", tmp_path)
+        lonely = tmp_path / "lonely.txt"
+        lonely.write_text("nobody will read me", encoding="utf-8")
+        with pytest.raises(DuplicateBoxName):
+            store.add(Box(name="Taken.txt", box_type="text", resource_uri=str(lonely)))
+        left = [row["reference"] for row in store._rows("SELECT reference FROM resources")]
+        assert left == [str(tmp_path / "taken.txt")], (
+            f"the refused add left rows behind: {left}"
+        )
     finally:
         store.close()
