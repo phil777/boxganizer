@@ -1812,6 +1812,11 @@ def create_app(
         if body["unreadable"]:
             # Named, because "1 could not be read" is a riddle: the useful part is which.
             body["unreadable_examples"] = store.unreadable_references(limit=3)
+        # A folder that is not on this machine any more is the same riddle in bulk, and worse:
+        # it inflates "68 to reindex" with files no pass will ever read. Reported here, with
+        # the folder named, and acted upon nowhere -- restoring the folder is enough to make
+        # the number come back, because nothing about it was ever recorded.
+        body["missing_roots"] = store.gone_populations()
         job = _index_job(request)
         queue = _index_state()
         with queue["lock"]:
@@ -1842,7 +1847,13 @@ def create_app(
         line, which says what the database believes. A person who wants the truth about the
         disk clicks "Index what changed", and that pass looks and then re-draws this.
         """
-        return {"items": store.needing_index(limit=limit), **store.index_counts()}
+        return {
+            "items": store.needing_index(limit=limit),
+            **store.index_counts(),
+            # The dialog offers "Reindex them" for the fixable ones; this is why the other
+            # number is not on the button, said once instead of leaving the list short.
+            "missing_roots": store.gone_populations(),
+        }
 
     @app.post("/api/index/run")
     async def index_run(request: Request, store: StoreDep, body: IndexRun) -> dict[str, Any]:

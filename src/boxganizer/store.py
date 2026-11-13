@@ -1272,6 +1272,87 @@ class BoxStore:
             "untouched": number("untouched"),
         }
 
+    def missing_directories(self) -> list[str]:
+        """Indexed folders that are no longer on this machine, longest answer first.
+
+        A handful of `stat` calls -- one per folder the index was watching, which is single
+        digits on a real library -- and the only honest way to ask the question. Nothing is
+        remembered about the answer: a directory that comes back stops being missing on the
+        next look, with nothing to un-set. That is deliberate. The first attempt at this idea
+        recorded a decision in the rows, and a person who restored the folder from a backup
+        would have found their files still un-indexed for a reason no screen explained.
+        """
+        missing: list[str] = []
+        for row in self._rows(
+            "SELECT reference FROM resources WHERE is_dir = 1 AND index_it = 1"
+            " ORDER BY length(reference) DESC"
+        ):
+            reference = str(row["reference"])
+            if resources.origin_of(reference) != resources.LOCAL:
+                continue
+            if not Path(resources.normalise(reference)).exists():
+                missing.append(reference)
+        return missing
+
+    def gone_populations(self) -> list[dict[str, Any]]:
+        """How many watched files and boxes live under each folder that has gone away.
+
+        Reported, never acted on. The count is the point: without it the panel says "68 to
+        reindex" about 64 files that no run will ever read, and the person presses the button
+        every morning for a year. With it, the sentence names the folder, so the choice --
+        restore it, or stop watching it -- is theirs and informed.
+
+        `substr` rather than `LIKE` because a path is data, not a pattern: a folder named with
+        a `%` would otherwise describe files it never contained.
+        """
+        found: list[dict[str, Any]] = []
+        for reference in self.missing_directories():
+            # root, room, prefix -- in that order, twice. The length is bound rather than
+            # written into the SQL because the library keeps every statement a plain string.
+            binds: tuple[object, ...] = (reference, len(reference) + 1, f"{reference}/")
+            files = self._rows(
+                "SELECT count(*) AS n FROM resources"
+                " WHERE index_it = 1 AND is_dir = 0"
+                "   AND (reference = ? OR substr(reference, 1, ?) = ?)",
+                binds,
+            )
+            boxes = self._rows(
+                "SELECT count(DISTINCT b.id) AS n FROM boxes b"
+                " JOIN resources r ON b.resource_id = r.id"
+                " WHERE (r.reference = ? OR substr(r.reference, 1, ?) = ?)",
+                binds,
+            )
+            # The subset that the panel would otherwise count as work: watched, and either
+            # changed or never read. Subtracting the whole population instead would hide real
+            # waiting files that happen to sit under a folder that is merely *sometimes* away.
+            waiting = self._rows(
+                "SELECT count(*) AS n FROM resources"
+                " WHERE index_it = 1 AND is_dir = 0 AND (stale = 1 OR indexed_at IS NULL)"
+                "   AND (reference = ? OR substr(reference, 1, ?) = ?)",
+                binds,
+            )
+            found.append(
+                {
+                    "reference": reference,
+                    "display": resources.display(reference),
+                    "files": int(files[0]["n"]) if files else 0,
+                    "boxes": int(boxes[0]["n"]) if boxes else 0,
+                    "waiting": int(waiting[0]["n"]) if waiting else 0,
+                }
+            )
+        return found
+
+    def _gone_prefixes(self) -> list[str]:
+        """Directory prefixes whose watched contents cannot be read right now."""
+        return self.missing_directories()
+
+    @staticmethod
+    def _lives_under(reference: str, prefixes: Sequence[str]) -> bool:
+        """Whether *reference* sits under one of the gone directories."""
+        return any(
+            reference == root or reference.startswith(f"{root}/") for root in prefixes
+        )
+
     def needing_index(self, *, limit: int = 200) -> list[dict[str, Any]]:
         """Which boxes are waiting on the index, and what is waiting for them.
 
@@ -1317,12 +1398,25 @@ class BoxStore:
              ORDER BY r.reference, b.name, pb.name
             """,
         )
+        # Computed once for the whole list: a handful of `stat` calls, not one per row.
+        gone = self._gone_prefixes()
         by_resource: dict[int, dict[str, Any]] = {}
         order: list[int] = []
         for row in rows:
             entry = by_resource.get(int(row["id"]))
             if entry is None:
-                if row["stale"]:
+                if self._lives_under(str(row["reference"]), gone):
+                    # Named, and marked hopeless: the folder it lives in is not on this
+                    # machine, so no pass will ever read it. It is *not* dropped from the
+                    # index or from `wanted` -- the file is missing, not unimportant, and a
+                    # person who restores that folder from a backup gets their index back by
+                    # asking again, with nothing to remember and nothing to un-set.
+                    why, words, fixable = (
+                        "gone",
+                        "lives under a folder that is no longer here",
+                        False,
+                    )
+                elif row["stale"]:
                     why, words, fixable = "changed", "changed since it was last read", True
                 elif row["indexed_at"] is None:
                     why, words, fixable = "never", "has not been read yet", True

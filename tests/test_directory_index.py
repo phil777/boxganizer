@@ -7,6 +7,8 @@ the folder brought in outlives the reason it was there.
 
 from __future__ import annotations
 
+import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -289,3 +291,193 @@ def test_a_folder_reports_the_files_it_holds_when_asked_to_be_indexed(
         assert answer["index_it"] is True
         assert "folder" in answer["reason"].lower() and "inside" in answer["reason"].lower()
         assert answer["shared"] is False
+
+
+# --- a folder that is not here is not an empty folder (ADR 41) -----------------
+
+
+def test_a_folder_that_is_not_here_is_reported_and_kept(tmp_path: Path) -> None:
+    """One pass over a missing folder changes nothing, and names the folder.
+
+    Measured before the guard existed: `wanted` 85 -> 23 and index documents 80 -> 18 on a copy
+    of a real library, from a pass nobody had asked to prune anything. The numbers are the test.
+    """
+    root = tmp_path / "library"
+    old = root / "old"
+    (old / "deep").mkdir(parents=True)
+    for name in ("a.md", "b.txt", "deep/c.md"):
+        (old / name).write_text(f"the boiler pressure gauge leaks in {name}\n", encoding="utf-8")
+    (root / "live.md").write_text("an order for cement mixer parts\n", encoding="utf-8")
+    store = BoxStore(tmp_path / "gone.db", content_root=root)
+    try:
+        folder = store.add(
+            Box(name="Old folder", box_type="indexed-directory", resource_uri=str(old))
+        )
+        store.set_index_flag(folder.resource_id, True)
+        store.add(Box(name="Live", box_type="markdown", resource_uri=str(root / "live.md")))
+        text_search.rebuild(store, root=root)
+
+        def counts() -> dict[str, int]:
+            found = store.index_counts()
+            found["documents"] = int(
+                store._rows("SELECT count(*) AS n FROM resource_text")[0]["n"]
+            )
+            found["rows"] = int(store._rows("SELECT count(*) AS n FROM resources")[0]["n"])
+            return found
+
+        before = counts()
+        assert before["wanted"] == 5 and before["documents"] == 4
+        (old / "a.md").unlink()  # one file really deleted, from a folder that is present
+        text_search.rebuild(store, root=root)
+        assert counts()["documents"] == before["documents"] - 1, (
+            "a deliberate delete must still leave the index"
+        )
+        kept = before["documents"] - 1
+        after_delete = counts()  # the reference for everything below: one file is genuinely gone
+
+        import shutil
+
+        shutil.rmtree(old)
+        store.check_observations()
+        after_check = counts()
+        assert after_check["wanted"] == after_delete["wanted"], "the check un-indexed something"
+        assert after_check["documents"] == kept, "the check erased a document"
+        assert after_check["rows"] == after_delete["rows"]
+
+        report = text_search.rebuild(store, root=root)
+        after = counts()
+        assert after["wanted"] == after_delete["wanted"], f"a pass un-indexed rows: {after}"
+        assert after["documents"] == kept, f"a pass erased the index: {after['documents']}"
+        assert after["rows"] == after_delete["rows"]
+        assert after["stale"] >= 3, "gone files should still be remembered as out of date"
+        assert any("not a folder" in note for _ref, note in report.skipped), report.skipped
+
+        gone = store.gone_populations()
+        assert len(gone) == 1
+        assert gone[0]["reference"] == str(old)
+        assert gone[0]["files"] == 2, gone  # b.txt and deep/c.md, not the deleted a.md
+        assert gone[0]["boxes"] >= 1
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 0,
+            "words_unclaimed": 0,
+        }
+    finally:
+        store.close()
+
+
+def test_a_gone_folder_is_named_work_and_not_offered_as_work(tmp_path: Path) -> None:
+    """`why: "gone"`, `fixable: false` -- and still in the list, because it is still true.
+
+    The row is not hidden: a person looking at the pending dialog should see the file and read
+    why reindexing will not help. What changes is the button, which offers only fixable ones.
+    """
+    root = tmp_path / "library"
+    old = root / "old"
+    old.mkdir(parents=True)
+    (old / "a.md").write_text("the boiler pressure gauge leaks\n", encoding="utf-8")
+    store = BoxStore(tmp_path / "named.db", content_root=root)
+    try:
+        folder = store.add(
+            Box(name="Old", box_type="indexed-directory", resource_uri=str(old))
+        )
+        store.set_index_flag(folder.resource_id, True)
+        text_search.rebuild(store, root=root)
+        old.rename(root / "old-moved-elsewhere")
+        store.check_observations()
+        items = store.needing_index()
+        gone = [item for item in items if item["why"] == "gone"]
+        assert len(gone) == 1, items
+        assert gone[0]["fixable"] is False
+        assert "no longer here" in gone[0]["words"]
+        assert [item for item in items if item["fixable"]] == []
+    finally:
+        store.close()
+
+
+def test_a_folder_that_comes_back_needs_nothing_un_set(tmp_path: Path) -> None:
+    """Re-arming is restoring the folder and asking -- there is no flag to clear.
+
+    This is why the gone state is derived from the disk on every look instead of recorded: a
+    decision kept in the rows outlives the reason it was made, and the person who copied the
+    backup back would find their index still refusing to read files that are plainly there.
+    """
+    root = tmp_path / "library"
+    old = root / "old"
+    old.mkdir(parents=True)
+    (old / "a.md").write_text("the boiler pressure gauge leaks\n", encoding="utf-8")
+    store = BoxStore(tmp_path / "return.db", content_root=root)
+    try:
+        folder = store.add(
+            Box(name="Old", box_type="indexed-directory", resource_uri=str(old)
+                )
+        )
+        store.set_index_flag(folder.resource_id, True)
+        text_search.rebuild(store, root=root)
+        backup = tmp_path / "backup"
+        old.rename(backup)
+        store.check_observations()
+        assert len(store.gone_populations()) == 1
+        assert store.needing_index()[0]["why"] == "gone"
+        backup.rename(old)  # the drive is plugged back in, the restore finished
+        store.check_observations()
+        assert store.gone_populations() == []
+        # Nothing to do, and that is the payoff: because the words were kept, the returning
+        # file is already indexed and no pass is owed. The list being clean is the proof.
+        assert [item for item in store.needing_index() if item["why"] == "gone"] == []
+        assert names(store, "boiler"), "the index should never have lost this file"
+
+        # and when it genuinely changes, it is ordinary work again -- not still exiled
+        (old / "a.md").write_text("the boiler pressure gauge leaks and drips\n", encoding="utf-8")
+        os.utime(old / "a.md", (time.time() + 30, time.time() + 30))
+        store.check_observations()
+        items = store.needing_index()
+        assert items and items[0]["why"] == "changed", items
+        assert items[0]["fixable"] is True
+        text_search.rebuild(store, root=root)
+        assert names(store, "drips")
+    finally:
+        store.close()
+
+
+def test_the_status_endpoint_names_the_gone_folder(tmp_path: Path) -> None:
+    """The API carries the sentence the panel shows, so the page never has to guess.
+
+    Empty before the folder goes, populated after, on both endpoints the panel reads -- and
+    with nothing removed from `wanted` in between, which is the part an endpoint is most
+    tempting to "fix" by quietly shrinking the number.
+    """
+    root = tmp_path / "library"
+    old = root / "old"
+    old.mkdir(parents=True)
+    (old / "a.md").write_text("the boiler pressure gauge leaks\n", encoding="utf-8")
+    (old / "b.md").write_text("an order for cement mixer parts\n", encoding="utf-8")
+    store = BoxStore(tmp_path / "api.db", content_root=root)
+    try:
+        folder = store.add(
+            Box(name="Old", box_type="indexed-directory", resource_uri=str(old))
+        )
+        store.set_index_flag(folder.resource_id, True)
+        text_search.rebuild(store, root=root)
+        with TestClient(create_app(store, content_root=root)) as client:
+            before = client.get("/api/index/status").json()
+            assert before["missing_roots"] == []
+            wanted = before["wanted"]
+            assert wanted == 3  # two files and the folder
+
+            import shutil
+
+            shutil.rmtree(old)
+            client.get("/api/index/status?check=1")  # what the panel asks on a fresh draw
+            status = client.get("/api/index/status").json()
+            assert [gone["files"] for gone in status["missing_roots"]] == [2]
+            # Both numbers, because they answer different questions: `files` is what lives
+            # there, `waiting` is what the panel was about to call work.
+            assert [gone["waiting"] for gone in status["missing_roots"]] == [2]
+            assert status["wanted"] == wanted, "the endpoint un-indexed something on its own"
+
+            pending = client.get("/api/index/pending").json()
+            assert len(pending["missing_roots"]) == 1
+            assert {item["why"] for item in pending["items"]} == {"gone"}
+            assert all(not item["fixable"] for item in pending["items"])
+    finally:
+        store.close()

@@ -692,6 +692,19 @@ def expand_directory(
         return ""  # folder unchanged, and the files inside answer for themselves
 
     files, note = address.walk_files(target, confine=confine)
+    if not target.is_dir():
+        # The folder itself is not on this machine, which is not the same news as an empty
+        # folder -- and the difference is the whole of it. An emptied folder's children were
+        # deleted by somebody who meant it, so their rows and their words should go, and the
+        # loop below does exactly that. A *missing* folder teaches nothing: the walk saw no
+        # files because there was nothing to walk, not because the files are gone. Pruning on
+        # that reading is how an index loses everything under a folder that is merely on a
+        # disconnected USB drive, or in a backup, or being moved. Measured before this guard,
+        # one ordinary pass over a three-file folder took `wanted` 5 -> 2 and the index from 4
+        # documents to 1, permanently -- the files, and so the words, were never coming back.
+        # Nothing is written here: the rows, their text and their staleness stand as they were,
+        # and the note goes back so the pass names the folder instead of reporting a clean run.
+        return note
     known: set[str] = set()
     indexed = 0
     for position, path in enumerate(files):
@@ -733,6 +746,24 @@ def expand_directory(
     return note
 
 
+def _unreachable(reference: str) -> bool:
+    """Whether a file could not be looked at, as opposed to looked at and found missing.
+
+    A file whose folder is present and which is not there was deleted, and its words should
+    leave the index with it: search must not go on answering for a note nobody has. A file
+    whose folder is *also* missing was never observable at all -- the drive is away, the tree
+    is being moved, the backup is waiting to be restored -- and its text is the only record
+    that it said anything. This is the same rule `expand_directory` applies to the folder,
+    stated for the child rows, because a pass walks the rows directly and reaches them whether
+    or not the folder above can be read.
+    """
+    try:
+        target = Path(address.normalise(reference))
+    except (OSError, ValueError):  # pragma: no cover - a path too odd to have a parent
+        return False
+    return not target.parent.is_dir()
+
+
 def sync_resource(
     store: Any,
     resource_id: int,
@@ -753,6 +784,10 @@ def sync_resource(
     * a file that has changed, or has gone away, is read, and what comes back replaces
       what the index held — including nothing at all, which is recorded too, so the
       next pass does not mistake an unreadable file for an unread one.
+
+    The last rule has one exception, and it is the reason a pass is allowed to be run at
+    all: a file in a folder that is *also* missing was not seen to be missing, so nothing is
+    known about it, and nothing is thrown away. See :func:`_unreachable` and ADR 41.
     """
     resource = store.resource(resource_id)
     if resource is None:
@@ -778,6 +813,14 @@ def sync_resource(
         root=root if root is not None else _confine_of(store),
         origin=resource.origin,
     )
+    if not found.usable and resource.origin in (address.LOCAL, address.GENERATED) \
+            and _unreachable(resource.reference):
+        # Not readable, and not because it is gone: the folder holding it is gone, so there
+        # is no evidence about the file either way. Keep the words, keep the flag saying they
+        # may be out of date, and hand back the reason -- which the panel turns into a named
+        # folder rather than a smaller index. Clearing here is what took a library's documents
+        # from 4 to 1 on a pass nobody asked anything of.
+        return found.note
     seen = address.stat(resource.reference)
     store.record_index(
         resource.id,

@@ -4183,7 +4183,13 @@ function indexQueue(status_) {
 }
 
 function indexWaiting(status_) {
-  return (status_.stale || 0) + (status_.untouched || 0);
+  // Files under a folder that is not on this machine are not waiting: no pass can reach them,
+  // and a headline that counts them is a button that does nothing ("68 to reindex", pressed
+  // every morning for a year). They are still in `wanted`, still counted in the detail line,
+  // and named there by folder -- this subtracts them from *offered work*, never from the index.
+  const total = (status_.stale || 0) + (status_.untouched || 0);
+  const gone = (status_.missing_roots || []).reduce((sum, root) => sum + (root.waiting || 0), 0);
+  return Math.max(total - gone, 0);
 }
 
 function indexWords(status_) {
@@ -4228,6 +4234,17 @@ function indexDetail(status_) {
     parts.push(
       `${status_.unreadable} hold nothing to read` +
         (quiet.length ? ` (${quiet.join(", ")})` : "")
+    );
+  }
+  for (const gone of status_.missing_roots || []) {
+    // Named, and counted, because the alternative is a headline that offers work no pass can
+    // do -- and because "64 files are missing" without the folder reads as a warning about
+    // the index rather than about a folder that is not on this machine.
+    parts.push(
+      `${gone.files} files live under ${gone.display}, which is gone from this machine` +
+        (gone.waiting ? ` (${gone.waiting} of them counted as waiting)` : "") +
+        ` (${gone.boxes} box${gone.boxes === 1 ? "" : "es"}). Nothing was removed from the` +
+        " index: put the folder back and ask again."
     );
   }
   if (last) {
@@ -4411,15 +4428,27 @@ async function drawPending({ check = false } = {}) {
       " no row until something walks the folder. Reindexing does that.";
     list.append(note);
   }
+  const missing = (report.missing_roots || []).map((root) => root.display);
+  if (missing.length) {
+    const note = document.createElement("li");
+    note.className = "pending-caveat";
+    note.textContent =
+      "Some of these live under a folder that is not on this machine: " +
+      missing.join(", ") +
+      ". They are still in the index and still counted as wanted. Restore the folder and" +
+      " ask again, or stop watching them from the folder's own box.";
+    list.append(note);
+  }
+  const untouched = hopeless.filter((item) => item.why !== "gone");
+  const gone = hopeless.filter((item) => item.why === "gone");
   fixable.forEach((item) => draw(item, ""));
-  hopeless.forEach((item, index) =>
-    draw(
-      item,
-      index === 0
-        ? "Read, and nothing in them for the index. Reindexing will not change this one."
-        : ""
-    )
-  );
+  const heading = (items_, text) =>
+    items_.forEach((item, index) => draw(item, index === 0 ? text : ""));
+  // Two different reasons for the same grey row. A file with nothing searchable in it will
+  // stay that way; a file whose folder is gone is waiting for something a reindex cannot do,
+  // and saying "nothing in them" about it would hide the one fact worth knowing.
+  heading(untouched, "Read, and nothing in them for the index. Reindexing will not change this one.");
+  heading(gone, "Their folder is not on this machine. Nothing was removed; the files come back if it does.");
   refreshIndexStatus();
 }
 
