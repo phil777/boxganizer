@@ -93,6 +93,7 @@ try:
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
     from pydantic import BaseModel, Field, JsonValue
+    from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 except ModuleNotFoundError as exc:  # pragma: no cover - only in a damaged install
     raise ModuleNotFoundError(
         "the web frontend needs fastapi, which every boxganizer install carries: repair the "
@@ -643,6 +644,37 @@ def _unresolved_sentence(shape: _RefShape, ref: str) -> str:
     return f"no box named {shown!r} is in this library."
 
 
+#: Types that must not be compressed even when the browser asks. Starlette's own list covers
+#: images, video and fonts, and stops there: `application/pdf` is absent, so the stock
+#: middleware would spend CPU re-deflating a format that is already deflated, and hand back
+#: something no larger. Everything the library serves that is not text is in that shape --
+#: PDFs, thumbnails, archives -- so the exclusion is extended rather than left to the default.
+_UNCOMPRESSED_TYPES: tuple[str, ...] = (*DEFAULT_EXCLUDED_CONTENT_TYPES, "application/pdf")
+
+#: Below this, compression is a rounding error: a JSON error reply or a one-box answer is
+#: smaller than the dictionary it would need. Measured on this library's largest asset,
+#: `app.js`, the ratio is far past the point where it pays (see ``pref_report.md`` P5).
+_MINIMUM_COMPRESSIBLE_BYTES = 1024
+
+
+class _CachedStatic(StaticFiles):
+    """Static files, with an explicit revalidate-every-time policy.
+
+    ``StaticFiles`` already answers ``If-None-Match`` and ``If-Modified-Since`` with a 304,
+    but it sends no ``Cache-Control``, which leaves the browser to guess how long a file is
+    fresh -- and a guess based on mtime is how a person keeps running yesterday's ``app.js``
+    after an upgrade. ``no-cache`` means *ask every time, take the 304 when nothing changed*:
+    a warm reload pays a couple of milliseconds per asset instead of 436 KB, and an asset
+    that did change is never stale. ``must-revalidate`` is not used because a file that
+    changed should not be served from cache even once.
+    """
+
+    def file_response(self, *args: object, **kwargs: object) -> Response:
+        response = super().file_response(*args, **kwargs)  # type: ignore[arg-type]
+        response.headers.setdefault("cache-control", "no-cache")
+        return response
+
+
 def create_app(
     store: BoxStore | None = None,
     *,
@@ -668,7 +700,15 @@ def create_app(
         description="Everything is a box.",
         lifespan=_lifespan,
     )
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    app.mount("/static", _CachedStatic(directory=str(_STATIC_DIR)), name="static")
+    # Text out through gzip, bytes untouched. The page ships one 436 KB script and a 60 KB
+    # stylesheet, and they are the same on every machine: the cold-load cost is the download,
+    # not the logic. Added here rather than at the ASGI layer so a store passed in by an
+    # embedding caller gets the same treatment as `box serve`.
+    app.add_middleware(
+        GZipMiddleware, minimum_size=_MINIMUM_COMPRESSIBLE_BYTES,
+        exclude_content_types=_UNCOMPRESSED_TYPES,
+    )
     env_root = os.environ.get(CONTENT_ROOT_ENV)
     named = content_root if content_root is not None else env_root
     wants_confinement = bool(confined) or bool(env_root) or content_root is not None

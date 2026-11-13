@@ -120,10 +120,21 @@ def fetch(base: str, path: str, *, payload: dict[str, Any] | None = None,
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
             elapsed = time.perf_counter() - began
-            return elapsed, response.status, response.read(), dict(response.headers)
+            return elapsed, response.status, response.read(), _lower(response.headers)
     except urllib.error.HTTPError as exc:  # a 4xx is a measurement, not a crash
         elapsed = time.perf_counter() - began
-        return elapsed, exc.code, exc.read(), dict(exc.headers)
+        return elapsed, exc.code, exc.read(), _lower(exc.headers)
+
+
+def _lower(message: object) -> dict[str, str]:
+    """Response headers, keyed in lower case.
+
+    uvicorn sends `content-encoding` and `cache-control` in lower case, and a dict lookup
+    cares: the first version of this file asked for `Content-Encoding` and was told "none"
+    for every response, including the ones that were compressed. A header reader that can
+    miss the thing it is looking for is worse than no reader, because it looks like an answer.
+    """
+    return {str(key).lower(): str(value) for key, value in dict(message).items()}  # type: ignore[arg-type]
 
 
 def median_seconds(base: str, path: str, samples: int,
@@ -256,22 +267,42 @@ def measure_index_counts(db: Path, samples: int) -> float:
 
 
 def measure_static(base: str) -> dict[str, Any]:
-    """Bytes on the wire, plain and offered-gzip, plus a binary that must stay alone."""
-    plain = fetch(base, "/static/app.js")
-    offered = fetch(base, "/static/app.js", headers={"Accept-Encoding": "gzip"})
-    out: dict[str, Any] = {
-        "app_js_bytes": len(plain[2]),
-        "app_js_bytes_offered_gzip": len(offered[2]),
-        "app_js_encoding": offered[3].get("Content-Encoding", "none"),
-    }
+    """Bytes on the wire, plain and offered-gzip, plus a binary that must stay alone.
+
+    The plain size is requested *without* `Accept-Encoding` rather than read off a compressed
+    response: the first version of this file quoted a compression ratio it had never measured,
+    and a ratio off a guess is how a report ends up promising something the code does not do.
+    """
+    out: dict[str, Any] = {}
+    for name, path in (("app_js", "/static/app.js"), ("app_css", "/static/app.css")):
+        plain = fetch(base, path)
+        offered = fetch(base, path, headers={"Accept-Encoding": "gzip"})
+        out[f"{name}_bytes"] = len(plain[2])
+        out[f"{name}_bytes_offered_gzip"] = len(offered[2])
+        out[f"{name}_encoding"] = offered[3].get("content-encoding", "none")
+    # A warm reload: the asset is asked for again with the validator the server handed out,
+    # and the answer should be "unchanged", not another 436 KB.
+    # Asked for again by name rather than reused from the loop above: the loop's `plain` is
+    # whatever it last held, and one version of this file sent app.css's ETag against app.js,
+    # which is a 200 with the whole body rather than the 304 it was reporting as proof.
+    fresh = fetch(base, "/static/app.js")
+    validator = fresh[3].get("etag")
+    again = fetch(base, "/static/app.js",
+                  headers={"If-None-Match": validator} if validator else None)
+    out["warm_reload_status"] = again[1]
+    out["warm_reload_bytes"] = len(again[2])
+    out["static_cache_control"] = fresh[3].get("cache-control", "none")
     boxes = fetch(base, "/api/boxes")
+    offered_api = fetch(base, "/api/boxes", headers={"Accept-Encoding": "gzip"})
+    out["api_boxes_bytes"] = len(boxes[2])
+    out["api_boxes_bytes_offered_gzip"] = len(offered_api[2])
     if boxes[1] == 200:
         pdf = next((b for b in json.loads(boxes[2]) if b.get("box_type") == "pdf"), None)
         if pdf:
             raw = fetch(base, f"/api/boxes/{pdf['uuid']}/raw",
                         headers={"Accept-Encoding": "gzip"})
             out["pdf_bytes"] = len(raw[2])
-            out["pdf_encoding"] = raw[3].get("Content-Encoding", "none")
+            out["pdf_encoding"] = raw[3].get("content-encoding", "none")
     return out
 
 
@@ -369,11 +400,22 @@ def compare(baseline_path: Path, current: dict[str, Any]) -> int:
     for key in MUST_BE_CLEAN:
         if current.get(key):
             problems.append(f"{key} must be 0, measured {current[key]}")
-    before_bytes = baseline.get("static", {}).get("app_js_bytes")
-    after_bytes = current.get("static", {}).get("app_js_bytes_offered_gzip")
-    if before_bytes and after_bytes:
-        print(f"{'app.js bytes (plain/gzip)':26s} {before_bytes:12d} {after_bytes:12d}"
-              f" {after_bytes / before_bytes:8.2f}x")
+    for label, key in (
+        ("app.js plain bytes", "app_js_bytes"),
+        ("app.js gzip bytes", "app_js_bytes_offered_gzip"),
+        ("app.css plain bytes", "app_css_bytes"),
+        ("app.css gzip bytes", "app_css_bytes_offered_gzip"),
+        ("api /boxes gzip bytes", "api_boxes_bytes_offered_gzip"),
+    ):
+        was = baseline.get("static", {}).get(key)
+        now = current.get("static", {}).get(key)
+        if was and now:
+            print(f"{label:26s} {was:12d} {now:12d} {now / was:8.2f}x")
+    if current.get("static", {}).get("pdf_encoding", "none") != "none":
+        problems.append(f"the PDF was compressed ({current['static']['pdf_encoding']})")
+    if current.get("static", {}).get("warm_reload_status") not in (200, 304):
+        warm = current.get("static", {}).get("warm_reload_status")
+        problems.append(f"warm reload did not revalidate: {warm}")
     if problems:
         print("\nREGRESSION:" + "\n  - ".join(["", *problems]))
         return 1

@@ -6563,3 +6563,118 @@ def test_assertions_on_served_page_text_do_not_grow() -> None:
         f"{total} assertions read served page text; the ceiling is "
         f"{SOURCE_TEXT_ASSERTION_CEILING}. Remove one rather than raise it. Heaviest: {worst}"
     )
+
+
+# --- P5: text goes out compressed, bytes go out alone -------------------------
+
+from boxganizer.web.app import _MINIMUM_COMPRESSIBLE_BYTES  # noqa: E402 - after the section it guards
+
+
+def _wire_size(client: TestClient, path: str, *, gzip_offer: bool = True) -> int:
+    """Bytes as they came off the wire, before httpx undoes the gzip.
+
+    `len(response.content)` is the *decompressed* length -- identical for both answers, so a
+    test built on it would pass whether the server compressed or not. `iter_raw` is the only
+    way to see what actually crossed the socket.
+    """
+    headers = {"Accept-Encoding": "gzip"} if gzip_offer else {"Accept-Encoding": "identity"}
+    with client.stream("GET", path, headers=headers) as response:
+        assert response.status_code == 200
+        return sum(len(chunk) for chunk in response.iter_raw())
+
+
+def test_text_assets_come_back_gzipped_when_the_browser_can_read_it(
+    client: TestClient,
+) -> None:
+    """The page ships one script and one stylesheet, identical on every machine.
+
+    On this library that is 436 KB and 60 KB per cold cache. The assertion is about the
+    header and the direction of the size, not a ratio: the ratio people will quote is the
+    one in `pref_report.md`, measured by `tools/measure_perf.py` against a running server.
+    """
+    # `identity` and not a bare request: httpx advertises gzip on every call, so asking for
+    # nothing in particular is not the same as being unable to read it. A curl with no header
+    # is what `tools/measure_perf.py` uses for the plain size.
+    for path in ("/static/app.js", "/static/app.css"):
+        plain = client.get(path, headers={"Accept-Encoding": "identity"})
+        assert "content-encoding" not in plain.headers, f"{path} compressed when not asked"
+        gzipped = client.get(path, headers={"Accept-Encoding": "gzip"})
+        assert gzipped.status_code == 200
+        assert gzipped.headers.get("content-encoding") == "gzip", path
+        assert len(gzipped.content) == len(plain.content), f"{path}: body must survive the trip"
+        on_wire = _wire_size(client, path)
+        untouched = _wire_size(client, path, gzip_offer=False)
+        assert on_wire < untouched, f"{path}: {on_wire} bytes compressed, {untouched} plain"
+
+
+def test_an_answer_stays_alone_when_nobody_asks_for_it(client: TestClient) -> None:
+    """`Accept-Encoding: identity`, no `Content-Encoding` -- and nothing else changes.
+
+    It also pins how the two representations are kept apart. Starlette hands back the *same*
+    ETag for the plain and the gzipped body -- the validator names the file, not the encoding
+    -- and puts `Vary: Accept-Encoding` on the response so a cache must not confuse them.
+    That is the reason the policy above is `no-cache` rather than a long `max-age`: a
+    revalidating client always sends its encoding again, so the Vary is always consulted.
+    """
+    plain = client.get("/static/app.js", headers={"Accept-Encoding": "identity"})
+    assert plain.status_code == 200
+    assert "content-encoding" not in plain.headers
+    gzipped = client.get("/static/app.js", headers={"Accept-Encoding": "gzip"})
+    assert gzipped.headers.get("vary") == "Accept-Encoding"
+    assert gzipped.headers.get("etag") == plain.headers.get("etag")
+
+
+def test_a_pdf_is_not_recompressed(client: TestClient, tmp_path: Path) -> None:
+    """Already-deflated bytes compressed again cost CPU and gain nothing.
+
+    The default exclusion list Starlette ships does not include `application/pdf`, so this
+    is the assertion that keeps the list honest: a PDF is the largest thing the library
+    serves, and it is the one thing that must not be touched.
+    """
+    store = BoxStore(tmp_path / "pdf.db", content_root=tmp_path)
+    try:
+        document = tmp_path / "manual.pdf"
+        # Not a valid PDF in any reader's eyes; the point is the bytes and the media type,
+        # and `/raw` answers from the file without interpreting it.
+        document.write_bytes(b"%PDF-1.4\n" + b"compress me if you must\n" * 400)
+        box = store.add(
+            Box(name="Manual", box_type="pdf", resource_uri=str(document))
+        )
+        with TestClient(create_app(store, content_root=tmp_path)) as test_client:
+            answer = test_client.get(
+                f"/api/boxes/{box.uuid}/raw", headers={"Accept-Encoding": "gzip"}
+            )
+            assert answer.status_code == 200
+            assert answer.headers.get("content-encoding") in (None, "identity")
+            assert answer.content == document.read_bytes()
+    finally:
+        store.close()
+
+
+def test_a_warm_reload_revalidates_instead_of_refetching(client: TestClient) -> None:
+    """`no-cache` means ask every time, and take the 304 when nothing changed.
+
+    Without it a browser guesses freshness from the file's mtime, which is how an upgrade
+    leaves a person running yesterday's script; with `must-revalidate` a changed file could
+    still be served from cache. The pair of numbers here is the whole argument: the second
+    request carries a validator and gets nothing back.
+    """
+    first = client.get("/static/app.js")
+    assert first.headers.get("cache-control") == "no-cache"
+    validator = first.headers.get("etag")
+    assert validator, "no validator to revalidate with"
+    again = client.get("/static/app.js", headers={"If-None-Match": validator})
+    assert again.status_code == 304
+    assert again.content == b""
+
+
+def test_a_small_answer_is_left_uncompressed(client: TestClient) -> None:
+    """Below the floor, compression costs a dictionary to save nothing.
+
+    Pinned so the threshold is a decision someone can find rather than a surprise: health is
+    a few dozen bytes, and gzip of a few dozen bytes is usually larger than the thing.
+    """
+    answer = client.get("/api/health", headers={"Accept-Encoding": "gzip"})
+    assert answer.status_code == 200
+    assert "content-encoding" not in answer.headers
+    assert len(answer.content) < _MINIMUM_COMPRESSIBLE_BYTES
