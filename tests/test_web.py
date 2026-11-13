@@ -6495,3 +6495,55 @@ def test_a_capture_that_cannot_be_filed_leaves_no_box_nobody_asked_for(
     names = [b["name"] for b in client.get("/api/boxes").json()]
     assert "ticket" not in names, f"the capture left a box nobody filed, in the library: {names}"
     assert client.get("/api/boxes/Crate").json()["name"] == "Crate"
+
+
+#: Ceiling for assertions that read the served page's TEXT instead of its behaviour --
+#: `assert "something({" in script` and friends. Finding 3 of `code_audit_report.md` is open:
+#: about 138 tests carry 569 of these, and how the remainder should be resolved (JSON-API
+#: assertions where the claim is server-side, the browser harness where it is not, or an accepted
+#: structural residue) is the user's decision, not the implementer's. Until that decision lands
+#: this number may only go DOWN. Lower it in the same commit that removes an assertion, and never
+#: raise it to make a build green: a raised ceiling is the finding, restated as a constant.
+SOURCE_TEXT_ASSERTION_CEILING = 570
+
+#: Variables in these tests that hold served text, so the sweep counts the assertions that
+#: actually quote the page rather than every `in` in the file.
+SOURCE_TEXT_VARS = (
+    "script", "css", "sheet", "page", "html", "template", "served", "server", "app_js", "widget",
+    "helper", "tile", "panel", "menu", "view", "handler", "guard", "body", "window", "bar", "row",
+    "asked", "drain", "ingest", "placed", "remember", "line", "carrier", "tag", "block", "code",
+    "text",
+)
+
+
+def test_assertions_on_served_page_text_do_not_grow() -> None:
+    """Ratchet on finding 3: quoting the page in a test is allowed to shrink, not to spread.
+
+    Each of these assertions passes on broken code that happens to contain the string, fails on
+    correct code that reformats it, and cannot notice the thing it stands in for changing on the
+    server. A regression test for a deleted call is worth more than a grep for its name -- proven
+    while converting the endpoint claims, where adding a route the page must never gain made the new
+    assertion fail and left the grep it replaced untouched and green.
+
+    This exists so the residue is a known, bounded quantity while the resolution is decided, rather
+    than a habit that quietly grows with the next feature.
+    """
+    own = Path(__file__).resolve().read_text(encoding="utf-8")
+    lines = own.split("\n")
+    starts = [i for i, line in enumerate(lines) if line.startswith("def test_")]
+    pattern = re.compile(
+        r"assert[\s\S]{0,220}?\bin (?:" + "|".join(SOURCE_TEXT_VARS) + r")\b"
+    )
+    counts: dict[str, int] = {}
+    for position, start in enumerate(starts):
+        stop = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        found = len(pattern.findall("\n".join(lines[start:stop])))
+        if found:
+            counts[lines[start][4 : lines[start].index("(")]] = found
+    total = sum(counts.values())
+    worst = sorted(counts.items(), key=lambda item: -item[1])[:5]
+    assert total <= SOURCE_TEXT_ASSERTION_CEILING, (
+        f"{total} assertions read served page text; ceiling is "
+        f"{SOURCE_TEXT_ASSERTION_CEILING}. Remove one rather than raising the ceiling. "
+        f"Heaviest: {worst}"
+    )
