@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """Manual browser check for the Boxganizer web UI. Not part of `make test`.
 
-    # terminal 1 — a scratch library and a server
-    export BOXGANIZER_DB=/tmp/verify.db
-    box init
-    box add "Notes"  -t text  -r /tmp/notes.md
-    box add "Sunset" -t image -r /tmp/sunset.png
-    box add "Board"  -t grid
-    python - <<'PY'
-    from PIL import Image; Image.new("RGB", (320, 200), (30, 60, 120)).save("/tmp/wall.png")
-    PY
-    box add "Wall"   -t desktop -r /tmp/wall.png
-    box add "Tile"   -t text -r /tmp/notes.md --parent Wall
-    box add "Loose"  --parent Wall
-    box serve --port 8300
+One command, nothing else to set up:
 
-    # terminal 2
-    .venv/bin/pip install playwright && playwright install chromium
+    make uitest                                    # or:
+    .venv/bin/python tools/verify_web_ui.py --self [path-to-chromium]
+
+`--self` builds a throwaway library with the fixtures these checks need, serves it on a free
+port, runs, then terminates its own server and deletes the directory. A chromium Playwright did
+not install can be named as the argument after `--self` or in $BOXGANIZER_CHROME.
+
+To run it against a server you started yourself, name the URL instead -- that is how a scratch
+library is driven while a feature is being built:
+
     .venv/bin/python tools/verify_web_ui.py http://127.0.0.1:8300 [path-to-chromium]
 
-A chromium that Playwright did not install can be named as the second argument
-or in $BOXGANIZER_CHROME.
-
-Re-seed the library between runs. Several checks read absolute state — whether a text box wraps,
-where an icon sits to the pixel — and the run before this one moved it: on a library this harness
-has already driven it reports those as failures that are really its own footprints.
+The library it needs used to be a copy-paste recipe of nine commands in a second terminal, and
+that is why this file went stale: untested setup steps rot quietly (the recipe here said
+`box box add` long after the commands were flattened to `box add`), and nobody ran what was
+tiresome to run. The checks also assert absolute state -- whether a text box wraps, which grid
+cells are filled, where an icon sits to the pixel, which children are still unplaced -- and an
+earlier run moves all of it; on a library this tool had already driven, the desktop chips it
+drags were no longer in the strip, which was not a failed check but a 30-second locator timeout
+that killed the run. It now un-configures the sections its own run writes, so a second run means
+the same thing as the first. Verified: two `--self` runs in a row, RESULT: OK both.
 
 It drives the real interface and prints what the page actually shows: the side
 pane, the view each box type chooses for itself, image scaling, folder
@@ -42,10 +41,16 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright
@@ -93,17 +98,14 @@ def api_delete(base: str, path: str) -> None:
         pass
 
 
-def main() -> int:
-    base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8300"
-    # A browser Playwright did not install can be named, for machines where the
-    # cached build does not match the installed version.
-    executable = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("BOXGANIZER_CHROME")
+def _run(base: str, executable: str | None) -> int:
     checks = Checks()
     errors: list[str] = []
 
     with sync_playwright() as drivers:
+        chosen = executable or _discover_browser()
         browser = drivers.chromium.launch(
-            executable_path=executable, args=["--no-sandbox"] if executable else []
+            executable_path=chosen, args=["--no-sandbox"] if chosen else []
         )
         page = browser.new_page(viewport={"width": 1300, "height": 820})
         page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
@@ -610,6 +612,123 @@ def main() -> int:
     print()
     print("RESULT:", "OK" if not checks.failures else f"{len(checks.failures)} failure(s)")
     return 1 if checks.failures else 0
+
+
+def _discover_browser() -> str | None:
+    """A chromium Playwright has cached, newest revision first.
+
+    The installed Playwright and the cached browsers drift apart on a machine that updates one and
+    not the other -- this one expects revision 1248 and holds 1234 -- and `launch()` then fails with
+    advice to download a browser that is already on disk. Finding the cached build keeps
+    `make uitest` a single command; an explicit path, named as an argument or in
+    $BOXGANIZER_CHROME, still wins.
+    """
+    roots = sorted(
+        Path.home().glob(".cache/ms-playwright/chromium-*/chrome-linux*/chrome"),
+        key=lambda item: item.as_posix(),
+        reverse=True,
+    )
+    for candidate in roots:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _wait_for(base: str, seconds: float = 40.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"{base}/api/health", timeout=2) as response:
+                if response.status == 200:
+                    return True
+        except (urllib.error.URLError, OSError):
+            time.sleep(0.3)
+    return False
+
+
+def _seed(base: str, created: list[Path]) -> None:
+    """Build the library this file's header describes, through the API.
+
+    Done here rather than left to the copy-paste recipe because that recipe is exactly why this
+    harness went stale: five commands a person runs by hand, in another terminal, before a check
+    can run at all. Untested steps rot -- the recipe here named `box box add` for as long as the
+    commands were two levels deep, and whole sections stopped matching the page unnoticed.
+    """
+    from PIL import Image
+
+    images = Path(tempfile.mkdtemp(prefix="verify-web-ui-assets-"))
+    created.append(images)
+    Image.new("RGB", (320, 200), (30, 60, 120)).save(images / "sunset.png")
+    Image.new("RGB", (640, 400), (20, 90, 60)).save(images / "wall.png")
+    notes = images / "notes.md"
+    notes.write_text("the quick brown fox\n", encoding="utf-8")
+    for payload in (
+        {"name": "Notes", "box_type": "text", "resource_uri": str(notes)},
+        {"name": "Sunset", "box_type": "image", "resource_uri": str(images / "sunset.png")},
+        {"name": "Board", "box_type": "grid"},
+        {"name": "Wall", "box_type": "desktop", "resource_uri": str(images / "wall.png")},
+        {"name": "Tile", "box_type": "text", "resource_uri": str(notes), "parent": "Wall"},
+        {"name": "Loose", "box_type": "folder", "parent": "Wall"},
+    ):
+        api(base, "/api/boxes", payload)
+
+
+def main() -> int:
+    args = [a for a in sys.argv[1:] if a != "--self"]
+    self_contained = "--self" in sys.argv[1:]
+    # A browser Playwright did not install can be named, for machines where the cached build does
+    # not match the installed version. In --self there is no base URL to give, so the one
+    # positional a person types IS that browser -- reading it as a URL was my first attempt,
+    # which launched the default build, and the run died before it drew anything.
+    named_browser = os.environ.get("BOXGANIZER_CHROME")
+    if not self_contained:
+        base = args[0] if args else "http://127.0.0.1:8300"
+        executable = args[1] if len(args) > 1 else named_browser
+        return _run(base, executable)
+    executable = args[0] if args else named_browser
+
+    workdir = Path(tempfile.mkdtemp(prefix="verify-web-ui-"))
+    created: list[Path] = [workdir]
+    port = _free_port()
+    server: subprocess.Popen[bytes] | None = None
+    try:
+        db = workdir / "boxes.db"
+        subprocess.run(
+            [sys.executable, "-m", "boxganizer", "--db", str(db), "init"],
+            check=True,
+            capture_output=True,
+        )
+        # A child we started and reap ourselves: `nohup cmd & echo $!` in a shell records the
+        # wrapper, not the process, which is how this machine collected dozens of servers that
+        # nobody could kill by the pid they had written down.
+        server = subprocess.Popen(
+            [sys.executable, "-m", "boxganizer", "--db", str(db), "serve", "--port", str(port)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        base = f"http://127.0.0.1:{port}"
+        if not _wait_for(base):
+            print(f"the throwaway server on {port} never answered; giving up")
+            return 2
+        _seed(base, created)
+        print(f"self-contained run: {base} on {db}")
+        return _run(base, executable)
+    finally:
+        if server is not None:
+            server.terminate()
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
+        for directory in created:
+            shutil.rmtree(directory, ignore_errors=True)
 
 
 if __name__ == "__main__":
