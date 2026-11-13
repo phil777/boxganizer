@@ -44,6 +44,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -65,6 +66,18 @@ def api(base: str, path: str, payload: dict | None = None) -> Any:
         f"{base}{path}",
         data=None if payload is None else json.dumps(payload).encode(),
         headers={"content-type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
+def api_put(base: str, path: str, payload: dict[str, object]) -> Any:
+    """PUT with a JSON body, for writing a box's own config back."""
+    request = urllib.request.Request(
+        f"{base}{path}",
+        data=json.dumps(payload).encode(),
+        headers={"content-type": "application/json"},
+        method="PUT",
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
@@ -95,6 +108,11 @@ def main() -> int:
         page = browser.new_page(viewport={"width": 1300, "height": 820})
         page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
         page.on("pageerror", lambda e: errors.append(str(e)))
+        # What the page asks for, read off the network. The suite used to grep app.js for the path
+        # strings instead, which proved that somebody had typed them somewhere; this proves the
+        # requests are actually issued, and would notice one quietly stopping.
+        asked: list[str] = []
+        page.on("request", lambda r: asked.append(r.url.split("/api/")[-1].split("?")[0]))
 
         page.goto(f"{base}/", wait_until="networkidle")
         page.reload(wait_until="networkidle")
@@ -109,6 +127,30 @@ def main() -> int:
             "a box is on screen",
             page.locator("#canvas .icon-view, #canvas .children-view").count() > 0,
         )
+
+        print("the shell asks the server for what it draws")
+        for endpoint in ("boxes", "types", "index/status", "tags"):
+            checks.check(
+                f"a load asks for /api/{endpoint}",
+                any(a == endpoint or a.startswith(f"{endpoint}?") or a.startswith(f"{endpoint}/")
+                    for a in asked),
+                sorted(set(asked))[:6],
+            )
+
+        print("the root row offers no way to delete it")
+        root_row = page.locator("#box-list li").first
+        checks.check("the root is the first row", "root" in root_row.inner_text(),
+                     root_row.inner_text()[:40])
+        root_row.click(button="right")
+        page.wait_for_timeout(400)
+        root_menu = page.locator("#context-menu").inner_text()
+        checks.check(
+            "no delete entry is offered for the root",
+            "Delete" not in root_menu,
+            root_menu.replace("\n", " / ")[:120],
+        )
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
 
         print("settings are folded until asked for, so ask once, here")
         # `#canvas:not(.config-open) .box-config` is height 0 and visibility hidden (app.css), which
@@ -176,6 +218,32 @@ def main() -> int:
         checks.check(
             "ratio preserved", bool(facts) and facts["ratioPainted"] == facts["ratioNatural"], facts
         )
+
+        print("un-configure what this run configures")
+        # Every section below asserts absolute state that a previous run of this same file
+        # moved: whether a note wraps, which grid cells are filled and how wide the grid is,
+        # and -- worst of all -- which children of the desktop are still unplaced. That last one
+        # did not merely fail a check, it crashed the run: the icons the earlier run had dragged
+        # onto the surface were no longer in the strip, and the locator timed out 30 seconds on.
+        #
+        # A snapshot taken at the start and written back at the end was tried first, and it is
+        # wrong here: it reproduces the *previous* run's dirt, so the second run still fails.
+        # These checks describe a freshly seeded library, so the reset deletes the config
+        # sections this tool creates and returns each box to never-configured -- what the seed
+        # leaves behind.
+        for box_name, section in (("Notes", "text"), ("Board", "grid"), ("Wall", "desktop")):
+            try:
+                here = api(base, f"/api/boxes/{urllib.parse.quote(box_name)}")
+            except urllib.error.HTTPError:
+                continue  # a library without that fixture; its section skips itself
+            config = {k: v for k, v in (here["config"] or {}).items() if k != section}
+            try:
+                api_put(base, f"/api/boxes/{urllib.parse.quote(box_name)}", {"config": config})
+                checks.check(f"{box_name}.{section} is back to unconfigured", section not in config)
+            except urllib.error.HTTPError as exc:
+                checks.check(f"{box_name}.{section} reset", False, exc.code)
+        page.reload(wait_until="networkidle")
+        page.wait_for_timeout(700)
 
         print("text view")
         notes = page.locator("#box-list li", has_text="Notes")

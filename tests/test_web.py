@@ -163,10 +163,44 @@ def test_the_shell_assets_are_served(client: TestClient) -> None:
     assert "css" in stylesheet.headers["content-type"]
 
 
-def test_the_shell_fetches_its_data_from_the_api(client: TestClient) -> None:
-    script = client.get("/static/app.js").text
-    for endpoint in ("/api/boxes", "/api/types", "/api/search"):
-        assert endpoint in script, endpoint
+def test_the_data_endpoints_the_shell_draws_from_are_served(client: TestClient) -> None:
+    """The routes a panel draw needs answer, with JSON, from a fresh library.
+
+    This is the server half of "the shell fetches its data from the API". The other
+    half -- that the page asks for them -- is a browser question, answered in
+    `tools/verify_web_ui.py`, where the requests a load makes are read off the network
+    rather than off the script. Grepping app.js for a path proved only that somebody had
+    typed those characters somewhere in 10,000 lines: it survived deleting the call, and
+    it failed on a rename that changed nothing.
+    """
+    for path in ("/api/boxes", "/api/types", "/api/index/status", "/api/tags"):
+        response = client.get(path)
+        assert response.status_code == 200, f"{path} -> {response.status_code}"
+        assert response.headers["content-type"].startswith("application/json"), path
+    assert isinstance(client.get("/api/boxes").json(), list)
+    search = client.get("/api/search?q=Kitchen")
+    assert search.status_code == 200
+    assert isinstance(search.json(), list), "a search answers with a list of boxes, not an object"
+
+
+def test_a_route_that_is_asked_for_and_not_offered_says_so_in_the_shape_the_page_reads(
+    client: TestClient,
+) -> None:
+    """An unknown API route answers 404 with the detail `"Not Found"` and nothing more invented.
+
+    The page tells a missing *box* apart from a missing *route* by exactly this shape,
+    and shows "restart the server" for the second -- the diagnosis a person can act on
+    when a new page runs against an old process. That mapping is why the shape is a
+    contract: a helpful 404 naming the box that was not found would send the reader
+    looking for a box that was never the problem. The client half is labelled as
+    structural residue where it lives.
+    """
+    unknown = client.get("/api/boxes/1234/no-such-route")
+    assert unknown.status_code == 404
+    assert unknown.json() == {"detail": "Not Found"}, unknown.json()
+    missing_box = client.get("/api/boxes/no-such-box")
+    assert missing_box.status_code == 404
+    assert missing_box.json()["detail"]["error"] == "box_not_found", missing_box.json()
 
 
 # -- box types through the API ---------------------------------------------
@@ -418,11 +452,9 @@ def test_the_root_is_not_offered_for_deletion_and_the_server_refuses_it(
     assert "nowhere to file anything" in response.json()["detail"]["reason"]
     assert client.get(f"/api/boxes/{made.json()['uuid']}").status_code == 200, "it is still there"
 
-    script = client.get("/static/app.js").text
-    menu = script[script.index("function boxMenuItems(") :]
-    menu = menu[: menu.index("/**\n * The menu's delete entry")]
-    assert 'if (box.box_type !== "root")' in menu
-    assert "deleteMenuItem(box)" in menu
+    # That the menu does not *offer* deleting the root is a browser question, and the harness checks
+    # it with a real right-click ("the root row offers no way to delete it"). Asserting it here by
+    # quoting `boxMenuItems` proved only that a line of source still read one way.
 
 
 def test_the_menu_asks_before_it_destroys_and_says_what_survives(client: TestClient) -> None:
@@ -2662,17 +2694,28 @@ def test_a_branch_keeps_one_colour_from_the_centre_down(client: TestClient) -> N
     assert "walk(child, depth + 1, colour, sign, row)" in script
 
 
-def test_the_page_asks_the_map_endpoints_it_needs(client: TestClient) -> None:
-    script = client.get("/static/app.js").text
-    for path in (
-        "/mindmap",
-        "/mindmap/side",
-        "/mindmap/order",
-        "/mindmap/hierarchy",
-        "/mindmap/node",
-        "/mindmap/fill",
-    ):
-        assert path in script, path
+def test_the_map_endpoints_the_page_needs_exist_and_no_others(client: TestClient) -> None:
+    """The map screen gets its layout from five writes and one read, and that is the whole surface.
+
+    Asserted against the served OpenAPI document rather than against `app.js`: a route the page is
+    not supposed to need cannot be called at all if it does not exist, which is a guarantee, while a
+    grep for a path string only records that the string was typed somewhere.
+    """
+    served = client.get("/openapi.json").json()
+    operations = {
+        (path, str(method).upper())
+        for path, methods in served["paths"].items()
+        for method in methods
+        if "/mindmap" in path
+    }
+    assert operations == {
+        ("/api/boxes/{ref}/mindmap", "GET"),
+        ("/api/boxes/{ref}/mindmap/fill", "POST"),
+        ("/api/boxes/{ref}/mindmap/hierarchy", "POST"),
+        ("/api/boxes/{ref}/mindmap/node", "POST"),
+        ("/api/boxes/{ref}/mindmap/order", "POST"),
+        ("/api/boxes/{ref}/mindmap/side", "POST"),
+    }, sorted(operations)
 
 
 def test_a_map_shown_in_a_cell_is_scaled_rather_than_cropped(client: TestClient) -> None:
@@ -2697,12 +2740,28 @@ def test_the_ssh_console_is_registered_and_says_what_it_is(client: TestClient) -
 
 
 def test_the_ssh_console_asks_only_the_endpoints_that_exist(client: TestClient) -> None:
-    script = client.get("/static/app.js").text
-    assert "/ssh" in script
-    assert "/ssh/run" in script
-    # and never anything that would open a session it cannot close
-    assert "/ssh/open" not in script
-    assert "/ssh/stream" not in script
+    """One command in, one answer out, and no route that could open a session nobody could close.
+
+    The old assertion grepped app.js for two paths being absent, which protected
+    nothing: a page could gain the call in a refactor, the grep would still pass on a
+    differently quoted string, and the server would happily answer. It is asserted here
+    where it bites -- the routes do not exist, so no client can open a session, whatever
+    it does next.
+    """
+    served = client.get("/openapi.json").json()
+    operations = {
+        (path, str(method).upper())
+        for path, methods in served["paths"].items()
+        for method in methods
+        if "/ssh" in path
+    }
+    assert operations == {
+        ("/api/boxes/{ref}/ssh", "GET"),
+        ("/api/boxes/{ref}/ssh/run", "POST"),
+    }, sorted(operations)
+    for forbidden in ("/api/boxes/1/ssh/open", "/api/boxes/1/ssh/stream"):
+        assert client.get(forbidden).status_code == 404, f"{forbidden} exists"
+        assert client.post(forbidden).status_code == 404, f"{forbidden} exists"
 
 
 def test_a_page_may_ask_for_a_password_and_may_never_keep_one(client: TestClient) -> None:
@@ -3091,7 +3150,16 @@ def test_a_preview_asks_for_the_file_rather_than_for_a_box_that_does_not_exist(
 def test_a_route_the_server_does_not_know_says_so_rather_than_not_found(
     client: TestClient,
 ) -> None:
-    """New page against an old server process: the fix is a restart, not a search for a box."""
+    """New page against an old server process: the fix is a restart, not a search for a box.
+
+    LABELLED STRUCTURAL RESIDUE (finding 3): this asserts how one line of app.js
+    reads, and it stays only because the behaviour it protects -- a sentence shown when
+    a new page meets an OLD server -- needs two different builds running at once to
+    observe. The server half of the same rule is asserted behaviourally in
+    test_a_route_that_is_asked_for_and_not_offered_says_so_in_the_shape_the_page_reads.
+    If this costs more in refactor friction than it pays, the answer is a harness case
+    against a mismatched server, not a quiet relaxation of it.
+    """
     script = client.get("/static/app.js").text
     assert 'response.status === 404 && reason === "Not Found"' in script
     assert "restart" in script
@@ -3133,14 +3201,19 @@ def test_the_panel_carries_a_menu_of_actions_on_the_library_itself(client: TestC
 
 
 def test_about_reports_the_version_the_server_is_running(client: TestClient) -> None:
-    """The version comes from the server: the page must not know its own number twice."""
+    """The version comes from the server: the page must not know its own number twice.
+
+    Asserted on what the server serves. The shell carries an empty slot for it, and the running
+    version is not baked into that shell -- so the number a person reads is the one the process
+    answering them was built from, and a page cached against an older server cannot quietly keep
+    showing the old number as if it were current.
+    """
     page = client.get("/").text
     assert 'id="about-modal"' in page
     assert 'id="about-version"' in page
-    script = client.get("/static/app.js").text
-    assert "api.health()" in script
-    assert "version ${health.version}" in script
-    assert client.get("/api/health").json()["version"]
+    health = client.get("/api/health").json()
+    assert health["version"]
+    assert health["version"] not in page, "the shell already knows the version it should be asking"
 
 
 def test_the_index_is_reported_on_every_panel_and_can_be_run_from_the_page(
@@ -3620,22 +3693,24 @@ def test_the_tag_window_asks_for_no_endpoint_that_does_not_exist(
 ) -> None:
     """The redesign moved the interaction and left the server alone.
 
-    Every write the window makes is one the chip field has always made, and the routes that answer
-    for tags are named here so that adding one to make a screen easier is a decision someone has to
-    notice rather than a side effect of a redesign.
+    Every write the window makes is one the chip field has always made, so it is
+    proven through the API rather than by reading the script: create a tag, give it to a
+    box, rename it, take it away. The route set is asserted against the served OpenAPI
+    document, which is what makes "add a route to make a screen easier" a decision
+    someone has to notice -- a grep over app.js could catch a route being named, never
+    one being added.
     """
-    script = client.get("/static/app.js").text
-    window = script[script.index("const tagUi = {") :]
-    window = window[: window.index("/* -- a box's settings")]
-    calls = sorted(
-        {
-            call
-            for call in ("editTag", "deleteTag", "createTag", "giveTag", "setBoxTags", "boxTags")
-            if f"api.{call}" in window
-        }
-    )
-    assert calls == ["deleteTag", "editTag", "giveTag"]
-    assert "fetch(" not in window
+    kitchen = client.get("/api/boxes/Kitchen").json()["uuid"]
+    created = client.post("/api/tags", json={"name": "urgent", "colour": "#b91c1c"})
+    assert created.status_code in (200, 201), created.text
+    given = client.post(f"/api/boxes/{kitchen}/tags", json={"name": "urgent"})
+    assert given.status_code in (200, 201, 204), given.text
+    assert "urgent" in client.get(f"/api/boxes/{kitchen}/tags").json()["explicit"]
+    edited = client.patch("/api/tags/urgent", json={"colour": "#1d4ed8"})
+    assert edited.status_code in (200, 204), edited.text
+    removed = client.delete(f"/api/boxes/{kitchen}/tags/urgent")
+    assert removed.status_code in (200, 204), removed.text
+    assert "urgent" not in client.get(f"/api/boxes/{kitchen}/tags").json()["explicit"]
 
     served = client.get("/openapi.json").json()
     routes = {
