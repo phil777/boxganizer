@@ -1448,3 +1448,161 @@ def test_a_refused_add_leaves_nothing_behind(tmp_path: Path) -> None:
         )
     finally:
         store.close()
+
+
+# --- the helper table that answers "is it in the index" without asking FTS5 per row ---
+
+
+def _words_in_the_index(store: BoxStore) -> set[int]:
+    """Which resources the full-text index really holds words for, straight from FTS5."""
+    return {
+        int(row["resource_id"])
+        for row in store._rows("SELECT resource_id FROM resource_text WHERE trim(body) <> ''")
+    }
+
+
+def test_the_helper_agrees_with_the_index_across_a_resources_life(tmp_path: Path) -> None:
+    """Create, read, change, re-read, opt out, delete: the two tables never drift apart.
+
+    The helper is a claim about the index, so the test asks the index itself each time. A
+    version of this that only checked one moment would not notice a write path that forgot
+    one of the five places the index row changes hands.
+    """
+    store = BoxStore(tmp_path / "life.db", content_root=tmp_path)
+    try:
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 0,
+            "words_unclaimed": 0,
+        }
+        notes = [
+            _watch(store, f"life{i}.txt", f"words about life number {i}", tmp_path)
+            for i in range(3)
+        ]
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 0,
+            "words_unclaimed": 0,
+        }
+        assert len(_words_in_the_index(store)) == 3
+        # one of them stops having anything to hold
+        notes[0].write_text("   \n  ", encoding="utf-8")
+        os.utime(notes[0], (notes[0].stat().st_mtime + 40, notes[0].stat().st_mtime + 40))
+        indexing.rebuild(store, root=tmp_path, only_stale=True)
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 0,
+            "words_unclaimed": 0,
+        }
+        # opting out takes the row out of both tables
+        gone = store.resource(str(notes[1]))
+        assert gone is not None
+        store.set_index_flag(str(notes[1]), False)
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 0,
+            "words_unclaimed": 0,
+        }
+        assert int(gone.id or 0) not in _words_in_the_index(store)
+        # and deleting the last box pointing at a file releases the resource and its text
+        for path in notes:
+            store.delete_box(_name_holding(store, path))
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 0,
+            "words_unclaimed": 0,
+        }
+        assert _words_in_the_index(store) == set()
+    finally:
+        store.close()
+
+
+def _name_holding(store: BoxStore, path: Path) -> str:
+    """The name of the box pointing at *path*, so the life test can delete it."""
+    for box in store.list_boxes():
+        if box.resource_uri == str(path):
+            return box.name
+    raise AssertionError(f"no box points at {path}")
+
+
+def test_the_panel_number_matches_what_the_index_actually_holds(tmp_path: Path) -> None:
+    """`indexed` on the panel is the count of FTS rows, not the count of helper guesses.
+
+    This is the assertion the helper is allowed to fail: the whole reason it exists is to
+    answer a question the panel already asked correctly, only faster.
+    """
+    store = BoxStore(tmp_path / "truth.db", content_root=tmp_path)
+    try:
+        for index in range(4):
+            _watch(store, f"t{index}.txt", f"body text number {index}", tmp_path)
+        empty = tmp_path / "empty.txt"
+        empty.write_text("", encoding="utf-8")
+        store.add(Box(name="Empty", box_type="text", resource_uri=str(empty)))
+        indexing.rebuild(store, root=tmp_path)
+        counts = store.index_counts()
+        assert counts["indexed"] == len(_words_in_the_index(store))
+        assert counts["indexed"] == 4, "the empty file must not count as indexed"
+        assert counts["unreadable"] == 1
+        assert counts["wanted"] == 5
+    finally:
+        store.close()
+
+
+def test_a_library_written_before_the_helper_exists_opens_with_it_filled(tmp_path: Path) -> None:
+    """Migration v9 -> v10: backfill from `resource_text`, and safe to run twice.
+
+    The table arrives with the schema script, so without the backfill every old library
+    would open looking like it had lost its entire index -- the panel would say nothing was
+    searchable until the next `box index`.
+    """
+    path = tmp_path / "old.db"
+    store = BoxStore(path, content_root=tmp_path)
+    try:
+        for index in range(3):
+            _watch(store, f"old{index}.txt", f"content {index}", tmp_path)
+    finally:
+        store.close()
+    raw = sqlite3.connect(str(path))
+    raw.execute("DROP TABLE indexed_doc")
+    raw.execute("PRAGMA user_version = 9")
+    raw.commit()
+    raw.close()
+    for attempt in (1, 2):
+        reopened = BoxStore(path, content_root=tmp_path)
+        try:
+            assert reopened.doc_index_agreement() == {
+                "claimed_without_words": 0,
+                "words_unclaimed": 0,
+            }, f"attempt {attempt}"
+            assert reopened.index_counts()["indexed"] == 3, f"attempt {attempt}"
+            assert reopened.index_counts()["wanted"] == 3, f"attempt {attempt}"
+        finally:
+            reopened.close()
+
+
+def test_reconcile_repairs_a_helper_that_was_left_behind(tmp_path: Path) -> None:
+    """The repair path, on the state only hand-edited SQL can produce.
+
+    `reconcile_doc_index` is what `box index` ends with, so this is also the proof that a
+    pass over the library is enough to make the panel honest again after anything odd.
+    """
+    store = BoxStore(tmp_path / "repair.db", content_root=tmp_path)
+    try:
+        _watch(store, "one.txt", "one body", tmp_path)
+        _watch(store, "two.txt", "two body", tmp_path)
+        held = _words_in_the_index(store)
+        assert len(held) == 2
+        # both directions of drift, in one go
+        store._execute("INSERT INTO indexed_doc (resource_id) VALUES (4242)")
+        store._execute("DELETE FROM resource_text WHERE resource_id = ?", (min(held),))
+        # Two claims with nothing behind them: the id that never existed, and the resource
+        # whose FTS row was just taken away. `words_unclaimed` stays 0 -- nothing gained text
+        # without the helper hearing about it -- so the repair is a pruning here, and the
+        # assertion after it is what proves both directions are covered by the same call.
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 2,
+            "words_unclaimed": 0,
+        }
+        assert store.reconcile_doc_index() == 2
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 0,
+            "words_unclaimed": 0,
+        }
+        assert _words_in_the_index(store) == {max(held)}
+    finally:
+        store.close()

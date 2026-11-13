@@ -191,7 +191,9 @@ def store(tmp_path: Path) -> Any:
 
 
 def test_the_schema_now_carries_tags() -> None:
-    assert SCHEMA_VERSION == 9
+    # Pinned so a schema change has to be noticed here: 10 is `indexed_doc`, the helper that
+    # answers "does the index hold words for this resource" without asking FTS5 per row.
+    assert SCHEMA_VERSION == 10
 
 
 def test_tags_are_unique_whatever_case_they_were_typed_in(store: BoxStore) -> None:

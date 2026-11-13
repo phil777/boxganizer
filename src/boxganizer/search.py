@@ -829,21 +829,25 @@ def rebuild(store: Any, *, root: Path | str | None = None, only_stale: bool = Fa
     unchanged = 0
     for resource in watched:
         before = resource.indexed and resource.stale() is False
-        note = sync_resource(
+        # One commit per file. Recording one resource used to be five statements and five
+        # fsyncs, which is how a pass over a library of hundreds of files spends most of its
+        # time waiting for the journal. The file is the unit worth surviving a crash for, so
+        # the durability boundary moves there rather than sitting on every statement.
+        with store.batch():
             # A pass over the library is the deliberate one, so a folder is walked rather
             # than trusted to its mtime: a file added two levels down does not change the
             # mtime of the folder above, and discovery is what this pass is for.
-            store,
-            resource.id,
-            root=root,
-            walk_always=True,
-        )
+            note = sync_resource(store, resource.id, root=root, walk_always=True)
         if note:
             skipped.append((address.display(resource.reference), note))
         elif before:
             unchanged += 1
         else:
             indexed += 1
+    # The helper table is derived data, and this is the pass that makes the index true
+    # again, so it is the pass that makes the helper true with it: two set operations on a
+    # b-tree, instead of leaving every panel draw to guess about files the index never held.
+    store.reconcile_doc_index()
     return Report(
         resources=len(watched),
         indexed=indexed,

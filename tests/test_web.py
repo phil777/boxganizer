@@ -3989,6 +3989,12 @@ def test_the_pending_list_tells_work_apart_from_a_dead_end(
                 " stale = 0",
             )
             store._execute("DELETE FROM resource_text")
+            # The helper table is what the panel reads now, and emptying the index with raw SQL
+            # left it claiming words that were gone. Boxganizer never does that -- it writes
+            # both together -- but a library edited by hand, or an interrupted run, is exactly
+            # what `reconcile_doc_index` is for, so the fixture goes through the repair instead
+            # of asserting on a state the app cannot produce.
+            assert store.reconcile_doc_index() == 1
             body = test_client.get("/api/index/pending").json()
             assert [item["fixable"] for item in body["items"]] == [False]
             assert "no text" in body["items"][0]["words"]
