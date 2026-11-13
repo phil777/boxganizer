@@ -409,6 +409,11 @@ def test_the_page_finds_a_box_by_what_its_file_says(tmp_path: Path) -> None:
                 },
             )
             assert created.status_code == 201
+            # ADR 32: saving returns before the file has been read, so the words are not
+            # searchable yet. This asserted the hit straight away and failed now and then under a
+            # loaded machine -- one failure in two full runs while I was here, green on its own --
+            # which is the shape conftest warns about. Wait on the queue, not on luck.
+            wait_for_index(client)
             hits = client.get("/api/search?q=fence").json()
             assert [hit["name"] for hit in hits] == ["Siding"]
             assert hits[0]["match"]["how"] == "content"

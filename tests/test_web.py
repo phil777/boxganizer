@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import threading
@@ -5845,43 +5846,18 @@ def test_a_dragged_box_announces_itself_in_the_type_list(client: TestClient) -> 
     assert 'event.dataTransfer.setData("text/plain", box.uuid);' not in script
 
 
-def test_a_list_row_is_a_filing_target_in_both_lists(client: TestClient) -> None:
-    """A row is a folder the size of a line, in the left panel and in the folder's own list.
+def test_the_row_targets_are_painted(client: TestClient) -> None:
+    """A drop target that paints nothing is this page's recurring failure (ADR 38), so the four
+    rules that make a row's two states visible are checked here.
 
-    Neither list had a handler on the row, which is why "drag a box into a folder" had no answer at
-    all in the panel, and in the main pane a drop on a row filed into the *displayed* folder — the
-    box the pointer was on lost to the box behind it.
-
-    Both lists now call one helper. Two copies of the same twelve lines is how they drifted in the
-    first place: the panel's version answered a dragged box and stayed dark for a dragged file,
-    while the main pane's answered both. So the assertion here is that both sites reach the same
-    function, and that the function still carries the rules the copies used to paraphrase.
+    What the rows *do* -- green for an accepting target, amber for one that turns the box down, a
+    filing that lands in the row rather than the pane behind it -- is no longer asserted from source
+    at all: `make uitest` drags one row onto another with a real pointer and reads the classes the
+    live element wore mid-gesture, then asks the server who the box ended up under. Those checks are
+    in `tools/verify_web_ui.py` ("a row is a filing target in both lists"); this one keeps only the
+    part a browser cannot easily tell apart: that a CSS rule exists to colour the class the
+    handler set.
     """
-    script = client.get("/static/app.js").text
-
-    panel = script[script.index("function renderSide(") :]
-    panel = panel[: panel.index("function markSelected(")]
-    assert "wireRowFilingTarget(item, box, {" in panel, "the left panel's rows are not targets"
-
-    tile = script[script.index("function childTile(") :]
-    tile = tile[: tile.index('item.addEventListener("contextmenu"')]
-    assert "wireRowFilingTarget(item, child, {" in tile, (
-        "the row must file into the row's own box, not into the folder being listed"
-    )
-
-    helper = script[script.index("function wireRowFilingTarget(") :]
-    helper = helper[: helper.index("\n}\n")]
-    for rule in (
-        "const accepts = filingTarget(row);",  # the same predicate as the pane behind it
-        "if (carriesABox(event) || dragIsResource(event)) {",  # a refusal is drawn for both kinds
-        'element.classList.add("drop-refused");',
-        "if (!claimableHere(event)) return;",
-        "if (draggedBoxRef(event) === row.uuid) return;",  # not inside itself
-        "await ingestDroppedResources(event, row.uuid, report)",
-        "await dropBox(event, ctx || { status: report }, row.uuid,",
-    ):
-        assert rule in helper, f"the shared row target lost {rule!r}"
-
     css = client.get("/static/app.css").text
     for rule in (
         "#box-list li.drop-target",
@@ -5889,7 +5865,8 @@ def test_a_list_row_is_a_filing_target_in_both_lists(client: TestClient) -> None
         ".child.drop-target",
         ".child.drop-refused",
     ):
-        assert rule in css, f"{rule} missing: a handler that paints nothing is the ADR 38 failure"
+        assert rule in css, f"{rule} missing: the handler sets a class nothing draws"
+
 
 
 def test_a_dropped_file_is_named_by_its_content_not_by_its_filename(
@@ -6497,53 +6474,86 @@ def test_a_capture_that_cannot_be_filed_leaves_no_box_nobody_asked_for(
     assert client.get("/api/boxes/Crate").json()["name"] == "Crate"
 
 
-#: Ceiling for assertions that read the served page's TEXT instead of its behaviour --
-#: `assert "something({" in script` and friends. Finding 3 of `code_audit_report.md` is open:
-#: about 138 tests carry 569 of these, and how the remainder should be resolved (JSON-API
-#: assertions where the claim is server-side, the browser harness where it is not, or an accepted
-#: structural residue) is the user's decision, not the implementer's. Until that decision lands
-#: this number may only go DOWN. Lower it in the same commit that removes an assertion, and never
-#: raise it to make a build green: a raised ceiling is the finding, restated as a constant.
-SOURCE_TEXT_ASSERTION_CEILING = 570
+#: Ceiling for assertions that read the served page's TEXT instead of its behaviour -- an
+#: `assert <literal> in script` over the served script, stylesheet or shell. Finding 3 of
+#: `code_audit_report.md` is open -- 525 of them across 126 tests as this is written. How the
+#: remainder is resolved (JSON-API assertions where the
+#: claim is server-side, the browser harness where it is not, or an accepted structural residue) is
+#: the user's decision, not the implementer's. Until that decision lands this number may only go
+#: DOWN. Lower it in the commit that removes an assertion; never raise it to make a build green,
+#: because a raised ceiling is the finding restated as a constant.
+SOURCE_TEXT_ASSERTION_CEILING = 525
 
-#: Variables in these tests that hold served text, so the sweep counts the assertions that
-#: actually quote the page rather than every `in` in the file.
-SOURCE_TEXT_VARS = (
-    "script", "css", "sheet", "page", "html", "template", "served", "server", "app_js", "widget",
-    "helper", "tile", "panel", "menu", "view", "handler", "guard", "body", "window", "bar", "row",
-    "asked", "drain", "ingest", "placed", "remember", "line", "carrier", "tag", "block", "code",
-    "text",
+#: Names in these tests that hold served text, so the sweep counts assertions that quote the page
+#: rather than every containment check in the file.
+SOURCE_TEXT_VARS = frozenset(
+    {
+        "app_js", "bar", "block", "body", "carrier", "code", "css", "drain", "guard", "handler",
+        "helper", "html", "ingest", "line", "menu", "page", "panel", "placed", "remember", "row",
+        "script", "served", "server", "sheet", "tag", "template", "text", "tile", "view", "widget",
+        "window",
+    }
 )
 
 
-def test_assertions_on_served_page_text_do_not_grow() -> None:
-    """Ratchet on finding 3: quoting the page in a test is allowed to shrink, not to spread.
+def _served_text_assertions(tree: ast.Module) -> list[str]:
+    """Names of tests holding `assert ... in <served text>`, read off the AST.
 
-    Each of these assertions passes on broken code that happens to contain the string, fails on
-    correct code that reformats it, and cannot notice the thing it stands in for changing on the
-    server. A regression test for a deleted call is worth more than a grep for its name -- proven
-    while converting the endpoint claims, where adding a route the page must never gain made the new
+    Done through the parser rather than a regex over the file because the first version swept text
+    and counted its own comments: a sentence quoting one of these assertions matched the pattern for
+    one of these assertions, so the measurement moved whenever somebody wrote about it.
+    """
+    found: list[str] = []
+
+    class Walk(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.test = ""
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            outer = self.test
+            if node.name.startswith("test_"):
+                self.test = node.name
+            self.generic_visit(node)
+            self.test = outer
+
+        def visit_Assert(self, node: ast.Assert) -> None:
+            for compare in ast.walk(node.test):
+                if not isinstance(compare, ast.Compare):
+                    continue
+                for op, comparator in zip(compare.ops, compare.comparators, strict=False):
+                    if (
+                        isinstance(op, ast.In)
+                        and isinstance(comparator, ast.Name)
+                        and comparator.id in SOURCE_TEXT_VARS
+                        and self.test
+                    ):
+                        found.append(self.test)
+            self.generic_visit(node)
+
+    Walk().visit(tree)
+    return found
+
+
+def test_assertions_on_served_page_text_do_not_grow() -> None:
+    """Ratchet on finding 3: quoting the page in a test may shrink, never spread.
+
+    Each of these passes on broken code that happens to contain the string, fails on correct code
+    that reformats it, and cannot notice the thing it stands in for changing on the server. A
+    regression test for a deleted call is worth more than a grep for its name -- shown while
+    converting the endpoint claims, where adding a route the page must never gain made the new
     assertion fail and left the grep it replaced untouched and green.
 
-    This exists so the residue is a known, bounded quantity while the resolution is decided, rather
-    than a habit that quietly grows with the next feature.
+    So the residue becomes a bounded, counted quantity while its disposition is decided, rather than
+    a habit that grows one feature at a time.
     """
     own = Path(__file__).resolve().read_text(encoding="utf-8")
-    lines = own.split("\n")
-    starts = [i for i, line in enumerate(lines) if line.startswith("def test_")]
-    pattern = re.compile(
-        r"assert[\s\S]{0,220}?\bin (?:" + "|".join(SOURCE_TEXT_VARS) + r")\b"
-    )
+    names = _served_text_assertions(ast.parse(own))
     counts: dict[str, int] = {}
-    for position, start in enumerate(starts):
-        stop = starts[position + 1] if position + 1 < len(starts) else len(lines)
-        found = len(pattern.findall("\n".join(lines[start:stop])))
-        if found:
-            counts[lines[start][4 : lines[start].index("(")]] = found
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
     total = sum(counts.values())
     worst = sorted(counts.items(), key=lambda item: -item[1])[:5]
     assert total <= SOURCE_TEXT_ASSERTION_CEILING, (
-        f"{total} assertions read served page text; ceiling is "
-        f"{SOURCE_TEXT_ASSERTION_CEILING}. Remove one rather than raising the ceiling. "
-        f"Heaviest: {worst}"
+        f"{total} assertions read served page text; the ceiling is "
+        f"{SOURCE_TEXT_ASSERTION_CEILING}. Remove one rather than raise it. Heaviest: {worst}"
     )
