@@ -2360,6 +2360,14 @@ def create_app(
         root, target = _box_file(
             store, request, ref, sub, need_list=True, missing_root_ok=not sub
         )
+        # Whether the *contents* of this folder are in the full-text index — asked of the resource,
+        # not guessed from the box type: `indexes_content` is about a type reading its own file, so
+        # an indexed directory answers False while every file inside it is in the index. The listing
+        # carries the fact because this is the response the view already holds when it decides what
+        # its search field may promise — the same rule as the dialog's checkbox, kept in one place.
+        box = store.resolve(ref)
+        held = store.resource(box.resource_uri) if box.resource_uri else None
+        indexed = bool(held and held.index_it)
         if not target.exists():
             # The folder this box was pointed at is not on this machine. Answered as a listing that
             # is empty *for a reason*, not as a failure: the box is real, it stays in the index, and
@@ -2371,6 +2379,7 @@ def create_app(
                 "parent": None,
                 "at": str(target),
                 "entries": [],
+                "indexed": indexed,
                 "missing": True,
                 "reason": "folder_not_here",
             }
@@ -2379,8 +2388,53 @@ def create_app(
             "sub": sub or "",
             "parent": _parent_of(sub),
             "at": str(target),
+            "indexed": indexed,
             "entries": [entry.as_dict() for entry in fslist.list_directory(root, sub)],
         }
+
+    @app.get("/api/boxes/{ref}/search")
+    def search_box_directory(
+        ref: str,
+        store: StoreDep,
+        q: Annotated[str, Query(min_length=1)],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+    ) -> dict[str, object]:
+        """Search **inside** one box's directory: the files in it and below it, by name and by text.
+
+        The field in an indexed-directory used to narrow the rows already on the screen. That
+        answers one question — which of these names contain what I typed — and the folder
+        holds a second, better one: which of these files *say* what I typed. The library
+        search already knew how to ask it (ADR 33: one expression, one set clause), and the
+        measurement that led here said the
+        index reaches files in the folder and in its sub-folders today — what was missing was that
+        nobody asked it from this field, and that a file's own name was not searchable at all.
+
+        So the answer is a set of files, each with the passage that spoke or the name that matched,
+        plus the folders on the route to them. Nothing is read from disk to decide membership: the
+        index is what answers, which is the whole reason it exists.
+        """
+        box = store.resolve(ref)
+        if not box.resource_uri:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "no_directory",
+                    "name": box.name,
+                    "reason": "the box points at nothing",
+                },
+            )
+        root = str(_local_path(box.resource_uri))
+        planned = text_search.plan(q, lambda term: store.vocabulary(prefix=term[:1]))
+        if planned.expanded:
+            response.headers["X-Search-Expanded"] = text_search.explain(planned)
+        answer = store.search_under(
+            root,
+            q,
+            match=planned.content_match if planned.worth_asking else "",
+            limit=limit
+        )
+        return {"root": root, "query": q, "expanded": text_search.explain(planned), **answer}
 
     @app.get("/api/boxes/{ref}/archive")
     def read_archive(

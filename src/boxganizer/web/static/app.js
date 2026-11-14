@@ -77,6 +77,10 @@ const api = {
   boxes: () => request("/api/boxes"),
   // `under` narrows the same search to one box's subtree; left out, it searches the library.
   // One wrapper for both, because a second function would drift from this one's escaping.
+  searchInside: (ref, term) =>
+    request(
+      `/api/boxes/${encodeURIComponent(ref)}/search?q=${encodeURIComponent(term)}`
+    ),
   search: (term, under = null) =>
     request(
       `/api/search?q=${encodeURIComponent(term)}` +
@@ -1810,6 +1814,13 @@ function mountBoxSearch(mount, owner, open, options = {}) {
    * filesystem views entirely. Measured, before the count existed: an indexed-directory answered
    * with zero rows, no window and no route to the box that matched.
    */
+
+  if (sink) {
+    // A surface that answers later than the emit — a directory asking the index, which is a round
+    // trip — needs a way to say "the rows are on screen now". Without it the window opened as a
+    // placeholder at emit time stays over the list it just made redundant.
+    sink.dismiss = () => close();
+  }
 
   const close = () => {
     results.hidden = true;
@@ -7780,30 +7791,105 @@ const directoryView = {
 
     // What the tag-line field asked for, and which files the index says hold the words.
     let filter = null;
+    let asking = 0; // which request the answer below belongs to
+    // Asked of the type, not guessed from its name: an indexed directory has the words of its files
+    // in the index, and a plain directory does not — for that one, the listing on the screen is all
+    // there is to search, and saying so is better than a field that quietly finds less.
+    let indexed = false; // the listing decides: see `payload.indexed` in draw()
+    const insideAnswers = new Map(); // term -> the index's answer for this directory
+
     if (ctx.filterSink) {
       ctx.filterSink.handlers.add((term, hits) => {
         if (!document.contains(wrap)) return 0; // replaced by a newer view
-        filter = term
-          ? { term: term.toLowerCase(), files: filesMatchedIn(box.uuid, hits) }
-          : null;
+        const carried = filesMatchedIn(box.uuid, hits);
+        if (!term) {
+          asking += 1; // a stale answer must not paint over an emptied field
+          filter = null;
+          draw();
+          return hits.length;
+        }
+        if (!indexed) {
+          filter = { term: term.toLowerCase(), files: carried, rows: null };
+          draw();
+          return hits.filter((hit) => hit.uuid === box.uuid).length;
+        }
+        const key = term.toLowerCase();
+        const cached = insideAnswers.get(key);
+        if (cached) {
+          filter = searchFilter(key, cached, carried);
+          draw();
+          if (filter.rows) ctx.filterSink.dismiss?.(); // the rows are the answer; no window needed
+          return filter.rows;
+        }
+        // First time for this term: keep the listing alive, ask, and take the window's place when
+        // the answer arrives. `0` is the honest number to return right now — nothing has been shown
+        // that the box search did not already show, and a claim of "I covered it" before the round
+        // trip is what hid hits in the first place.
+        const here = ++asking;
+        filter = { term: key, files: carried, rows: null, pending: term };
         draw();
-        // What this listing can show: files on disk, by name, plus the files the index says hold the
-        // words -- which is what `filesMatchedIn` collected from this box's own content hits. A hit
-        // that is some *other* box filed under this directory has no row here and says so; the window
-        // stays open for it. Claiming otherwise would withdraw the only surface that can reach it.
-        // A hit is representable here only when it is *this* box matching on the content of one of
-        // its own files; the row for it is the file, drawn by `filter.files`. Any other hit is a
-        // different box, and a directory's listing has no row a box could sit in.
-        if (!filter) return hits.length;
-        return hits.filter((hit) => hit.uuid === box.uuid).length;
+        api
+          .searchInside(box.uuid, term)
+          .then((answer) => {
+            if (here !== asking || !document.contains(wrap)) return; // a newer term won
+            insideAnswers.set(key, answer);
+            filter = searchFilter(key, answer, carried);
+            draw();
+            if (filter.rows) ctx.filterSink.dismiss?.();
+          })
+          .catch(() => {
+            if (here !== asking || !document.contains(wrap)) return;
+            // The name half of the answer is still worth showing; the field says the rest failed.
+            filter = { term: key, files: carried, rows: null, failed: true };
+            draw();
+          });
+        return 0;
       });
+    }
+
+    /** The listing's filter, from the index's answer for this directory. */
+    function searchFilter(term, answer, carried) {
+      const files = new Set(carried);
+      const passages = new Map();
+      const folders = new Map();
+      const named = new Set();
+      for (const hit of answer.hits || []) {
+        files.add(hit.sub);
+        if (hit.passage) passages.set(hit.sub, hit.passage);
+        if (String(hit.how).includes("name")) named.add(hit.sub);
+        // a directory that matched on its own name is a row too, not only a route to one
+        if (hit.is_dir) folders.set(hit.sub, Math.max(folders.get(hit.sub) || 0, hit.count || 0));
+      }
+      for (const folder of answer.directories || []) {
+        folders.set(folder.sub, Math.max(folders.get(folder.sub) || 0, folder.count));
+      }
+      return {
+        term,
+        files,
+        passages,
+        folders,
+        named,
+        rows: (answer.hits || []).length,
+        expanded: answer.expanded || "",
+      };
     }
 
     /** Why this entry survived: the words are in it, or somewhere below it. "" when the name says it. */
     function matchesUnder(entry, active) {
       if (!active) return "";
-      if (entry.name.toLowerCase().includes(active.term)) return ""; // the name is the reason, visibly
       const path = entry.sub || entry.name;
+      if (active.named && active.named.has(path)) return ""; // the name is the reason, visibly
+      if (entry.name.toLowerCase().includes(active.term)) return "";
+      // The words themselves, from the index, on the row they belong to. Said shortly because this
+      // is a line in a listing and not the search page; the file is one click away for the rest.
+      if (active.passages && active.passages.has(path)) {
+        const quote = String(active.passages.get(path));
+        return quote.length > 80 ? `${quote.slice(0, 79)}…` : quote;
+      }
+      if (active.folders && active.folders.has(path)) {
+        const count = active.folders.get(path);
+        return count === 1 ? "1 match inside" : `${count} matches inside`;
+      }
       // `files` is a Set of relative paths that hold the words. Arrays have .filter, Sets do not,
       // and calling the former on the latter throws inside the draw -- which left the whole listing
       // empty and looked like a filter that finds nothing rather than a filter that crashed.
@@ -7820,12 +7906,17 @@ const directoryView = {
     function entryShows(entry) {
       if (!filter) return true;
       if (entry.name.toLowerCase().includes(filter.term)) return true;
-      for (const found of filter.files) {
+      const via = entry.sub || entry.name;
+      // The answer is recursive: a file three levels down is in `files`, and every folder on the way
+      // to it is in `folders`. Listing rows are one level deep, so without the folders the match
+      // exists, is counted, and cannot be reached — the exact complaint this field used to invite.
+      if (filter.files && filter.files.has(via)) return true;
+      if (filter.folders && filter.folders.has(via)) return true;
+      for (const found of filter.files || []) {
         if (found === entry.sub || found === entry.name || found.endsWith(`/${entry.name}`)) return true;
         // A directory the words live *under*. Without this the folder holding the only match is
         // filtered away and the term looks broken: the file is there, its name is not, and the one
         // row that could have led to it was removed for not matching.
-        const via = entry.sub || entry.name;
         if (via && found.startsWith(`${via}/`)) return true;
       }
       return false;
@@ -7837,6 +7928,19 @@ const directoryView = {
       label.className = "fs-path";
       label.textContent = title;
       bar.append(label);
+      if (filter && filter.pending) {
+        // The listing has not been emptied to wait: the old rows stay until the answer replaces them,
+        // and this is where a person looks to learn whether the field is thinking or deaf.
+        const cue = document.createElement("span");
+        cue.className = "fs-searching muted";
+        cue.textContent = `asking the index about ${filter.pending}…`;
+        bar.append(cue);
+      } else if (filter && filter.failed) {
+        const cue = document.createElement("span");
+        cue.className = "fs-searching failed";
+        cue.textContent = "the index did not answer; names are matched from the listing";
+        bar.append(cue);
+      }
       actions.forEach((action) => bar.append(action));
     }
 
@@ -7946,6 +8050,10 @@ const directoryView = {
         pane.replaceChildren(gone);
         return;
       }
+      // Read before the rows are drawn and before any term can be asked again: a folder the index
+      // has never read has nothing to ask, and its field must narrow the rows on the screen instead
+      // of pretending to search words it does not hold.
+      indexed = !!payload.indexed;
       const up = button("↑", () => {
         nav.sub = payload.parent || "";
         draw();

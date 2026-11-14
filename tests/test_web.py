@@ -1342,6 +1342,59 @@ def test_a_path_cannot_climb_out_of_the_box_directory(client: TestClient, tree: 
         assert response.json()["detail"]["error"] == "path_out_of_range"
 
 
+def test_a_directory_box_answers_from_its_files_not_only_its_names(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """`GET /api/boxes/{ref}/search` — the field in the folder, asking the index.
+
+    The assertion worth having is the one that used to be impossible: a word that appears only
+    inside a file, in a subdirectory, with nothing in any name to match. Before this endpoint the
+    folder's field could not answer it at all, because the field narrowed the rows on the screen and
+    the rows are names.
+    """
+    root = tmp_path / "site"
+    (root / "drawings").mkdir(parents=True)
+    (root / "mortgage.md").write_text("the boiler pressure gauge leaks\n", encoding="utf-8")
+    (root / "drawings" / "plan.md").write_text("an order for cement\n", encoding="utf-8")
+    box = client.post(
+        "/api/boxes",
+        json={
+            "name": "Site",
+            "box_type": "indexed-directory",
+            "resource_uri": str(root),
+            "index_resource": True,
+        },
+    ).json()
+    client.post("/api/index/run", json={"scope": "everything"})
+    # The run answers at once and reads behind the response (ADR 32), so searching straight after it
+    # races the queue: the file that has not been read yet is a content hit that is not there. This
+    # test passed twice and then failed once under `make test` for exactly that reason.
+    wait_for_index(client)
+
+    def search(term: str) -> dict:
+        response = client.get(f"/api/boxes/{box['uuid']}/search", params={"q": term})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    by_name = search("mort")
+    assert [hit["sub"] for hit in by_name["hits"]] == ["mortgage.md"], by_name
+    inside = search("cement")
+    assert [(hit["sub"], hit["how"]) for hit in inside["hits"]] == [
+        ("drawings/plan.md", "content")
+    ], inside
+    assert inside["directories"][0]["count"] == 1, inside
+    assert "cement" in inside["hits"][0]["passage"], "the passage must show the word that answered"
+    assert search("nothinghere")["hits"] == []
+
+    # a box that points at nothing cannot be searched inside, and says which box and why
+    empty = client.post("/api/boxes", json={"name": "Air", "box_type": "note"}).json()
+    refused = client.get(f"/api/boxes/{empty['uuid']}/search", params={"q": "anything"})
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["error"] == "no_directory"
+    # and an unknown box is still the 404 the page already handles
+    assert client.get("/api/boxes/nope/search", params={"q": "x"}).status_code == 404
+
+
 def test_a_folder_that_went_away_is_a_state_and_not_a_404(
     client: TestClient, tmp_path: Path
 ) -> None:
@@ -6134,7 +6187,12 @@ def test_a_field_with_a_list_under_it_narrows_the_list_not_a_window(client: Test
         "the folder's count must not pretend to measure per-hit reachability: `visibleUnder` adds "
         "every hit's own uuid, so filtering by it is `hits.length` written the long way"
     )
-    fs = script[script.index("// What this listing can show") :]
+    # A folder the index has never read is the case that still leans on the box-level answer: there
+    # are no words to ask about, so the listing shows this box's own content hits and no more. (An
+    # indexed directory no longer takes this branch at all — its field asks the index for the files
+    # below it, which is ADR 46, and that path is checked in a browser by `make uitest`.)
+    fs = script[script.index("if (!indexed) {") :]
+    fs = fs[: fs.index("\n        }")]
     assert "return hits.filter((hit) => hit.uuid === box.uuid).length;" in fs, (
         "a filesystem listing can only ever show this box's own content hits -- saying otherwise\n"
         "     is what hid a box match inside a directory"

@@ -322,6 +322,18 @@ SELECT resource_id, bm25(resource_text) AS score,
  ORDER BY score LIMIT ?
 """
 
+# The same match, the same ranking, the same snippet — scoped to a set of resource ids instead of a
+# set of boxes. A directory box's own files are what a person is standing in when they type into its
+# field, and those files have no box of their own (ADR 13), so asking by box would answer about the
+# folder instead of the file that spoke.
+_SEARCH_DOCS_UNDER = """
+SELECT resource_id, bm25(resource_text) AS score,
+       snippet(resource_text, 1, '[', ']', ' \u2026 ', 12) AS passage
+  FROM resource_text WHERE resource_text MATCH ?
+   AND resource_id IN ({marks})
+ ORDER BY score LIMIT ?
+"""
+
 _VOCAB_BY_PREFIX = "SELECT term FROM resource_text_vocab WHERE term GLOB ? LIMIT 4000"
 
 _COUNT_DOCS = "SELECT count(*) AS n FROM resource_text"
@@ -2091,6 +2103,142 @@ class BoxStore:
         except StoreError:
             return []
         return [(int(row["resource_id"]), float(row["score"]), str(row["passage"])) for row in rows]
+
+    def resources_under(self, root: str, *, limit: int = 5000) -> list[tuple[int, str]]:
+        """Every resource row that is *root* or hangs beneath it, as ``(id, reference)``.
+
+        Prefix-matched in SQL, the way the gone-folder count is (ADR 41): the set is a fact about
+        addresses, so no directory is walked and no file is opened to build it.
+        """
+        base = root.rstrip("/")
+        rows = self._rows(
+            "SELECT id, reference FROM resources"
+            " WHERE reference = ? OR substr(reference, 1, ?) = ?"
+            " ORDER BY reference LIMIT ?",
+            (base, len(base) + 1, f"{base}/", limit),
+        )
+        return [(int(row["id"]), str(row["reference"])) for row in rows]
+
+    def search_under(
+        self, root: str, term: str, *, match: str, limit: int = 200
+    ) -> dict[str, object]:
+        """What answers, file by file, inside one directory: names and the words in the files.
+
+        Two kinds of answer, because a folder asks two questions. A name is matched as a substring
+        of what a person sees — typing `mort` should find `mortgage.md`, which a stemmed full-text
+        index would not, and a directory name is a name too. The words come from the same
+        full-text index the library search uses, with the caller's expression, so widening,
+        synonyms and ranking are not re-invented here (ADR 33); only the set is smaller.
+
+        Returns the hits and the directories that contain them. The directories are not an extra
+        opinion: a match two levels down is found *through* those folders, and a listing that shows
+        only the leaf leaves the reader without a route to it.
+        """
+        cleaned = term.strip().casefold()
+        base = root.rstrip("/")
+        cut = len(base) + 1
+        rows = self.resources_under(root)
+        by_id = dict(rows)
+        hits: dict[int, dict[str, object]] = {}
+
+        def record(resource_id: int, how: str, passage: str = "") -> None:
+            reference = by_id.get(resource_id)
+            if reference is None:
+                return
+            entry = hits.setdefault(
+                resource_id,
+                {
+                    "resource_id": resource_id,
+                    "reference": reference,
+                    "sub": reference[cut:] if len(reference) > len(base) else "",
+                    "name": reference.rsplit("/", 1)[-1],
+                    "how": "",
+                    "passage": "",
+                },
+            )
+            kinds = set(str(entry["how"]).split("+")) - {""}
+            kinds.add(how)
+            entry["how"] = "+".join(sorted(kinds))
+            if passage and not entry["passage"]:
+                entry["passage"] = passage
+
+        # A name is matched on what a person sees. Two populations, because the index files
+        # leaves: a resource row for the file, and — for a folder *inside* the searched
+        # directory — no row at all, only the path every file beneath it shares. Searching
+        # `drawings` has to answer with
+        # the folder, or the one name a reader is sure of is the one the field cannot find.
+        folder_rows: dict[str, dict[str, Any]] = {}
+        if cleaned:
+            for resource_id, reference in rows:
+                if cleaned in reference.rsplit("/", 1)[-1].casefold():
+                    record(resource_id, "name")
+                tail = reference[len(base) + 1:] if len(reference) > len(base) else ""
+                parts = tail.split("/")[:-1]
+                for depth in range(1, len(parts) + 1):
+                    sub = "/".join(parts[:depth])
+                    own = sub.rsplit("/", 1)[-1]
+                    if cleaned not in own.casefold():
+                        continue
+                    entry = folder_rows.setdefault(
+                        sub,
+                        {
+                            "resource_id": None,
+                            "reference": f"{base}/{sub}",
+                            "sub": sub,
+                            "name": own,
+                            "how": "name",
+                            "passage": "",
+                            "is_dir": True,
+                            "count": 0,
+                        },
+                    )
+                    entry["count"] = int(entry["count"]) + 1
+
+        if match and by_id:
+            marks = ",".join("?" for _ in by_id)
+            try:
+                found = self._rows(
+                    _SEARCH_DOCS_UNDER.format(marks=marks),
+                    (match, *by_id.keys(), limit),
+                )
+            except StoreError:
+                # A malformed expression is a question the index cannot answer, not a fault to
+                # show the reader; the name half of the answer still stands on its own.
+                found = []
+            for row in found:
+                record(int(row["resource_id"]), "content", str(row["passage"]))
+
+        ordered = sorted(
+            [*hits.values(), *folder_rows.values()],
+            # a name is the strongest answer a folder can give; after that the index's own order
+            key=lambda hit: (0 if "name" in str(hit["how"]) else 1, str(hit["sub"])),
+        )[:limit]
+
+        # Whether each hit is a folder is not stored anywhere, and it does not need to be: a
+        # reference is a directory when another reference in the same set hangs from it.
+        ancestors: set[str] = set()
+        for _resource_id, reference in rows:
+            parts = reference.split("/")
+            for depth in range(2, len(parts)):
+                ancestors.add("/".join(parts[:depth]))
+        for hit in hits.values():
+            hit["is_dir"] = str(hit["reference"]) in ancestors
+
+        folders: dict[str, int] = {}
+        for hit in ordered:
+            if hit.get("is_dir"):
+                continue
+            parts = str(hit["sub"]).split("/")[:-1]
+            for depth in range(1, len(parts) + 1):
+                here = "/".join(parts[:depth])
+                folders[here] = folders.get(here, 0) + 1
+        return {
+            "hits": ordered,
+            "directories": [  # every folder on the route to a match, with how many it holds
+                {"sub": sub, "name": sub.rsplit("/", 1)[-1], "count": count}
+                for sub, count in sorted(folders.items())
+            ],
+        }
 
     def boxes_for_text(self, resource_id: int) -> list[tuple[Box, str | None]]:
         """The boxes to answer with when this resource's words matched, and where they came from.

@@ -1603,6 +1603,136 @@ def _run(base: str, executable: str | None) -> int:
             page.locator("#pane-view-list").click()
             page.wait_for_timeout(200)
 
+        print("a directory's field asks the index, and answers with files and folders")
+        # The complaint was that this field only filtered names on the screen. The fixture is built
+        # so the old behaviour cannot pass: `cementmixer` is in no name anywhere, and the file that
+        # holds it is one level below the folder being looked at.
+        asked = []
+
+        def note_request(request_obj: object) -> None:
+            url = str(getattr(request_obj, "url", ""))
+            if "/search?q=" in url:
+                asked.append(url.split("/api/")[-1])
+
+        site = Path(tempfile.mkdtemp(prefix="verify-search-dir-")) / "site"
+        (site / "drawings").mkdir(parents=True)
+        (site / "mortgage.md").write_text("the boiler gauge leaks anhydrous each winter\n",
+                                          encoding="utf-8")
+        (site / "drawings" / "plan.md").write_text(
+            "an order for cementmixer parts was filed here\n", encoding="utf-8"
+        )
+        page.on("request", note_request)
+        try:
+            api(
+                base,
+                "/api/boxes",
+                {
+                    "name": "Site",
+                    "box_type": "indexed-directory",
+                    "resource_uri": str(site),
+                    "index_resource": True,
+                },
+            )
+            api(base, "/api/index/run", {"scope": "everything"})
+            for _ in range(60):
+                page.wait_for_timeout(200)
+                if not api(base, "/api/index/status")["running"]:
+                    break
+            page.reload(wait_until="networkidle")
+            page.locator('#box-list li:has(.box-name:text-is("Site"))').click()
+            page.wait_for_timeout(700)
+            field = page.locator(".box-search-field").first
+            checks.check("the box has a field to type into", field.count() == 1)
+
+            def rows() -> dict:
+                """Each listing row on screen: its name and the note under it, if any."""
+                return page.evaluate(
+                    "() => { const out = {};"
+                    " for (const row of document.querySelectorAll('.fs-row')) {"
+                    "   const name = row.querySelector('.fs-name');"
+                    "   const below = row.querySelector('.fs-below');"
+                    "   if (!name) continue;"
+                    "   out[name.textContent.trim()] = below ? below.textContent.trim() : '';"
+                    " } return out; }"
+                )
+
+            def type_term(term: str) -> None:
+                field.fill("")
+                page.wait_for_timeout(200)
+                field.fill(term)
+                for _ in range(40):
+                    page.wait_for_timeout(150)
+                    if any(f"q={term}" in url for url in asked) or term == "":
+                        break
+                page.wait_for_timeout(400)
+
+            type_term("mortg")
+            checks.check(
+                "a partial name still finds the file",
+                "mortgage.md" in rows(),
+                list(rows()),
+            )
+            checks.check(
+                "and the question went to the index, not to the rows on screen",
+                any(url.startswith("boxes/") and "search?q=mortg" in url for url in asked),
+                asked[-3:],
+            )
+
+            type_term("cementmixer")
+            here = rows()
+            checks.check(
+                "a word inside a file one level down reaches the folder that holds it",
+                "drawings" in here and "1 match inside" in here.get("drawings", ""),
+                here,
+            )
+            checks.check(
+                "the file itself is not claimed to be on this level",
+                "plan.md" not in here,
+                here,
+            )
+            # A folder opens on a double click in this view; a single click only selects it.
+            page.locator('.fs-row:has(.fs-name:text-is("drawings"))').dblclick()
+            page.wait_for_timeout(900)
+            deeper = rows()
+            checks.check(
+                "walking into it shows the file, quoting the words that answered",
+                "plan.md" in deeper and "cementmixer" in deeper.get("plan.md", ""),
+                deeper,
+            )
+            # Emptying the field is the way out of a filter, so it has to give back the listing at
+            # the level the reader is standing on — here, inside `drawings` — with no verdict notes
+            # left hanging on rows that were never compared to anything.
+            field.fill("")
+            page.wait_for_timeout(700)
+            here_level = rows()
+            checks.check(
+                "an empty field restores this level, with no notes left behind",
+                set(here_level) == {"plan.md"} and not any(here_level.values()),
+                here_level,
+            )
+            page.locator('.fs-bar button:text-is("↑")').click()
+            page.wait_for_timeout(700)
+            up_one = rows()
+            checks.check(
+                "and climbing out returns the folder as it was before the term",
+                set(up_one) == {"mortgage.md", "drawings"} and not any(up_one.values()),
+                up_one,
+            )
+            type_term("zzzqqqtuple")
+            checks.check(
+                "and a term nothing holds answers with nothing, not with an error",
+                len(rows()) == 0 and "did not answer" not in page.locator(".fs-bar").inner_text(),
+                f"rows={list(rows())} bar={page.locator('.fs-bar').inner_text()[:60]!r}",
+            )
+        finally:
+            page.remove_listener("request", note_request)
+            stray_box = next(
+                (b for b in api(base, "/api/boxes") if b["name"] == "Site"), None
+            )
+            if stray_box is not None:
+                api_delete(base, f"/api/boxes/{stray_box['uuid']}")
+            shutil.rmtree(site.parent, ignore_errors=True)
+
         print("a file dropped anywhere in the left pane is filed, and a row still wins")
         # Synthetic DataTransfer rather than an OS-level drag: a browser cannot conjure a file
         # from outside the page at the pointer, and what is under test is the page's own claiming

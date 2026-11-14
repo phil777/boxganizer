@@ -695,3 +695,71 @@ def test_the_gone_line_names_the_boxes_that_still_point_at_them(tmp_path: Path) 
         assert missing["resources"] == 4, missing
     finally:
         store.close()
+
+
+def test_a_directory_search_answers_files_by_name_and_by_what_they_say(
+    tmp_path: Path,
+) -> None:
+    """The two questions a folder answers, answered in one call.
+
+    A file's own name was not searchable at all — measured before this existed, `mortgage` returned
+    nothing anywhere in the library, while `boiler` (a word inside the file) returned the folder.
+    And
+    a folder *inside* the searched directory has no resource row of its own, because the walk files
+    leaves: its name has to be found in the path every file beneath it shares, or the one name a
+    reader is sure of is the one the field cannot find.
+
+    Content answers come from the same full-text index the library search uses, so widening and
+    ranking are not re-invented here (ADR 33) — only the set is smaller.
+    """
+    root = tmp_path / "site"
+    (root / "drawings").mkdir(parents=True)
+    (root / "mortgage.md").write_text(
+        "the boiler pressure gauge leaks a little each winter\n", encoding="utf-8"
+    )
+    (root / "drawings" / "plan.md").write_text(
+        "an order for cement mixer parts was filed here\n", encoding="utf-8"
+    )
+    store = BoxStore(tmp_path / "inside.db", content_root=root)
+    site = store.add(
+        Box(name="Site", box_type="indexed-directory", resource_uri=str(root))
+    )
+    store.set_index_flag(site.resource_id, True)
+    text_search.rebuild(store, root=root)
+
+    def answer(term: str) -> dict:
+        plan = text_search.plan(term, lambda word: store.vocabulary(prefix=word[:1]))
+        return store.search_under(
+            str(root), term, match=plan.content_match if plan.worth_asking else ""
+        )
+
+    by_name = answer("mort")
+    assert [hit["sub"] for hit in by_name["hits"]] == ["mortgage.md"], by_name
+    assert by_name["hits"][0]["how"] == "name", by_name
+    assert by_name["directories"] == [], "a top-level file has no folder on its route"
+
+    # a word that is nowhere in any name, in a file one level down: the file answers, and so does
+    # the folder that holds it, because that is the route the reader takes to it
+    inside = answer("cement")
+    assert [(hit["sub"], hit["how"]) for hit in inside["hits"]] == [
+        ("drawings/plan.md", "content")
+    ], inside
+    assert inside["directories"] == [{"sub": "drawings", "name": "drawings", "count": 1}], inside
+    assert inside["hits"][0]["passage"], "a content hit with no passage is a claim without evidence"
+
+    # the folder's own name, which is not a row anywhere
+    folder = answer("drawings")
+    assert [(hit["sub"], hit["how"], hit["is_dir"]) for hit in folder["hits"]] == [
+        ("drawings", "name", True)
+    ], folder
+    assert folder["hits"][0]["count"] == 1, "the folder should say what it holds"
+
+    # a file that matches on both counts says so once, with both reasons
+    (root / "mortgage-notes.md").write_text("mortgage again\n", encoding="utf-8")
+    text_search.rebuild(store, root=root)
+    both = [hit for hit in answer("mortgage")["hits"] if hit["sub"] == "mortgage-notes.md"]
+    assert len(both) == 1 and both[0]["how"] == "content+name", both
+
+    # nothing on this disk answers, and the answer is an honest empty rather than an error
+    assert answer("zzzqqq")["hits"] == []
+    store.close()

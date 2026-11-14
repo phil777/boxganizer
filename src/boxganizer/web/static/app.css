@@ -2568,6 +2568,15 @@ pre.text {
   background: color-mix(in srgb, var(--accent) 7%, var(--panel));
 }
 
+.fs-searching {
+  font-size: 0.8rem;
+  margin-left: 0.5rem;
+}
+
+.fs-searching.failed {
+  color: var(--danger, #b3261e);
+}
+
 /* The named boxes beside the gone count. Displayed only when not hidden: the dialog's `[hidden]`
    rules are per-dialog and this one is not among them. */
 .gone-boxes:not([hidden]) {
