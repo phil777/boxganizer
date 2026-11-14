@@ -1097,6 +1097,85 @@ def _run(base: str, executable: str | None) -> int:
                 api_delete(base, f"/api/boxes/{uuid}")
             shutil.rmtree(assets, ignore_errors=True)
 
+        STORED_PANE = "() => localStorage.getItem('boxganizer.pane')"
+        print("the pane comes back as it was left")
+        # Four pieces of state, all of them a choice somebody made by clicking: which view,
+        # which order, which way round, and which folders were opened. A reload that resets any
+        # of them is a reload that throws away the reading — the opened folders especially,
+        # since a tree without memory is a tree that is closed.
+        kept: list[str] = []
+        try:
+            kept.append(
+                api(base, "/api/boxes", {"name": "Kept parent", "box_type": "folder"})["uuid"]
+            )
+            kept.append(
+                api(base, "/api/boxes", {"name": "kept child", "box_type": "note",
+                                         "text": "c\n", "parent": "Kept parent"})["uuid"]
+            )
+            page.evaluate("() => localStorage.removeItem('boxganizer.pane')")
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(400)
+            checks.check(
+                "starting clean, the pane is a plain list",
+                page.locator("#pane-view-list").get_attribute("aria-pressed") == "true",
+            )
+            page.locator("#pane-view-tree").click()
+            page.locator("#pane-sort-children").click()
+            page.locator("#pane-direction").click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "descending is set before the reload is asked for",
+                "↓" in page.locator("#pane-direction").inner_text(),
+                page.locator("#pane-direction").inner_text(),
+            )
+            page.locator(f'#box-list li[data-uuid="{kept[0]}"] .fold').click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "the folder is open and its child is on screen",
+                page.locator(f'#box-list li[data-uuid="{kept[1]}"]').count() == 1,
+            )
+
+            # navigate into another box, which redraws the pane from scratch
+            page.locator("#go-root").click()
+            page.wait_for_timeout(600)
+            checks.check(
+                "navigating elsewhere keeps the shape",
+                page.locator(f'#box-list li[data-uuid="{kept[1]}"]').count() == 1,
+            )
+
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(500)
+            checks.check(
+                "a reload restores the view",
+                page.locator("#pane-view-tree").get_attribute("aria-pressed") == "true",
+            )
+            checks.check(
+                "the order",
+                page.locator("#pane-sort-children").get_attribute("aria-pressed") == "true",
+            )
+            arrow = page.locator("#pane-direction")
+            checks.check(
+                "and the direction",
+                arrow.get_attribute("aria-pressed") == "true"
+                and "↓" in arrow.inner_text(),
+                f"pressed={arrow.get_attribute('aria-pressed')} text={arrow.inner_text()!r} "
+                f"stored={page.evaluate(STORED_PANE)}",
+            )
+            checks.check(
+                "and the folder is still open, with its child where it was left",
+                page.locator(f'#box-list li[data-uuid="{kept[1]}"]').count() == 1
+                and page.locator(f'#box-list li[data-uuid="{kept[0]}"] .fold').inner_text()
+                == "[-]",
+            )
+            page.locator("#pane-view-list").click()
+            page.wait_for_timeout(300)
+        finally:
+            for uuid in kept:
+                api_delete(base, f"/api/boxes/{uuid}")
+            page.evaluate("() => localStorage.removeItem('boxganizer.pane')")
+            page.locator("#pane-view-list").click()
+            page.wait_for_timeout(200)
+
         checks.check("no console errors", not errors, "; ".join(errors[:3]))
         page.screenshot(path="/tmp/verify-web-ui.png")
         browser.close()

@@ -3040,9 +3040,59 @@ async function refreshSide() {
   renderSide();
 }
 
-// How the left pane is drawn and ordered. Deliberately not derived from the boxes themselves:
-// a pane that "auto-detected" the useful view would change under a person who was reading it.
-const pane = { mode: "list", sort: "name", up: true, open: new Set() };
+/* How the left pane is drawn and ordered, and which folders are opened.
+ *
+ * Deliberately not derived from the boxes: a pane that "auto-detected" the useful view would
+ * change shape under a person who was reading it. Remembered in `localStorage` like the other
+ * working-style choices — it survives a reload, and it does not travel with the database, so
+ * a library opened on another machine starts as its own choice rather than inheriting this one.
+ *
+ * The opened folders are part of the state because a tree without memory is a tree that is
+ * closed: reading three levels deep and reloading to a collapsed pane throws away the reading.
+ * Ids that no longer exist are simply never matched again, so no cleanup pass is needed.
+ */
+const PANE_STORAGE_KEY = "boxganizer.pane";
+
+function loadPane() {
+  const fallback = { mode: "list", sort: "name", up: true, open: [] };
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(PANE_STORAGE_KEY) || "{}") || {};
+  } catch {
+    // A pane preference nobody can read is a pane preference worth forgetting: fall back to
+    // the shape the page has always had rather than refusing to draw the library.
+    saved = {};
+  }
+  return {
+    mode: saved.mode === "tree" ? "tree" : "list",
+    sort: ["name", "type", "children"].includes(saved.sort) ? saved.sort : "name",
+    up: saved.up !== false,
+    open: new Set(Array.isArray(saved.open) ? saved.open : []),
+  };
+}
+
+const pane = loadPane();
+
+function savePane() {
+  localStorage.setItem(
+    PANE_STORAGE_KEY,
+    JSON.stringify({ mode: pane.mode, sort: pane.sort, up: pane.up, open: [...pane.open] })
+  );
+}
+
+function applyPaneControls() {
+  // The buttons say what is true, including when the truth came from a reload.
+  ["list", "tree"].forEach((kind) => {
+    el(`pane-view-${kind}`).setAttribute("aria-pressed", String(kind === pane.mode));
+  });
+  ["name", "type", "children"].forEach((kind) => {
+    el(`pane-sort-${kind}`).setAttribute("aria-pressed", String(kind === pane.sort));
+  });
+  const direction = el("pane-direction");
+  direction.setAttribute("aria-pressed", String(!pane.up));
+  direction.innerHTML = pane.up ? "&#8593;" : "&#8595;";
+  direction.title = `Reverse the order (now ${pane.up ? "ascending" : "descending"})`;
+}
 
 function pinRootFirst(boxes) {
   // The way in stays at the top whatever the order below it is. Sorting was added to this pane
@@ -3112,6 +3162,7 @@ function setPaneView(mode) {
   ["list", "tree"].forEach((kind) => {
     el(`pane-view-${kind}`).setAttribute("aria-pressed", String(kind === mode));
   });
+  savePane();
   renderSide();
 }
 
@@ -3120,6 +3171,7 @@ function setPaneSort(sort) {
   ["name", "type", "children"].forEach((kind) => {
     el(`pane-sort-${kind}`).setAttribute("aria-pressed", String(kind === sort));
   });
+  savePane();
   renderSide();
 }
 
@@ -3129,6 +3181,7 @@ function setPaneDirection(up) {
   toggle.setAttribute("aria-pressed", String(!up));
   toggle.innerHTML = up ? "&#8593;" : "&#8595;";
   toggle.title = `Reverse the order (now ${up ? "ascending" : "descending"})`;
+  savePane();
   renderSide();
 }
 
@@ -4952,6 +5005,10 @@ async function loadSensorPalette() {
 }
 
 async function init() {
+  // The controls say what the pane is doing, including when the answer came from a reload:
+  // the state was read at load time, so a button left at its markup default would be a control
+  // that contradicts the list under it.
+  applyPaneControls();
   try {
     const types = await api.types();
     state.types = new Map(types.map((type) => [type.key, type]));
@@ -5013,6 +5070,7 @@ async function init() {
     const uuid = fold.dataset.fold;
     if (pane.open.has(uuid)) pane.open.delete(uuid);
     else pane.open.add(uuid);
+    savePane();
     renderSide();
   });
   el("pane-view-list").addEventListener("click", () => setPaneView("list"));
