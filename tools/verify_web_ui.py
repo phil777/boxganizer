@@ -679,6 +679,18 @@ def _seed(base: str, created: list[Path]) -> None:
         api(base, "/api/boxes", payload)
 
 
+def _serve_pids() -> set[int]:
+    """Pids of every running `box serve`, read from the operating system.
+
+    Not from a pid file or a shell's `$!`: the point of this check is that nothing was left
+    behind, and a count taken from what we chose to remember is only as honest as that memory.
+    The same `/proc` scan `box servers` shows a person is used here, so the two cannot disagree.
+    """
+    from boxganizer.servers import scan
+
+    return {item.pid for item in scan()}
+
+
 def main() -> int:
     args = [a for a in sys.argv[1:] if a != "--self"]
     self_contained = "--self" in sys.argv[1:]
@@ -692,7 +704,25 @@ def main() -> int:
         executable = args[1] if len(args) > 1 else named_browser
         return _run(base, executable)
     executable = args[0] if args else named_browser
+    # Counted before, counted after, and the difference reported: the reap below is correct as
+    # far as it knows, and this machine already collected 32 servers from runs that each believed
+    # they had cleaned up. Both counts come from `/proc`, so neither end depends on what this
+    # script chose to remember.
+    before = _serve_pids()
+    code = _self_contained(executable)
+    leftover = _serve_pids() - before
+    if leftover:
+        print(
+            f"LEFTOVER SERVERS: {sorted(leftover)} outlived this run "
+            f"(there were {sorted(before)} before it)"
+        )
+        return 3
+    print(f"no server left behind: {len(_serve_pids())} running, same as before")
+    return code
 
+
+def _self_contained(executable: str | None) -> int:
+    """Start a throwaway library and server, run the checks against them, take the server down."""
     workdir = Path(tempfile.mkdtemp(prefix="verify-web-ui-"))
     created: list[Path] = [workdir]
     port = _free_port()
@@ -729,6 +759,8 @@ def main() -> int:
                 server.wait(timeout=5)
         for directory in created:
             shutil.rmtree(directory, ignore_errors=True)
+        # Nothing returns from here: a `return` in a `finally` silences whatever exception is
+        # in flight, which would turn a crash into a clean exit. The accounting is the caller's.
 
 
 if __name__ == "__main__":

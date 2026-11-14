@@ -1205,6 +1205,79 @@ def tui(ctx: typer.Context, db: DbOption = None) -> None:
     BoxganizerApp(db or _db_of(ctx)).run()
 
 
+@app.command()
+def servers(
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """List every running `box serve`: its port, age, and the library it actually holds.
+
+    Leftover servers from development pile up on a machine like this one — 32 of them when this
+    was written — and `ps` cannot tell you which library each is sitting on, which is the only
+    fact that decides whether they matter. It reads `/proc`: the port is the socket the kernel
+    says is listening, not the one the command line asked for, and the database is a file
+    descriptor the process holds. Where only the environment declares a library, it says so in a
+    separate column rather than guessing, because that distinction is what corrected a wrong
+    claim in `pref_report.md`: 29 servers were said to share the live library and exactly one
+    did, the rest holding scratch paths they were started with.
+    """
+    from boxganizer.servers import scan
+
+    found = scan()
+    if as_json:
+        import json
+
+        console.print_json(
+            json.dumps(
+                [
+                    {
+                        "pid": item.pid,
+                        "ports": list(item.ports),
+                        "port_source": item.port_source,
+                        "database": item.database,
+                        "database_source": item.database_source,
+                        "cwd": item.cwd,
+                        "uptime_seconds": round(item.uptime_seconds),
+                        "rss_bytes": item.rss_bytes,
+                        "command": item.command,
+                    }
+                    for item in found
+                ]
+            )
+        )
+        return
+    if not found:
+        console.print("no `box serve` process is running")
+        return
+
+    table = Table(title=f"{len(found)} running servers")
+    table.add_column("pid", justify="right")
+    table.add_column("port", justify="right")
+    table.add_column("up")
+    table.add_column("rss", justify="right")
+    table.add_column("library", overflow="fold")
+    table.add_column("how known")
+    for item in found:
+        table.add_row(
+            str(item.pid),
+            ",".join(str(port) for port in item.ports) or "-",
+            item.uptime_text,
+            f"{item.rss_bytes / 2**20:.0f} MB" if item.rss_bytes else "-",
+            item.database or "-",
+            item.database_source if item.database else "nothing open",
+        )
+    console.print(table)
+    held = [item for item in found if item.database_source == "held open"]
+    total_mb = sum(item.rss_bytes for item in found) / 2**20
+    console.print(
+        f"{len(held)} hold a database open, {len(found) - len(held)} do not; "
+        f"{total_mb:.0f} MB resident between them."
+    )
+    console.print(
+        "Nothing here is stopped by this command, and nothing should be stopped by a script: a "
+        "server may be somebody's open session. Stop the ones you recognise by pid."
+    )
+
+
 def main() -> None:
     """Console-script entry point: turn core errors into a message and exit 1."""
     try:
