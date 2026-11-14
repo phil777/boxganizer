@@ -2357,7 +2357,23 @@ def create_app(
         sub: Annotated[str, Query(description="Path inside the box's directory.")] = "",
     ) -> dict[str, object]:
         """Browse the directory a `directory` box points at."""
-        root, target = _box_file(store, request, ref, sub, need_list=True)
+        root, target = _box_file(
+            store, request, ref, sub, need_list=True, missing_root_ok=not sub
+        )
+        if not target.exists():
+            # The folder this box was pointed at is not on this machine. Answered as a listing that
+            # is empty *for a reason*, not as a failure: the box is real, it stays in the index, and
+            # restoring the folder is the whole repair (ADRs 41 and 44). A console error for a state
+            # the library already knows about is noise that trains a person to ignore the console.
+            return {
+                "root": str(root),
+                "sub": sub or "",
+                "parent": None,
+                "at": str(target),
+                "entries": [],
+                "missing": True,
+                "reason": "folder_not_here",
+            }
         return {
             "root": str(root),
             "sub": sub or "",
@@ -3845,6 +3861,7 @@ def _box_file(
     sub: str,
     *,
     need_list: bool = False,
+    missing_root_ok: bool = False,
 ) -> tuple[Path, Path]:
     """Resolve `ref` + `sub` to a real file inside the box's own directory.
 
@@ -3867,6 +3884,15 @@ def _box_file(
     except fslist.OutsideRoot as exc:
         raise HTTPException(status_code=403, detail={"error": "path_out_of_range"}) from exc
     if not target.exists():
+        # Two different absences, and only one of them is a 404. A sub-path that is not there means
+        # the request asked for something the library does not hold: no such path. The box's *own*
+        # directory being gone means the box is here, its address is known, and the machine does not
+        # have the folder right now — ADR 41 refuses to call that an empty folder, and a 404 on the
+        # box's own endpoint says louder than that "there is no such box", which is false. So the
+        # caller that asked for the root gets to answer with a state, and a stray sub-path under a
+        # folder that is present still gets the honest 404.
+        if missing_root_ok and not sub and not root.exists():
+            return root, target
         raise HTTPException(status_code=404, detail={"error": "no_such_path", "path": str(target)})
     return root, target
 

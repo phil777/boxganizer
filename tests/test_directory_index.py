@@ -639,3 +639,59 @@ def test_both_index_endpoints_carry_the_separate_number(tmp_path: Path) -> None:
             assert status["wanted"] == 4
     finally:
         store.close()
+
+
+def test_the_gone_line_names_the_boxes_that_still_point_at_them(tmp_path: Path) -> None:
+    """Which boxes, not just how many.
+
+    The dialog said "65 resources are gone and 1 box still points at them". The number is honest
+    and useless on its own: the person reading it has to go find the box, and the box is the thing
+    they can actually do something with — restore the folder, or stop indexing it. So the same read
+    that counts them also hands over who they are, and `boxes` stays the count it was, derived from
+    that same set rather than from a second query that could disagree with the list.
+
+    Two populations are covered because they are gathered differently: a box filed on a gone folder
+    is found by prefix, and a box filed on one deleted file under a folder that is still here is
+    found by looking at the disk.
+    """
+    import shutil
+
+    store, gone, keep = _gone_and_a_changed(tmp_path, "holders.db")
+    try:
+        # a second box, filed on a file *inside* the folder that will go: prefix-matched, and one
+        # of the resources the folder takes with it
+        inside = store.add(
+            Box(
+                name="Old ledger",
+                box_type="markdown",
+                resource_uri=str(gone / "deep" / "two.md"),
+            )
+        )
+        store.set_index_flag(inside.resource_id, True)
+        text_search.rebuild(store, root=root_of(store))
+        assert store.missing_watch()["holders"] == []
+
+        shutil.rmtree(gone)
+        keep.unlink()  # the stray: its folder is still here, its file is not
+        store.check_observations()
+
+        missing = store.missing_watch()
+        named = {entry["name"]: entry for entry in missing["holders"]}
+        assert set(named) == {"Archive", "Old ledger", "Live"}, missing["holders"]
+        assert missing["boxes"] == len(missing["holders"]), (
+            "the count and the list were read from different facts"
+        )
+        assert len({entry["uuid"] for entry in missing["holders"]}) == 3, "a box named twice"
+        # the folder's box and the file's box both report the address they point at, which is the
+        # only thing that tells the reader what to restore
+        assert named["Archive"]["reference"] == str(gone)
+        assert named["Old ledger"]["reference"] == str(gone / "deep" / "two.md")
+        assert named["Live"]["reference"] == str(keep)
+        assert all(entry["uuid"] for entry in missing["holders"]), "a holder nobody can open"
+        # and the names arrive in the order the dialog will draw them
+        assert [entry["name"] for entry in missing["holders"]] == ["Archive", "Live", "Old ledger"]
+        # the split this list is a detail of has not moved
+        assert missing["work"] == 0, missing
+        assert missing["resources"] == 4, missing
+    finally:
+        store.close()

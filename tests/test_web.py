@@ -1342,6 +1342,52 @@ def test_a_path_cannot_climb_out_of_the_box_directory(client: TestClient, tree: 
         assert response.json()["detail"]["error"] == "path_out_of_range"
 
 
+def test_a_folder_that_went_away_is_a_state_and_not_a_404(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """Two absences, two answers — the distinction ADR 41 draws, drawn in HTTP.
+
+    The box's own directory being gone is not "no such box" and not "empty": the library holds the
+    box, its address, and its indexed documents, and restoring the folder is the whole repair. The
+    page used to ask for the listing and get a 404, which is the verb for a routing failure — so the
+    console filled with errors for a condition the library already knew about, and the pane answered
+    a real question with a load failure. A *sub-path* that is not there is still a genuine 404: the
+    box and its root are both present, and only the thing you asked for is missing.
+    """
+    import shutil
+
+    shelf = tmp_path / "shelf"
+    shelf.mkdir()
+    (shelf / "ledger.md").write_text("an order for cement mixer parts\n", encoding="utf-8")
+    box = client.post(
+        "/api/boxes",
+        json={"name": "Shelf", "box_type": "directory", "resource_uri": str(shelf)},
+    ).json()
+    assert [entry["name"] for entry in client.get(
+        f"/api/boxes/{box['uuid']}/listing"
+    ).json()["entries"]] == ["ledger.md"]
+
+    shutil.rmtree(shelf)
+    listing = client.get(f"/api/boxes/{box['uuid']}/listing")
+    assert listing.status_code == 200, listing.text
+    body = listing.json()
+    assert body["missing"] is True and body["reason"] == "folder_not_here", body
+    assert body["entries"] == [] and body["root"] == str(shelf), body
+    assert body["parent"] is None, "an absent folder is not a level you can climb out of"
+    # the box itself is still there, still addressable, still in the index
+    assert client.get(f"/api/boxes/{box['uuid']}").status_code == 200
+    # and a missing thing under a folder that IS here keeps the honest 404
+    back = tmp_path / "again"
+    back.mkdir()
+    second = client.post(
+        "/api/boxes",
+        json={"name": "Again", "box_type": "directory", "resource_uri": str(back)},
+    ).json()
+    gone_sub = client.get(f"/api/boxes/{second['uuid']}/listing", params={"sub": "nope.md"})
+    assert gone_sub.status_code == 404
+    assert gone_sub.json()["detail"]["error"] == "no_such_path"
+
+
 def test_a_file_inside_the_directory_is_served_for_preview(client: TestClient, tree: Path) -> None:
     box = _dir_box(client, tree)
     response = client.get(f"/api/boxes/{box['uuid']}/content", params={"sub": "notes.md"})

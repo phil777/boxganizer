@@ -266,6 +266,11 @@
            buttons act on the whole library, not on a listed row, so putting them under the list
            made them look like a caption of it -- and a person who has started reading names has to
            scroll back to press anything. -->
+      <!-- Which boxes, named. "1 box still points at them" is honest and useless on its own: the
+           box is the thing a person can act on — restore the folder, or stop indexing it — so the
+           names are controls, the same chips the list below already uses. -->
+      <div id="index-gone-boxes" class="gone-boxes" hidden
+           role="group" aria-label="Boxes that still point at files gone from this machine"></div>
       <div id="index-actions" class="index-actions" role="group" aria-label="What to do about the index">
         <button type="button" id="pending-look">update index status</button>
         <button type="button" id="pending-reindex">Reindex</button>

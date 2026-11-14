@@ -4669,6 +4669,36 @@ async function openIndexModal() {
   await drawPending({ check: false });
 }
 
+function drawGoneBoxes(report) {
+  // The gone line says how many boxes still point at files that are not on this machine. This says
+  // which, as controls: the box is where the decision lives (put the folder back, or stop indexing
+  // it), so a count without names leaves the reader to hunt for the thing they can act on.
+  const row = el("index-gone-boxes");
+  const holders = (report.missing || {}).holders || [];
+  row.hidden = holders.length === 0;
+  row.replaceChildren();
+  if (!holders.length) return;
+  const lead = document.createElement("span");
+  lead.className = "gone-lead";
+  lead.textContent =
+    holders.length === 1 ? "this box still points at them:" : "these boxes still point at them:";
+  row.append(lead);
+  for (const holder of holders) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "pending-box gone-box";
+    chip.textContent = holder.name;
+    // The address is the point of the chip: it is what a person goes to look for, or restores.
+    chip.title = `${holder.reference || "no address"} — open this box`;
+    chip.dataset.goneBox = holder.uuid;
+    chip.addEventListener("click", () => {
+      el("index-modal").close();
+      openBox(holder.uuid);
+    });
+    row.append(chip);
+  }
+}
+
 function drawIndexTally(report) {
   // The four numbers the panel was asked for, and the fifth that explains them. Each is read
   // from the status answer rather than derived here: the store already knows which watched
@@ -4730,6 +4760,7 @@ async function drawPending({ check = false } = {}) {
     return;
   }
   drawIndexTally(report);
+  drawGoneBoxes(report);
   const items = report.items || [];
   const fixable = items.filter((item) => item.fixable);
   const hopeless = items.filter((item) => !item.fixable);
@@ -7897,6 +7928,22 @@ const directoryView = {
       } catch (error) {
         drawBar(box.name, []);
         pane.replaceChildren(emptyMessage(`Cannot list ${box.resource_uri}: ${error.message}`));
+        return;
+      }
+      if (payload.missing) {
+        // The folder is not on this machine. Said as a state, in the library's own words: the box
+        // stays, its address stays, the index keeps following it, and putting the folder back is
+        // the whole repair (ADR 41). An empty listing would be a lie — an empty folder and an
+        // absent one are different facts — and the old answer was an HTTP failure that filled the
+        // console with a 404 for a condition the library already knew about.
+        drawBar(box.name, []);
+        const gone = emptyMessage(
+          `This folder is not on this machine: ${box.resource_uri}
+` +
+            "Nothing was removed from the index. Put the folder back and ask again.",
+        );
+        gone.classList.add("folder-gone");
+        pane.replaceChildren(gone);
         return;
       }
       const up = button("↑", () => {

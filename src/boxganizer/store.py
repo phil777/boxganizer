@@ -1402,7 +1402,18 @@ class BoxStore:
             root: (root, len(root) + 1, f"{root}/") for root in gone_roots
         }
         roots: list[dict[str, Any]] = []
-        box_ids: set[int] = set()
+        # The boxes that still point at something gone, keyed by id so a box filed under two
+        # missing folders is named once. `boxes` stays the count it always was; `holders` is the
+        # same set written out, because a number that says "1 box still points at them" without
+        # saying which is a fact the reader has to go and find themselves.
+        holders: dict[int, dict[str, Any]] = {}
+
+        def note_holder(into: dict[int, dict[str, Any]], row: sqlite3.Row) -> None:
+            into[int(row["id"])] = {
+                "uuid": str(row["uuid"]),
+                "name": str(row["name"]),
+                "reference": str(row["reference"]),
+            }
         for root, binds in binds_for.items():
             count = self._rows(
                 "SELECT count(*) AS n FROM resources"
@@ -1417,15 +1428,14 @@ class BoxStore:
                     "resources": int(count[0]["n"]) if count else 0,
                 }
             )
-            box_ids.update(
-                int(row["id"])
-                for row in self._rows(
-                    "SELECT b.id AS id FROM boxes b"
-                    " JOIN resources r ON b.resource_id = r.id"
-                    " WHERE r.reference = ? OR substr(r.reference, 1, ?) = ?",
-                    binds,
-                )
-            )
+            for row in self._rows(
+                "SELECT b.id AS id, b.uuid AS uuid, b.name AS name, r.reference AS reference"
+                " FROM boxes b"
+                " JOIN resources r ON b.resource_id = r.id"
+                " WHERE r.reference = ? OR substr(r.reference, 1, ?) = ?",
+                binds,
+            ):
+                note_holder(holders, row)
 
         def under_a_gone_root(reference: str) -> bool:
             return any(self._lives_under(reference, [root]) for root in binds_for)
@@ -1449,14 +1459,13 @@ class BoxStore:
             if local and not Path(resources.normalise(reference)).exists():
                 stray += 1
                 unreachable_candidates += 1
-                box_ids.update(
-                    int(box["id"])
-                    for box in self._rows(
-                        "SELECT b.id AS id FROM boxes b"
-                        " JOIN resources r ON b.resource_id = r.id WHERE r.reference = ?",
-                        (reference,),
-                    )
-                )
+                for box in self._rows(
+                    "SELECT b.id AS id, b.uuid AS uuid, b.name AS name, r.reference AS reference"
+                    " FROM boxes b"
+                    " JOIN resources r ON b.resource_id = r.id WHERE r.reference = ?",
+                    (reference,),
+                ):
+                    note_holder(holders, box)
                 continue
             if row["stale"]:
                 work_stale += 1
@@ -1467,7 +1476,8 @@ class BoxStore:
             # Everything this read can show is unreachable. `resources`, not `files`: a folder
             # that is gone is one of them, and its box is the reason anyone still cares.
             "resources": inside + stray,
-            "boxes": len(box_ids),
+            "boxes": len(holders),
+            "holders": sorted(holders.values(), key=lambda entry: str(entry["name"]).casefold()),
             "roots": [entry for entry in roots if entry["resources"]],
             "stray": stray,
             "candidates": len(candidates),

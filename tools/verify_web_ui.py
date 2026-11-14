@@ -972,6 +972,7 @@ def _run(base: str, executable: str | None) -> int:
                 page.locator("#index-status").is_enabled() and "gone from this machine" in explain,
                 " ".join(explain.split()),
             )
+            rule_now = api(base, "/api/index/status")
             page.locator("#index-status").click()
             page.wait_for_timeout(400)
             tallied = page.locator("#index-tally").inner_text()
@@ -980,6 +981,51 @@ def _run(base: str, executable: str | None) -> int:
                 "gone from this machine" in tallied,
                 " ".join(tallied.split()),
             )
+            # The names behind the count. "still 1 box points at them" is honest and useless
+            # without the box, which is the one thing a person can act on.
+            chip = page.locator("#index-gone-boxes .gone-box")
+            checks.check(
+                "the dialog names the boxes that still point at them",
+                page.locator("#index-gone-boxes").is_visible()
+                and chip.count() >= 1
+                and "Shelved" in chip.first.inner_text(),
+                [chip.nth(i).inner_text() for i in range(chip.count())],
+            )
+            checks.check(
+                "each chip says which file it was pointing at",
+                "shelved" in (chip.first.get_attribute("title") or "").lower(),
+                chip.first.get_attribute("title"),
+            )
+            checks.check(
+                "and the count beside them is still the server's, not a second arithmetic",
+                f"still {rule_now['missing']['boxes']} box" in tallied
+                and rule_now['missing']['boxes'] == len(rule_now['missing']['holders']),
+                f"boxes={rule_now['missing']['boxes']} "
+                f"holders={len(rule_now['missing']['holders'])}",
+            )
+            # Pressing one is navigation, not another explanation: the dialog goes away and the box
+            # it named is what the page shows. Read from the pane, not from a handler's name.
+            chip.first.click()
+            page.wait_for_timeout(600)
+            checks.check(
+                "a chip closes the dialog and opens the box it named",
+                not page.locator("#index-modal").is_visible()
+                and "Shelved" in page.locator("#main").inner_text()[:400],
+                page.locator("#main").inner_text()[:80].replace("\n", " / "),
+            )
+            # What the opened box says. It used to answer a real question with a load failure: the
+            # listing endpoint returned 404 for a folder the library knows is absent, so the console
+            # logged an error for a state that is not an error, and the pane said "Cannot list".
+            opened = page.locator("#main").inner_text()
+            checks.check(
+                "the box says its folder is absent, as a state, not as a load failure",
+                "not on this machine" in opened
+                and "Nothing was removed from the index" in opened
+                and "Cannot list" not in opened,
+                " / ".join(opened.splitlines()[:4]),
+            )
+            page.locator("#index-status").click()
+            page.wait_for_timeout(400)
             checks.check(
                 "and counts the work as zero while still counting what is followed",
                 "need reindexing 0" in " ".join(tallied.split())

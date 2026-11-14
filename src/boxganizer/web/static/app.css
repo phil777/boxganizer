@@ -2568,6 +2568,27 @@ pre.text {
   background: color-mix(in srgb, var(--accent) 7%, var(--panel));
 }
 
+/* The named boxes beside the gone count. Displayed only when not hidden: the dialog's `[hidden]`
+   rules are per-dialog and this one is not among them. */
+.gone-boxes:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin: 0.1rem 0 0.2rem;
+}
+
+.gone-boxes .gone-lead {
+  font-size: 0.8rem;
+  color: color-mix(in srgb, currentColor 65%, transparent);
+}
+
+/* A folder that is absent is not an empty folder, and the sentence that says so is two sentences. */
+.folder-gone {
+  white-space: pre-line;
+  color: color-mix(in srgb, currentColor 72%, transparent);
+}
+
 .index-actions:focus-within {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
