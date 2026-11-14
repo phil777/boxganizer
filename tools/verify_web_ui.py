@@ -1004,6 +1004,99 @@ def _run(base: str, executable: str | None) -> int:
             for uuid in tree_made:
                 api_delete(base, f"/api/boxes/{uuid}")
 
+        print("the pane sorts by name, by type and by how much each box holds")
+        # Names chosen so that every order disagrees with every other, and compared by uuid
+        # rather than by text: a row's children are [fold?, glyph, name, kind], so a selector
+        # aimed at "the name" moves the moment tree mode adds a [+], and the check would read
+        # an icon as a box name.
+        sort_made: dict[str, str] = {}
+        try:
+            from PIL import Image
+
+            assets = Path(tempfile.mkdtemp(prefix="verify-sort-"))
+            Image.new("RGB", (24, 24), (200, 30, 30)).save(assets / "pixel.png")
+            for spec in (
+                {"name": "bravo", "box_type": "note", "text": "b\n"},
+                {"name": "alpha", "box_type": "note", "text": "a\n"},
+                {"name": "Zulu", "box_type": "note", "text": "z\n"},
+                {"name": "Mike", "box_type": "image", "resource_uri": str(assets / "pixel.png")},
+                {"name": "kepler", "box_type": "note", "text": "k\n", "parent": "bravo"},
+                {"name": "gauss", "box_type": "note", "text": "g\n", "parent": "bravo"},
+            ):
+                sort_made[spec["name"]] = api(base, "/api/boxes", spec)["uuid"]
+
+            def order() -> list[str]:
+                rows = page.locator("#box-list li").evaluate_all(
+                    "els => els.map(e => e.dataset.uuid)"
+                )
+                return [u for u in rows if u in sort_made.values()]
+
+            def names(shown: list[str]) -> list[str]:
+                flip = {v: k for k, v in sort_made.items()}
+                return [flip[u] for u in shown]
+
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(400)
+            ascending = ["alpha", "bravo", "gauss", "kepler", "Mike", "Zulu"]
+            checks.check(
+                "alphabetical, ascending", names(order()) == ascending, names(order())
+            )
+            page.locator("#pane-direction").click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "the arrow turns the order around",
+                names(order()) == list(reversed(ascending)),
+                names(order()),
+            )
+            page.locator("#pane-direction").click()
+            page.wait_for_timeout(250)
+            page.locator("#pane-sort-type").click()
+            page.wait_for_timeout(300)
+            grouped = names(order())
+            notes = [n for n in grouped if n != "Mike"]
+            checks.check(
+                "grouped by type, alphabetical inside the group",
+                grouped[0] == "Mike" and notes == sorted(notes, key=str.lower),
+                grouped,
+            )
+            page.locator("#pane-sort-children").click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "the folder that holds most comes first",
+                names(order())[0] == "bravo",
+                names(order()),
+            )
+            page.locator("#pane-sort-name").click()
+            page.wait_for_timeout(250)
+            page.locator("#pane-view-tree").click()
+            page.wait_for_timeout(300)
+            hidden = names(order())
+            checks.check(
+                "in tree mode the children hide, the order of what shows does not",
+                hidden == ["alpha", "bravo", "Mike", "Zulu"],
+                hidden,
+            )
+            page.locator(f'#box-list li[data-uuid="{sort_made["bravo"]}"] .fold').click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "and each opened level is sorted on its own",
+                names(order()) == ascending,
+                names(order()),
+            )
+            page.locator("#pane-direction").click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "reversing flips the children too, inside the level",
+                names(order()) == ["Zulu", "Mike", "bravo", "kepler", "gauss", "alpha"],
+                names(order()),
+            )
+            page.locator("#pane-view-list").click()
+            page.wait_for_timeout(200)
+        finally:
+            for uuid in sort_made.values():
+                api_delete(base, f"/api/boxes/{uuid}")
+            shutil.rmtree(assets, ignore_errors=True)
+
         checks.check("no console errors", not errors, "; ".join(errors[:3]))
         page.screenshot(path="/tmp/verify-web-ui.png")
         browser.close()
