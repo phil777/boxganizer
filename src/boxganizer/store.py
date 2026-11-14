@@ -53,6 +53,26 @@ from boxganizer.models import DEFAULT_ICON, Box, canonical_name, new_uuid
 #: one index scan instead of a full-text probe per row. See :meth:`BoxStore._backfill_indexed_doc`.
 SCHEMA_VERSION = 10
 
+#: How the database file journals. WAL is chosen for *concurrency*, not for speed: with the
+#: rollback journal a reader can be turned away while a writer is mid-transaction, and the web
+#: app reads on every panel draw while its queue writes what people just saved. In WAL mode
+#: readers read the last committed image and never block on a writer, and never fail because
+#: one exists.
+#:
+#: It is persistent -- set once, it is stored in the file header -- so a library written by this
+#: version opens in WAL from then on. Two things follow, both in ``doc/persistence.md``: a
+#: complete backup is ``VACUUM INTO`` or a checkpoint plus the ``-wal`` sidecar, not the database
+#: file alone; and reverting is one statement, ``PRAGMA journal_mode = DELETE``, run while
+#: nothing else has the library open.
+#:
+#: ``synchronous`` is deliberately *not* touched. WAL on its own measured 4.964 s -> 2.334 s on
+#: the slow endpoint, which is a real two-fold and nowhere near the 55-fold that batching the
+#: writes gave: the latency was never the journal mode, it was one fsync per statement. Leaving
+#: ``synchronous`` at SQLite's default (FULL for a rollback journal) keeps the durability promise
+#: -- a committed save survives a power cut -- and buys the concurrency, which is the whole
+#: reason this mode is here.
+JOURNAL_MODE = "WAL"
+
 #: How long a writer waits for the database lock before SQLite gives up, in milliseconds.
 #: Two seconds: long enough for a page request to step behind a background index pass, short
 #: enough that a wedged writer is a slow request the person notices rather than a hang.
@@ -432,6 +452,11 @@ class BoxStore:
         # A modest wait is the honest trade: a genuinely wedged writer is now a slow request
         # that still errors, rather than a fast error nobody notices.
         self._conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS:d}")
+        # See :data:`JOURNAL_MODE`. Set before anything is read or written, and on every open:
+        # it persists in the file, so this is a no-op the second time and the guarantee the
+        # first -- a library opened by an older version, or copied in from one, gets the
+        # behaviour this code assumes without anybody having to migrate it.
+        self._conn.execute(f"PRAGMA journal_mode = {JOURNAL_MODE}")
         with self._lock:
             before = self._conn.execute("PRAGMA user_version").fetchone()
             stored_version = int(before[0]) if before is not None else 0

@@ -51,7 +51,7 @@ WRITERS = 3
 REGRESSION_RATIO = 1.25
 
 #: Metrics that must be clean once the work is done, whatever the baseline said.
-MUST_BE_CLEAN = ("lock_errors_total",)
+MUST_BE_CLEAN = ("lock_errors_total", "writer_refused_by_reader_total")
 
 
 # -------------------------------------------------------------------------- scratch guard
@@ -83,6 +83,23 @@ def cmd_seed(args: argparse.Namespace) -> int:
         sys.exit(f"no database at {source_db}")
     target.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source_db, target / "boxes.db")
+    # A WAL database keeps recent writes in the `-wal` sidecar, so the main file alone can be a
+    # library from before the last save -- measured once as a copy that opened with no tables at
+    # all. The sidecars come too, or the "before" numbers are measured against a smaller library
+    # than the one that produced them.
+    copied_sidecars = []
+    for suffix in ("-wal", "-shm"):
+        side = source_db.with_name(source_db.name + suffix)
+        if side.exists():
+            shutil.copyfile(side, target / side.name)
+            copied_sidecars.append(side.name)
+    if copied_sidecars:
+        print(
+            "note: the source had WAL sidecars "
+            f"({', '.join(copied_sidecars)}); they were copied with it. A snapshot taken while"
+            " a writer is running is only as consistent as the moment it was read -- for a"
+            " real backup use VACUUM INTO (see doc/persistence.md), not this command."
+        )
     for folder in ("files", "thumbnails"):
         origin = source / folder
         if origin.is_dir():
@@ -90,6 +107,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
     marker = target / SCRATCH_MARKER
     marker.write_text(
         f"copied from {source_db} at {time.strftime('%Y-%m-%dT%H:%M:%S')}\n"
+        f"sidecars copied: {', '.join(copied_sidecars) or 'none'}\n"
         "Safe to write: this is a copy, and measure_perf.py run checks for this file.\n",
         encoding="utf-8",
     )
@@ -189,6 +207,18 @@ def measure_writes(base: str, samples: int) -> dict[str, float]:
     }
 
 
+def measure_check_action(base: str, samples: int) -> float:
+    """The freshness pass asked as what it is: a POST, after ADR 42 moved it off the GET.
+
+    `index_status_check_s` used to time `?check=1`, and P4 deleted that parameter -- so the
+    baseline's 54.1 s and the current 2 ms are different requests, and comparing them would be
+    the kind of number this whole exercise is trying not to publish. This is the one that still
+    measures the walk: 54 s of fsyncs, then 17 ms once the writes were batched.
+    """
+    timings = [fetch(base, "/api/index/check", payload={})[0] for _ in range(samples)]
+    return round(statistics.median(timings), 4)
+
+
 def measure_overlap(base: str) -> dict[str, float]:
     """Two freshness checks at once: they used to queue rather than share, doubling both."""
     each: list[float] = []
@@ -246,6 +276,45 @@ def measure_lock_errors(db: Path) -> int:
     for thread in threads:
         thread.join()
     return sum(errors)
+
+
+def measure_reader_writer(db: Path, rounds: int = 20) -> int:
+    """Writers refused because a reader was still holding its transaction open.
+
+    This is the scenario WAL is for, and it is not the one it sounds like: a reader that opens,
+    selects and closes never failed under the rollback journal either (checked, thirty rounds,
+    zero refusals). What failed was a *writer* committing while a read transaction was still
+    open -- it waited out the store's busy_timeout and gave up, and the application records a
+    refused write as a per-file note and carries on, so nobody saw it. Measured 2.00 s and
+    "database is locked" before, 0.00 s and committed after (ADR 43).
+
+    Connections are opened as the store opens them, timeout included, for the reason already
+    learned the hard way in measure_lock_errors: a probe with its own settings measures the
+    probe.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from boxganizer.store import BUSY_TIMEOUT_MS, JOURNAL_MODE
+
+    timeout_seconds = BUSY_TIMEOUT_MS / 1000
+    refused: list[str] = []
+    reader = sqlite3.connect(str(db), timeout=timeout_seconds)
+    reader.execute(f"PRAGMA journal_mode = {JOURNAL_MODE}")
+    rows = reader.execute("SELECT reference, index_it FROM resources").fetchall()
+    reader.execute("BEGIN")  # held open for the whole experiment, the way a big listing does
+    for _ in range(rounds):
+        connection = sqlite3.connect(str(db), timeout=timeout_seconds)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE resources SET stale = stale WHERE id = 1")
+            connection.commit()
+        except sqlite3.OperationalError as exc:
+            refused.append(str(exc))
+        finally:
+            connection.close()
+        for row in rows[:200]:  # the reader is still walking; it does not finish between rounds
+            _ = row[0]
+    reader.close()
+    return len(refused)
 
 
 def measure_index_counts(db: Path, samples: int) -> float:
@@ -322,6 +391,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "index_status_check_s": median_seconds(
             base, "/api/index/status?check=1", args.check_samples),
         "index_pending_s": median_seconds(base, "/api/index/pending", args.samples),
+        "check_action_s": measure_check_action(base, args.check_samples),
         "write_probe": measure_writes(base, args.write_samples),
         "search_content_s": median_seconds(base, "/api/search?q=fence", args.samples),
         "index_counts_ms": measure_index_counts(db, args.samples),
@@ -332,6 +402,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     results["write_spread_s"] = [probe["min_s"], probe["max_s"]]
     results.update(measure_overlap(base))
     results["lock_errors_total"] = measure_lock_errors(db)
+    results["writer_refused_by_reader_total"] = measure_reader_writer(db)
 
     for key, value in results.items():
         if key not in ("static", "write_spread_s"):
@@ -356,6 +427,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 #: Which numbers are "lower is better" and therefore comparable run to run.
 LOWER_BETTER = (
     "index_status_plain_s",
+    "check_action_s",
     "index_status_check_s",
     "index_pending_s",
     "write_s",

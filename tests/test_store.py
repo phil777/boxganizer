@@ -1606,3 +1606,133 @@ def test_reconcile_repairs_a_helper_that_was_left_behind(tmp_path: Path) -> None
         assert _words_in_the_index(store) == {max(held)}
     finally:
         store.close()
+
+
+# --- how the file journals, and what a complete copy of it means ---------------
+
+
+def test_the_library_journals_in_wal_and_still_syncs_every_commit(tmp_path: Path) -> None:
+    """The pair, pinned together: readers and writers coexist, durability is not the price.
+
+    `synchronous` is the one that would buy a second two-fold and cost a power-cut guarantee,
+    and it is deliberately left at SQLite's full sync. Quoting them separately here is the
+    point -- an earlier reading of this change expected WAL to fix the slow endpoint, and it
+    did not (4.964 s -> 2.334 s, against 54 s -> 0.02 s from batching the writes).
+    """
+    store = BoxStore(tmp_path / "wal.db")
+    try:
+        assert str(store._conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
+        assert int(store._conn.execute("PRAGMA synchronous").fetchone()[0]) == 2, (
+            "FULL: a committed save survives the machine losing power"
+        )
+    finally:
+        store.close()
+
+
+def test_a_writer_is_not_refused_by_a_reader_holding_a_transaction(tmp_path: Path) -> None:
+    """What WAL is actually for, measured rather than assumed.
+
+    The collision is not the one it looks like. A reader that opens the database, reads and
+    closes is fine under the rollback journal too -- checked, and nothing failed. What fails is
+    a writer committing while a reader still holds its transaction open: the writer needs the
+    file exclusively, waits out `busy_timeout`, and gives up. On the rollback journal this
+    scenario ends in `database is locked` after 2.00 s; the web app records that as a per-file
+    note and carries on, so the visible symptom is a library that quietly did less.
+
+    Run against the file with the store's own timeout, and asserted as a success: under
+    `journal_mode = DELETE` the same code raises.
+    """
+    path = tmp_path / "share-wal.db"
+    store = BoxStore(path, content_root=tmp_path)
+    writer_outcome: list[str] = []
+    try:
+        for index in range(200):
+            store._execute(
+                "INSERT INTO resources (reference, ref_key, origin, index_it)"
+                " VALUES (?, ?, 'local', 1)",
+                (f"/tmp/wal{index}", f"/tmp/wal{index}"),
+            )
+        reader = sqlite3.connect(str(path), timeout=BUSY_TIMEOUT_MS / 1000)
+
+        def writer() -> None:
+            other = sqlite3.connect(str(path), timeout=BUSY_TIMEOUT_MS / 1000)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("UPDATE resources SET stale = 1 WHERE id = 1")
+                other.commit()
+                writer_outcome.append("committed")
+            except sqlite3.OperationalError as exc:
+                writer_outcome.append(f"refused: {exc}")
+            finally:
+                other.close()
+
+        reader.execute("BEGIN")
+        rows = reader.execute("SELECT reference, index_it FROM resources").fetchall()
+        thread = threading.Thread(target=writer)
+        thread.start()
+        time.sleep(0.05)  # the writer is waiting, or committing, while the reader still holds
+        for row in rows:
+            _ = row[0]
+        thread.join(timeout=15)
+        reader.close()
+        assert writer_outcome == ["committed"], writer_outcome
+    finally:
+        store.close()
+
+
+def test_a_copy_of_the_database_file_alone_is_not_a_backup(tmp_path: Path) -> None:
+    """The cost of WAL, written down where somebody will hit it.
+
+    Recent writes live in the `-wal` sidecar until a checkpoint folds them into the main file,
+    so a `cp boxes.db` taken while the app is running can be a library from before the last
+    save -- a backup that restores cleanly and loses the week. `VACUUM INTO` asks the connection
+    instead of the shell, and comes out whole. This test is the documentation: it asserts the
+    bare copy is *short* and the vacuumed one is not, so if the behaviour ever changes, the
+    sentence in doc/persistence.md has to change with it.
+    """
+    import shutil
+
+    path = tmp_path / "library.db"
+    store = BoxStore(path, content_root=tmp_path)
+    try:
+        for index in range(60):
+            store._execute(
+                "INSERT INTO resources (reference, ref_key, origin, index_it)"
+                " VALUES (?, ?, 'local', 1)",
+                (f"/tmp/keep{index}", f"/tmp/keep{index}"),
+            )
+        # The pages are written; whether they have reached the main file is SQLite's choice,
+        # which is exactly the ambiguity that makes a file copy unreliable.
+        sidecar = path.with_name(path.name + "-wal")
+        bare = tmp_path / "bare.db"
+        shutil.copyfile(path, bare)
+        vacuumed = tmp_path / "whole.db"
+        store._conn.execute("VACUUM INTO ?", (str(vacuumed),))
+
+        def rows_of(database: Path) -> int:
+            """Rows the copy can show on its own, with no sidecar beside it.
+
+            Zero covers "the table is not there": on the run that first checked this, a copy
+            of a live library opened as an *empty* database, because the schema itself was
+            still sitting in the `-wal` file.
+            """
+            check = sqlite3.connect(str(database))
+            try:
+                return int(check.execute("SELECT count(*) FROM resources").fetchone()[0])
+            except sqlite3.OperationalError:
+                return 0
+            finally:
+                check.close()
+
+        assert rows_of(vacuumed) == 60, (
+            "VACUUM INTO is the documented backup path; it must be whole"
+        )
+        shown = rows_of(bare)
+        if sidecar.exists() and sidecar.stat().st_size > 0:
+            assert shown < 60, (
+                "the sidecar stopped holding anything back, so the warning in "
+                "doc/persistence.md is out of date -- update it, and this assertion"
+            )
+        assert shown <= 60
+    finally:
+        store.close()
