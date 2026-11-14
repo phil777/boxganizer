@@ -4215,9 +4215,15 @@ function indexWords(status_) {
     return `index refused ${queue.errors.length} file${queue.errors.length === 1 ? "" : "s"}`;
   }
   const waiting = indexWaiting(status_);
+  const missing = status_.missing || {};
   // "reindex" only when something was read and has since changed; a file the index has never
   // opened is not being re-read, and a line that says otherwise teaches people to distrust it.
-  if (status_.stale) return `${waiting} to reindex`;
+  // Both halves come from the work list rather than from `stale`, because `stale` includes files
+  // that are simply not on this machine any more: keyed on it, a library whose whole backlog is
+  // unreachable read "0 to reindex" -- a number and a noun that contradict each other.
+  const reindexWork =
+    typeof missing.work_stale === "number" ? missing.work_stale : status_.stale || 0;
+  if (reindexWork) return `${waiting} to reindex`;
   if (waiting) return `${waiting} to index`;
   if (!status_.wanted) return "nothing to index";
   return `${status_.indexed} indexed`;
@@ -4248,7 +4254,7 @@ function indexDetail(status_) {
   }
   parts.push(observedSentence(status_));
   const unreachable = status_.missing;
-  if (unreachable && unreachable.files) {
+  if (unreachable && unreachable.resources) {
     // Its own number, beside the work, naming where: "64 files are missing" without the folder
     // reads as a fault in the index rather than a folder that is not on this machine, and a
     // headline that silently excludes files is what taught people that Reindex does nothing.
@@ -4262,7 +4268,8 @@ function indexDetail(status_) {
       .join(", ");
     parts.push(
       `${unreachable.resources} watched resource${unreachable.resources === 1 ? "" : "s"} ` +
-        `are gone from this machine (${where}) and ${unreachable.boxes} box${
+        `${unreachable.resources === 1 ? "is" : "are"} gone from this machine (${where}) ` +
+        `and ${unreachable.boxes} box${
           unreachable.boxes === 1 ? "" : "es"
         } still ${unreachable.boxes === 1 ? "points" : "point"} at them; they are not counted` +
         " as work. Nothing was removed from the index: put them back and ask again."
@@ -4356,13 +4363,19 @@ async function refreshIndexStatus() {
   spot.title = indexDetail(status_);
   drawIndexProgress(status_);
   // A number with nothing behind it should not invite a click, and should not pretend to be
-  // a control to a keyboard either.
+  // a control to a keyboard either. "Nothing behind it" means no work *and* nothing to explain:
+  // with 65 resources gone from this machine the work is zero, and this dialog is the only place
+  // that says so — a button disabled on that account would hide the one answer worth having.
   const waiting = indexWaiting(status_);
-  spot.disabled = waiting === 0;
+  const toExplain = (status_.missing && status_.missing.resources) || 0;
+  spot.disabled = waiting === 0 && toExplain === 0;
   if (spot.disabled) spot.removeAttribute("aria-haspopup");
   else spot.setAttribute("aria-haspopup", "dialog");
   spot.classList.toggle("is-running", !!status_.running);
-  spot.classList.toggle("has-stale", !status_.running && (status_.stale > 0 || status_.outstanding > 0));
+  // The amber is an offer, not a diagnosis: it says "there is something this button would do".
+  // Keyed on the raw counts it lit up for 65 files no reindex can reach, which taught people to
+  // ignore the colour and press the button anyway.
+  spot.classList.toggle("has-stale", !status_.running && indexWaiting(status_) > 0);
   if (indexBusy) {
     if (!indexTimer) indexTimer = setInterval(() => refreshIndexStatus(), 1200);
   } else if (indexTimer) {
@@ -4416,8 +4429,12 @@ function drawIndexTally(report) {
     ["not indexed yet", `${neverRead}`, ""],
   ];
   if (missing.resources) {
-    const boxes = missing.boxes === 1 ? "1 box" : `${missing.boxes || 0} boxes`;
-    rows.push(["gone from this machine", `${missing.resources}`, `still ${boxes} point at them`]);
+    const boxes = missing.boxes || 0;
+    rows.push([
+      "gone from this machine",
+      `${missing.resources}`,
+      `still ${boxes} box${boxes === 1 ? "" : "es"} ${boxes === 1 ? "points" : "point"} at them`,
+    ]);
   }
   tally.replaceChildren();
   for (const [label, value, note] of rows) {

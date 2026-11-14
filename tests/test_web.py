@@ -4020,7 +4020,10 @@ def test_the_status_line_is_two_halves_and_one_of_them_is_a_button(client: TestC
     assert "out of date" not in words
     assert "to reindex" in words and "to index" in words
     # and a number with nothing behind it is not a control
-    assert "spot.disabled = waiting === 0;" in script
+    # Clickability is no longer asserted here at all: it is checked in the browser against the
+    # status answer that produced the pane. The line that used to sit here pinned the
+    # assignment as text and stayed green while the page was disabling the dialog on a library
+    # whose 65 gone resources left that dialog holding the only answer worth reading.
 
 
 def test_the_pending_list_tells_work_apart_from_a_dead_end(

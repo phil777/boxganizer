@@ -805,6 +805,85 @@ def _run(base: str, executable: str | None) -> int:
             api_delete(base, f"/api/boxes/{drift_box['uuid']}")
             shutil.rmtree(drift_dir, ignore_errors=True)
 
+        print("a folder that is not here stops being offered as work")
+        # The complaint, end to end: "I have 833 to reindex ... then it says 833 to reindex".
+        # A box is filed on a folder, the folder is indexed, the folder is deleted, and the page
+        # is asked what it thinks -- first after looking at the files, then after being told to
+        # do the work. What must not happen is an offer the button cannot honour.
+        gone_dir = Path(tempfile.mkdtemp(prefix="verify-gone-dir-")) / "shelved"
+        gone_dir.mkdir(parents=True)
+        (gone_dir / "inside.md").write_text("the boiler pressure gauge leaks\n", encoding="utf-8")
+        try:
+            shelf = api(
+                base,
+                "/api/boxes",
+                {
+                    "name": "Shelved",
+                    "box_type": "indexed-directory",
+                    "resource_uri": str(gone_dir),
+                    "index_resource": True,
+                },
+            )
+            api(base, "/api/index/run", {"scope": "everything"})
+            for _ in range(60):
+                page.wait_for_timeout(200)
+                if not api(base, "/api/index/status")["running"]:
+                    break
+            shutil.rmtree(gone_dir)
+            api(base, "/api/index/check", {})
+            status = api(base, "/api/index/status")
+            checks.check(
+                "the deleted folder is reported as gone, not as backlog",
+                status["missing"]["resources"] >= 2 and status["missing"]["work"] == 0,
+                f"resources={status['missing']['resources']} work={status['missing']['work']} "
+                f"stale={status['stale']}",
+            )
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(500)
+            shown = page.locator("#index-status").inner_text()
+            checks.check(
+                "the panel offers no work it cannot do",
+                "0 to reindex" not in shown and "to reindex" not in shown,
+                shown,
+            )
+            explain = page.locator("#index-status").get_attribute("title") or ""
+            checks.check(
+                "and stays clickable, because it has something to explain",
+                page.locator("#index-status").is_enabled() and "gone from this machine" in explain,
+                " ".join(explain.split()),
+            )
+            page.locator("#index-status").click()
+            page.wait_for_timeout(400)
+            tallied = page.locator("#index-tally").inner_text()
+            checks.check(
+                "the dialog names the count of what is gone",
+                "gone from this machine" in tallied,
+                " ".join(tallied.split()),
+            )
+            checks.check(
+                "and counts the work as zero while still counting what is followed",
+                "need reindexing 0" in " ".join(tallied.split())
+                and "files followed for the index" in tallied,
+                " ".join(tallied.split()),
+            )
+            page.locator("#index-close").click()
+            # Is the control a control at all? The rule is "clickable when there is work, or
+            # when there is something to explain" -- compared against the answer that produced
+            # the pane rather than against a state this file hopes the library is in, so it
+            # cannot quietly become a check that only passes by luck.
+            rule = api(base, "/api/index/status")
+            should_be_open = rule["missing"]["work"] > 0 or rule["missing"]["resources"] > 0
+            enabled = page.locator("#index-status").is_enabled()
+            checks.check(
+                "the panel is clickable exactly when it has work or an explanation",
+                enabled == should_be_open,
+                f"enabled={enabled} work={rule['missing']['work']} "
+                f"gone={rule['missing']['resources']}",
+            )
+        finally:
+            api_delete(base, f"/api/boxes/{shelf['uuid']}")
+            shutil.rmtree(gone_dir.parent, ignore_errors=True)
+
         checks.check("no console errors", not errors, "; ".join(errors[:3]))
         page.screenshot(path="/tmp/verify-web-ui.png")
         browser.close()
