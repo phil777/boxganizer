@@ -1394,7 +1394,7 @@ class BoxStore:
         gone_roots = self.missing_directories()
         candidates = self._rows(
             """
-            SELECT id, reference FROM resources
+            SELECT id, reference, stale, indexed_at FROM resources
              WHERE index_it = 1 AND (stale = 1 OR indexed_at IS NULL)
             """
         )
@@ -1432,25 +1432,36 @@ class BoxStore:
 
         stray = 0
         unreachable_candidates = 0
+        # The same rows, split by whether a pass would be reading them for the first time or
+        # again. The dialog asks for both numbers and the page must not derive them from a total
+        # it cannot see -- `work` alone says "there is something to do" but not whether it is
+        # backlog or drift, which are different decisions.
+        work_stale = 0
+        work_untouched = 0
         for row in candidates:
             reference = str(row["reference"])
             if under_a_gone_root(reference):
                 unreachable_candidates += 1
                 continue
-            if resources.origin_of(reference) != resources.LOCAL:
-                continue
-            if Path(resources.normalise(reference)).exists():
-                continue
-            stray += 1
-            unreachable_candidates += 1
-            box_ids.update(
-                int(box["id"])
-                for box in self._rows(
-                    "SELECT b.id AS id FROM boxes b"
-                    " JOIN resources r ON b.resource_id = r.id WHERE r.reference = ?",
-                    (reference,),
+            # A remote resource is not watched by looking at this disk: it is work, and the
+            # question of whether it is there is the reader's to answer, not this pass's.
+            local = resources.origin_of(reference) == resources.LOCAL
+            if local and not Path(resources.normalise(reference)).exists():
+                stray += 1
+                unreachable_candidates += 1
+                box_ids.update(
+                    int(box["id"])
+                    for box in self._rows(
+                        "SELECT b.id AS id FROM boxes b"
+                        " JOIN resources r ON b.resource_id = r.id WHERE r.reference = ?",
+                        (reference,),
+                    )
                 )
-            )
+                continue
+            if row["stale"]:
+                work_stale += 1
+            else:
+                work_untouched += 1
         inside = sum(int(entry["resources"]) for entry in roots)
         return {
             # Everything this read can show is unreachable. `resources`, not `files`: a folder
@@ -1462,6 +1473,8 @@ class BoxStore:
             "candidates": len(candidates),
             # What the headline may offer: the same rows, minus the ones no pass can read.
             "work": max(len(candidates) - unreachable_candidates, 0),
+            "work_stale": work_stale,
+            "work_untouched": work_untouched,
         }
 
     def _gone_prefixes(self) -> list[str]:

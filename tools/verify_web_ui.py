@@ -687,6 +687,124 @@ def _run(base: str, executable: str | None) -> int:
         finally:
             page.unroute("**/api/index/status")
 
+        print("the Index status dialog states its numbers, and what is not work")
+        # A real drift rather than a stub: a file is added, read, then edited, so the dialog is
+        # opened with genuine counts behind it and the button that opens it is enabled by the
+        # same arithmetic the report complained about.
+        drift_dir = Path(tempfile.mkdtemp(prefix="verify-index-drift-"))
+        created_drift = drift_dir / "drift.md"
+        created_drift.write_text("the boiler pressure gauge leaks\n", encoding="utf-8")
+        try:
+            drift_box = api(
+                base,
+                "/api/boxes",
+                {"name": "Driftfile", "box_type": "markdown", "resource_uri": str(created_drift)},
+            )
+            api(base, "/api/index/run", {"scope": "everything"})
+            for _ in range(60):
+                page.wait_for_timeout(200)
+                if not api(base, "/api/index/status")["running"]:
+                    break
+            created_drift.write_text(
+                "the boiler pressure gauge leaks and drips\n", encoding="utf-8"
+            )
+            api(base, "/api/index/check", {})
+            status = api(base, "/api/index/status")
+            missing = status["missing"]
+            expected_up_to_date = max(status["wanted"] - status["stale"] - status["untouched"], 0)
+
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(500)
+            checks.check(
+                "work on offer makes the number clickable",
+                page.locator("#index-status").is_enabled(),
+                page.locator("#index-status").inner_text(),
+            )
+            page.locator("#index-status").click()
+            page.wait_for_timeout(400)
+            modal = page.locator("#index-modal")
+            checks.check("the dialog opens", modal.is_visible())
+            checks.check(
+                "it is titled Index status",
+                page.locator("#index-modal h2").inner_text() == "Index status",
+                page.locator("#index-modal h2").inner_text(),
+            )
+            checks.check(
+                "and carries the same name for a screen reader",
+                modal.get_attribute("aria-label") == "Index status",
+            )
+
+            tally = page.locator("#index-tally").inner_text()
+            checks.check(
+                "the four counts are on screen",
+                all(
+                    label in tally
+                    for label in (
+                        "files followed for the index",
+                        "up to date",
+                        "need reindexing",
+                        "not indexed yet",
+                    )
+                ),
+                " ".join(tally.split()),
+            )
+            checks.check(
+                "and they are the server's numbers, not the page's arithmetic",
+                f"{status['wanted']}" in tally
+                and f"{expected_up_to_date}" in tally
+                and f"{missing['work_stale']}" in tally,
+                f"wanted={status['wanted']} up_to_date={expected_up_to_date} "
+                f"work_stale={missing['work_stale']}",
+            )
+            checks.check(
+                "the drifted file is counted as reindex work",
+                missing["work_stale"] >= 1,
+                missing,
+            )
+            checks.check(
+                "the two actions are named for what they do",
+                page.locator("#pending-look").inner_text() == "update index status"
+                and page.locator("#pending-reindex").inner_text() == "Reindex",
+                f"{page.locator('#pending-look').inner_text()} / "
+                f"{page.locator('#pending-reindex').inner_text()}",
+            )
+
+            look_box = page.locator("#pending-look").bounding_box()
+            close_box = page.locator("#index-close").bounding_box()
+            checks.check(
+                "Close sits on the same line as the actions",
+                bool(look_box and close_box)
+                and abs((look_box["y"] + look_box["height"] / 2)
+                        - (close_box["y"] + close_box["height"] / 2))
+                < 6,
+                f"look y={look_box and round(look_box['y'])}"
+                f" close y={close_box and round(close_box['y'])}",
+            )
+            checks.check(
+                "and at the right edge, away from the work",
+                bool(look_box and close_box) and close_box["x"] > look_box["x"] + look_box["width"],
+            )
+
+            asked_before = len(asked)
+            page.locator("#pending-look").click()
+            page.wait_for_timeout(1200)
+            checks.check(
+                "the button asks the server to look at the files",
+                "index/check" in asked[asked_before:],
+                asked[asked_before:][:6],
+            )
+            listed = page.locator("#index-pending-list li").count()
+            checks.check(
+                "and the names are still listed under the counts",
+                listed >= 1,
+                f"{listed} rows",
+            )
+            page.locator("#index-close").click()
+            checks.check("and Close closes it", not modal.is_visible())
+        finally:
+            api_delete(base, f"/api/boxes/{drift_box['uuid']}")
+            shutil.rmtree(drift_dir, ignore_errors=True)
+
         checks.check("no console errors", not errors, "; ".join(errors[:3]))
         page.screenshot(path="/tmp/verify-web-ui.png")
         browser.close()

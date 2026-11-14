@@ -4000,8 +4000,11 @@ def test_the_status_line_is_two_halves_and_one_of_them_is_a_button(client: TestC
     status_at = page.index('id="index-status"')
     assert count_at < status_at, "the count comes first: it is the sentence, not the tail"
     assert '<button type="button" id="index-status"' in page
-    assert 'aria-label="What the index is waiting for"' in page
-    assert 'id="pending-reindex"' in page and 'id="pending-look"' in page
+    # The dialog's name and its two actions are checked where they can actually fail: the
+    # browser harness opens it, reads the title, the aria-label, the button texts and whether
+    # Close shares the line. Asserting `id="pending-look" in page` proved only that a string
+    # was typed somewhere, and passed while the label said something else.
+    pass
     css = client.get("/static/app.css").text
     line_rule = css[css.index("#side-status {") :]
     line_rule = line_rule[: line_rule.index("}")]

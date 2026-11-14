@@ -243,14 +243,18 @@
       </footer>
     </dialog>
 
-    <dialog id="index-modal" aria-label="What the index is waiting for">
-      <h2>Waiting for the index</h2>
+    <dialog id="index-modal" aria-label="Index status">
+      <h2>Index status</h2>
+      <!-- The counts come first, then the names. A person who clicked a number wants the list
+           under it, and a list on its own cannot say how large the library is -- which is the
+           question "833 to reindex" was really asking. -->
+      <dl id="index-tally" class="index-tally"></dl>
       <p id="index-pending-summary" class="muted"></p>
       <ul id="index-pending-list" class="pending-list"></ul>
       <footer>
-        <button type="button" id="pending-reindex">Reindex them</button>
-        <button type="button" id="pending-look">Look at the files again</button>
-        <button type="button" id="index-close">Close</button>
+        <button type="button" id="pending-look">update index status</button>
+        <button type="button" id="pending-reindex">Reindex</button>
+        <button type="button" id="index-close" class="dialog-close">Close</button>
       </footer>
     </dialog>
 

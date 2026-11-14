@@ -2543,6 +2543,41 @@ pre.text {
 #check-modal h2 { margin: 0; font-size: 1.05rem; }
 #check-modal .small { font-size: 0.78rem; margin: 0; }
 #check-modal footer { display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.4rem; }
+
+#index-modal footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+#index-modal .dialog-close {
+  /* Leaving costs nothing, so it sits apart from the two things that do something -- on the
+     same line, at the right edge, where a person looks for it after reading the list. */
+  margin-left: auto;
+}
+
+.index-tally {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.1rem 0.8rem;
+  margin: 0.4rem 0 0.6rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.index-tally dt { color: color-mix(in srgb, currentColor 72%, transparent); }
+
+.index-tally dd {
+  margin: 0;
+  text-align: right;
+  font-weight: 600;
+}
+
+.index-tally dd.gone {
+  /* a different kind of number: not work, and not a fault either */
+  font-weight: 400;
+  color: color-mix(in srgb, var(--accent) 70%, currentColor);
+}
 .check-findings {
   list-style: none;
   margin: 0.2rem 0 0;

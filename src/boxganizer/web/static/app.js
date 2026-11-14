@@ -148,7 +148,7 @@ const api = {
       body: JSON.stringify({ tags }),
     }),
   indexPending: () => request("/api/index/pending"),
-  // "Look at the files again": one stat per watched file, reading none of them. A POST, and a
+  // "update index status": one stat per watched file, reading none of them. A POST, and a
   // button, because it writes the freshness flags (ADR 42). It used to be `?check=1` on the
   // status read, which the page sent every time the panel drew -- so opening a box quietly
   // rewrote the library. Same data, same purpose; the change is that somebody decides.
@@ -4396,6 +4396,47 @@ async function openIndexModal() {
   await drawPending({ check: false });
 }
 
+function drawIndexTally(report) {
+  // The four numbers the panel was asked for, and the fifth that explains them. Each is read
+  // from the status answer rather than derived here: the store already knows which watched
+  // resources a pass could read and which are gone (ADR 44), and a page that recomputed the
+  // split would be a second opinion nobody could check.
+  const tally = el("index-tally");
+  const missing = report.missing || {};
+  const watched = report.wanted || 0;
+  const waiting = (report.stale || 0) + (report.untouched || 0);
+  const reindex =
+    typeof missing.work_stale === "number" ? missing.work_stale : report.stale || 0;
+  const neverRead =
+    typeof missing.work_untouched === "number" ? missing.work_untouched : report.untouched || 0;
+  const rows = [
+    ["files followed for the index", `${watched}`, ""],
+    ["up to date", `${Math.max(watched - waiting, 0)}`, ""],
+    ["need reindexing", `${reindex}`, ""],
+    ["not indexed yet", `${neverRead}`, ""],
+  ];
+  if (missing.resources) {
+    const boxes = missing.boxes === 1 ? "1 box" : `${missing.boxes || 0} boxes`;
+    rows.push(["gone from this machine", `${missing.resources}`, `still ${boxes} point at them`]);
+  }
+  tally.replaceChildren();
+  for (const [label, value, note] of rows) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const cell = document.createElement("dd");
+    cell.textContent = value;
+    if (note) {
+      cell.classList.add("gone");
+      cell.title = `these are not counted as work: the folder they live in is not on this machine`;
+      const aside = document.createElement("span");
+      aside.textContent = ` — ${note}`;
+      cell.append(aside);
+    }
+    tally.append(term, cell);
+  }
+}
+
+
 async function drawPending({ check = false } = {}) {
   const list = el("index-pending-list");
   const summary = el("index-pending-summary");
@@ -4411,6 +4452,7 @@ async function drawPending({ check = false } = {}) {
     summary.textContent = `the index could not be asked: ${error.message}`;
     return;
   }
+  drawIndexTally(report);
   const items = report.items || [];
   const fixable = items.filter((item) => item.fixable);
   const hopeless = items.filter((item) => !item.fixable);
