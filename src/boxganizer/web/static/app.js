@@ -3204,30 +3204,110 @@ function orderedForSide(boxes) {
   return [...roots, ...others];
 }
 
+/* The fold control, drawn: a square with a plus that becomes a minus.
+ *
+ * It used to be the text "[+]" and "[-]". Square brackets are what a keyboard shows, not what a
+ * control looks like, and they made every row's first column a variable-width string. The square is
+ * one fixed box, so the icon and the name after it start at the same x on every row of a level; the
+ * stem that turns it into a minus is what `aria-expanded` hides, so the picture and the state the
+ * screen reader reads cannot disagree.
+ */
+const FOLD_SVG =
+  '<svg viewBox="0 0 12 12" aria-hidden="true" focusable="false">' +
+  '<rect x="0.85" y="0.85" width="10.3" height="10.3" rx="1.6"></rect>' +
+  '<line x1="3.6" y1="6" x2="8.4" y2="6"></line>' +
+  '<line class="fold-stem" x1="6" y1="3.6" x2="6" y2="8.4"></line>' +
+  "</svg>";
+
+function foldControl(box, open) {
+  // A real button, not a span wearing role=button: it is focusable, it answers Tab, and Enter and
+  // Space arrive as a click the row's own delegated handler already understands.
+  const fold = document.createElement("button");
+  fold.type = "button";
+  fold.className = "fold";
+  fold.dataset.fold = box.uuid;
+  fold.setAttribute("aria-expanded", String(open));
+  fold.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} ${box.name}`);
+  fold.setAttribute("title", fold.getAttribute("aria-label"));
+  fold.innerHTML = FOLD_SVG;
+  return fold;
+}
+
+/* Guide rails: the line that says which parent a row belongs to.
+ *
+ * One vertical line per ancestor level, each drawn at the x where that level's own fold control
+ * sits — so the line a child hangs from runs out of the square its parent opened, and a reader can
+ * follow it with a pointer. A level continues past the bottom of a row while another row of that
+ * level follows; the row's own level stops at the middle and turns right into the row, which is what
+ * makes the last child of a folder look finished instead of cut off.
+ */
+function railElement(depth, continues) {
+  const rails = document.createElement("span");
+  rails.className = "rails";
+  rails.setAttribute("aria-hidden", "true");
+  for (let level = 1; level <= depth; level += 1) {
+    const rail = document.createElement("span");
+    // The child's own level always ends here; an ancestor's level runs on when a later row is still
+    // inside it.
+    rail.className = "rail" + (level < depth || continues.has(level) ? " rail-thru" : " rail-end");
+    rail.dataset.railLevel = String(level);
+    // The x is the parent level's own fold column, so the line leaves the square it belongs to.
+    rail.style.setProperty("--rail-indent", String(level));
+    rails.append(rail);
+  }
+  return rails;
+}
+
+/** The empty fold column on a row with nothing to open. */
+function spacerElement() {
+  const spacer = document.createElement("span");
+  spacer.className = "fold fold-spacer";
+  spacer.setAttribute("aria-hidden", "true");
+  return spacer;
+}
+
+/** Which ancestor levels still have a row below this one, given the render order. */
+function levelsContinuing(rows, index) {
+  const depth = rows[index].depth;
+  const continuing = new Set();
+  for (let i = index + 1; i < rows.length; i += 1) {
+    // A row nested deeper than this one is inside it, so it keeps every level up to its own.
+    const reach = Math.min(rows[i].depth, depth);
+    for (let level = 1; level <= reach; level += 1) continuing.add(level);
+    if (rows[i].depth <= depth) break;
+  }
+  return continuing;
+}
+
 function renderSide() {
   const list = el("box-list");
   clearDropZones(); // the folder's own list is a drop zone that outlives every re-render of it
   list.replaceChildren();
-  paneRows(orderedForSide(state.boxes)).forEach(({ box, depth, foldable, open }) => {
+  const rows = paneRows(orderedForSide(state.boxes));
+  const tree = pane.mode === "tree";
+  rows.forEach(({ box, depth, foldable, open }, index) => {
     const item = document.createElement("li");
     item.dataset.uuid = box.uuid;
     item.draggable = true; // a box can be dragged onto a grid cell
     item.setAttribute("role", "option");
-    if (depth) item.style.paddingLeft = `${0.3 + depth * 0.85}rem`;
-    if (foldable) {
-      // "[+]" before the icon and the name, exactly as asked for: it reads as a control on the
-      // row rather than as decoration, and the same sign turns into "[-]" once it is opened.
-      const fold = document.createElement("span");
-      fold.className = "fold";
-      fold.dataset.fold = box.uuid;
-      fold.setAttribute("role", "button");
-      fold.setAttribute("aria-expanded", String(open));
-      fold.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} ${box.name}`);
-      fold.textContent = open ? "[-]" : "[+]";
-      item.append(fold);
+    if (tree) {
+      item.classList.add("tree-row");
+      item.dataset.depth = String(depth);
+      item.style.setProperty("--row-depth", String(depth));
+      if (depth) item.append(railElement(depth, levelsContinuing(rows, index)));
+      // Every row of a level reserves the fold column, opened or not: a leaf's icon used to start a
+      // control's width to the left of its sibling's, which is the ragged edge people read as a bug
+      // in the tree even when the structure above it is right.
+      item.append(foldable ? foldControl(box, open) : spacerElement());
+    } else if (depth) {
+      item.dataset.depth = String(depth);
+      item.style.setProperty("--row-depth", String(depth));
     }
     const glyph = iconElement(box);
     const name = document.createElement("span");
+    // Named class because it is a column now: the tree aligns the fold square, the icon and the name
+    // on shared x, and a check that measures "the name" needs something stable to point at.
+    name.className = "box-name";
     name.textContent = box.name;
     const kind = document.createElement("span");
     kind.className = "kind";
@@ -3247,8 +3327,18 @@ function renderSide() {
       item.classList.add("content-hit");
     }
     // A box opened out of a search opens *in* that search: the term travels with it.
-    item.addEventListener("click", () => openBoxWithSearchTerm(box));
-    item.addEventListener("dblclick", () => openBoxWithSearchTerm(box));
+    // The fold square is not the box. Its own handler sits on the list and stops propagation there,
+    // which guards everything ABOVE the row — but a listener bound to the row fires on the way up,
+    // before the list ever sees the event, so the guard alone let a click on the square open the box
+    // as well. Caught by driving the square with the keyboard and looking at what was showing.
+    item.addEventListener("click", (event) => {
+      if (event.target.closest(".fold")) return;
+      openBoxWithSearchTerm(box);
+    });
+    item.addEventListener("dblclick", (event) => {
+      if (event.target.closest(".fold")) return;
+      openBoxWithSearchTerm(box);
+    });
     item.addEventListener("dragstart", (event) => {
       // One drag source for a box, so the marker that lets a zone recognise it is written in one
       // place. This row used to set `text/plain` by hand, which is invisible to a receiver while

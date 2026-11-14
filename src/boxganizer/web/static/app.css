@@ -30,7 +30,9 @@ body {
 
 .app {
   display: grid;
-  grid-template-columns: 17rem 1fr;
+  /* 18.5rem, not 17: the tree's fold column and guide rails are content, and a name that
+     ellipsises because the structure was drawn is a worse trade than a slightly wider pane. */
+  grid-template-columns: 18.5rem 1fr;
   height: 100vh;
 }
 
@@ -125,6 +127,13 @@ body {
   padding: 0.3rem 0.45rem;
   border-radius: 0.3rem;
   cursor: pointer;
+}
+
+/* One step per level, in both modes: the depth comes from the tree walk, the step from here. */
+#box-list li {
+  padding-left: calc(
+    var(--tree-pad, 0.3rem) + var(--row-depth, 0) * var(--tree-step, 0.9rem)
+  );
 }
 
 #box-list li:hover { background: var(--line); }
@@ -2592,16 +2601,99 @@ pre.text {
 
 .pane-direction { margin-left: 0.3rem; }
 
-/* Tree mode: one level of indentation per fold, and the [+/−] affordance before the icon. */
+/* Tree mode: one indent step per level, a drawn square for the fold, and a guide line from each
+   child back to the parent that holds it.
+
+   The three numbers are one source of truth: the row's padding, the rail's x and the control's width
+   all derive from them, so the line cannot end up beside the square it is meant to run out of. */
+#box-list {
+  --tree-step: 0.9rem;
+  --tree-pad: 0.3rem;
+  --fold-size: 1.15rem;
+  --rail-line: color-mix(in srgb, currentColor 30%, transparent);
+}
+
+/* Every tree row carries its own absolutely positioned rails, so it is the containing block. */
+#box-list li.tree-row { position: relative; }
+
+#box-list li .rails {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+#box-list li .rail {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 1px;
+  /* The x this level's fold control is centred on, for a row of this level's parent.
+     `round()` is not decoration: the variables are rem, so the sum lands between device pixels at
+     some depths and on one at others — measured at scale 1, a level-1 line came out inked and a
+     level-2 line at x=40.4 vanished into anti-aliasing. Snapped to the grid, every level draws
+     with the same weight. */
+  left: round(
+    calc(
+      var(--tree-pad) + (var(--rail-indent) - 1) * var(--tree-step) + var(--fold-size) / 2
+    ),
+    1px
+  );
+  background: var(--rail-line);
+}
+
+/* A row's own level stops at the middle of the line and turns right into the row. */
+#box-list li .rail.rail-end { height: 50%; }
+
+#box-list li .rail.rail-end::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: calc(100% - 1px);
+  width: round(calc(var(--tree-step) / 2), 1px);
+  height: 1px;
+  background: var(--rail-line);
+}
+
+/* The fold column: the drawn square, and the identical empty column on a row with nothing to open.
+   Same width, same centre — that is what makes the icons of a level line up. */
 #box-list li .fold {
-  width: 1.1rem;
-  margin-left: -0.2rem;
-  color: color-mix(in srgb, currentColor 62%, transparent);
-  font-variant-numeric: tabular-nums;
+  flex: 0 0 var(--fold-size);
+  width: var(--fold-size);
+  height: var(--fold-size);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0.2rem;
+  background: none;
+  color: color-mix(in srgb, currentColor 55%, transparent);
   cursor: pointer;
 }
 
-#box-list li .fold-empty { display: inline-block; width: 1.1rem; }
+#box-list li .fold svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.1;
+}
+
+/* Open means minus: the vertical stroke is the only difference, and the state the assistive
+   technology reads is the state the square shows. */
+#box-list li .fold[aria-expanded="true"] .fold-stem { display: none; }
+
+#box-list li .fold:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+#box-list li .fold:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#box-list li .fold-spacer { cursor: default; }
 
 .index-tally {
   display: grid;

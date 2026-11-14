@@ -39,6 +39,7 @@ dependency nobody asked for, and `make test` must stay fast and offline.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -96,6 +97,65 @@ def api_delete(base: str, path: str) -> None:
             pass
     except urllib.error.HTTPError:
         pass
+
+
+#: Row geometry, read in the page and returned as plain numbers. Single-quoted JS on purpose: these
+#: live inside Python double-quoted strings, and a nested double quote is how a check ends up
+#: measuring nothing.
+COLUMN_READ = (
+    "(sel) => {"
+    " const row = document.querySelector(sel);"
+    " if (!row) return null;"
+    " const box = row.getBoundingClientRect();"
+    " const centre = (q) => {"
+    "   const n = row.querySelector(q);"
+    "   if (!n) return -1;"
+    "   const r = n.getBoundingClientRect();"
+    "   return r.left + r.width / 2;"
+    " };"
+    " const edge = (q, side) => {"
+    "   const n = row.querySelector(q);"
+    "   return n ? n.getBoundingClientRect()[side] : -1;"
+    " };"
+    " const kind = row.querySelector('.kind');"
+    " return {"
+    "   fold: centre('.fold'),"
+    "   icon: centre('.box-icon'),"
+    "   name: edge('.box-name', 'left'),"
+    "   kindRight: kind ? edge('.kind', 'right') : -1,"
+    "   rowRight: box.right,"
+    "   kindSize: kind ? parseFloat(getComputedStyle(kind).fontSize) : -1,"
+    "   rowSize: parseFloat(getComputedStyle(row).fontSize),"
+    " };"
+    "}"
+)
+
+# Coordinates come back relative to #side, because that is the box an element screenshot captures:
+# a CSS pixel here is a pixel in the picture, with no subtraction left to get wrong. (No `//`
+# comments inside these strings — the fragments concatenate into ONE line, and a line comment
+# deletes everything after it, which arrives as "Unexpected end of input".)
+RAIL_READ = (
+    "(sel) => {"
+    " const row = document.querySelector(sel);"
+    " if (!row) return [];"
+    " const side = document.getElementById('side').getBoundingClientRect();"
+    " const out = [];"
+    " for (const rail of row.querySelectorAll('.rail')) {"
+    "   const r = rail.getBoundingClientRect();"
+    "   const after = getComputedStyle(rail, '::after');"
+    "   out.push({"
+    "     level: rail.dataset.railLevel,"
+    "     cls: rail.className,"
+    "     x: r.left + r.width / 2 - side.left,"
+    "     top: r.top - side.top,"
+    "     height: r.height,"
+    "     tickWidth: parseFloat(after.width),"
+    "     tickHeight: parseFloat(after.height),"
+    "   });"
+    " }"
+    " return out;"
+    "}"
+)
 
 
 def _run(base: str, executable: str | None) -> int:
@@ -1035,6 +1095,26 @@ def _run(base: str, executable: str | None) -> int:
             def fold_of(uuid: str):
                 return page.locator(f'#box-list li[data-uuid="{uuid}"] .fold')
 
+            def expanded(uuid: str) -> str:
+                return fold_of(uuid).get_attribute("aria-expanded") or ""
+
+            def columns(uuid: str) -> dict:
+                """Measured x of the row's columns, plus the chip's size and right edge."""
+                got = page.evaluate(COLUMN_READ, f'#box-list li[data-uuid="{uuid}"]')
+                assert got is not None, f"no row for {uuid}"
+                return got
+
+            def rails(uuid: str) -> list:
+                """Each guide line of a row: its x, its height, and the tick that turns right."""
+                return page.evaluate(RAIL_READ, f'#box-list li[data-uuid="{uuid}"]')
+
+            def stem(uuid: str) -> float:
+                """The vertical stroke that makes the square a plus; 0 when it is a minus."""
+                got = page.locator(
+                    f'#box-list li[data-uuid="{uuid}"] .fold .fold-stem'
+                ).evaluate("element => element.getBoundingClientRect().height")
+                return float(got)
+
             checks.check(
                 "list mode shows every box and offers no folds",
                 page.locator("#box-list li").count() >= 6 and fold_of(house_uuid).count() == 0,
@@ -1053,28 +1133,56 @@ def _run(base: str, executable: str | None) -> int:
                 f"branch={row_text(branch_uuid)!r} twig={row_text(twig_uuid)!r}",
             )
             checks.check(
-                "a box with no parent at all is a root, and offers no fold of its own",
-                "Treehouse" in row_text(house_uuid) and fold_of(house_uuid).inner_text() == "[+]",
-                row_text(house_uuid),
+                "a folded box offers a drawn square plus, and no bracket text survives",
+                "Treehouse" in row_text(house_uuid)
+                and expanded(house_uuid) == "false"
+                and page.locator(f'#box-list li[data-uuid="{house_uuid}"] .fold svg rect').count()
+                == 1
+                and stem(house_uuid) > 0
+                and "[" not in page.locator("#box-list").inner_text(),
+                f"expanded={expanded(house_uuid)!r} stem={stem(house_uuid)}",
             )
-            fold_of(house_uuid).click()
+            checks.check(
+                "the square is a button the keyboard can reach and work",
+                fold_of(house_uuid).evaluate("element => element.tagName") == "BUTTON"
+                and fold_of(house_uuid).evaluate(
+                    "element => element === document.activeElement"
+                ) is False,  # not focused yet; the assertion below focuses it and re-reads
+                fold_of(house_uuid).evaluate("element => element.tagName"),
+            )
+            # What is open in the main pane, before the keyboard acts. Opening a folder is not the
+            # same act as choosing it (the row's handler stops propagation for that), and the only
+            # way to prove it holds for Enter is to look at what is showing afterwards.
+            showing_before = page.locator("#main").inner_text()[:200]
+            fold_of(house_uuid).focus()
+            page.keyboard.press("Enter")
             page.wait_for_timeout(300)
             checks.check(
-                "one [+ unfolds exactly one level",
-                "Branch" in row_text(branch_uuid)
+                "Enter on the focused square opens the level, without choosing the box",
+                expanded(house_uuid) == "true"
+                and "Branch" in row_text(branch_uuid)
                 and row_text(twig_uuid) == ""
-                and fold_of(branch_uuid).inner_text() == "[+]",
-                f"branch={row_text(branch_uuid)!r} twig={row_text(twig_uuid)!r}",
+                and stem(house_uuid) == 0,
+                f"expanded={expanded(house_uuid)} stem={stem(house_uuid)} "
+                f"branch={row_text(branch_uuid)!r}",
             )
-            checks.check("the sign becomes [-] once opened",
-                         fold_of(house_uuid).inner_text() == "[-]")
+            checks.check(
+                "one level unfolds at a time, and its own square is still a plus",
+                expanded(branch_uuid) == "false" and stem(branch_uuid) > 0,
+                f"branch expanded={expanded(branch_uuid)}",
+            )
+            checks.check(
+                "and the keyboard opened the level without choosing the box",
+                page.locator("#main").inner_text()[:200] == showing_before,
+                f"main pane unchanged across Enter: {showing_before[:60]!r}",
+            )
 
             page.wait_for_timeout(100)
             checks.check(
                 "and the child folds in turn, recursively",
                 "Branch" in row_text(branch_uuid)
                 and row_text(twig_uuid) == ""
-                and fold_of(branch_uuid).inner_text() == "[+]",
+                and expanded(branch_uuid) == "false",
                 f"branch={row_text(branch_uuid)!r} twig={row_text(twig_uuid)!r}",
             )
             checks.check(
@@ -1095,6 +1203,95 @@ def _run(base: str, executable: str | None) -> int:
                 "the depth is visible, not only implied",
                 indent_of(twig_uuid) > indent_of(house_uuid),
                 f"house={indent_of(house_uuid)} twig={indent_of(twig_uuid)}",
+            )
+            # --- geometry, measured rather than declared -------------------------------------
+            house_cols = columns(house_uuid)
+            # "Shared twice" is a root by rule (two filing parents) and holds nothing of its own, so
+            # it is the row that proves a leaf keeps the column a control would have taken.
+            leaf_cols = columns(shared["uuid"])
+            checks.check(
+                "a leaf reserves the fold column, so one level shares one x",
+                abs(house_cols["fold"] - leaf_cols["fold"]) < 0.75
+                and abs(house_cols["icon"] - leaf_cols["icon"]) < 0.75
+                and abs(house_cols["name"] - leaf_cols["name"]) < 0.75,
+                f"fold {house_cols['fold']:.2f} vs {leaf_cols['fold']:.2f}, "
+                f"icons {house_cols['icon']:.2f} vs {leaf_cols['icon']:.2f}, "
+                f"names {house_cols['name']:.2f} vs {leaf_cols['name']:.2f}",
+            )
+            twig_rails = rails(twig_uuid)
+            branch_cols = columns(branch_uuid)
+            checks.check(
+                "a line runs from each child to the square of the parent that holds it",
+                len(twig_rails) == 2
+                and abs(twig_rails[0]["x"] - house_cols["fold"]) < 1.5
+                and abs(twig_rails[1]["x"] - branch_cols["fold"]) < 1.5
+                and all(rail["height"] > 6 for rail in twig_rails),
+                f"rails={[(r['level'], round(r['x'], 2)) for r in twig_rails]} "
+                f"house fold={house_cols['fold']:.2f} branch fold={branch_cols['fold']:.2f}",
+            )
+            checks.check(
+                "and the last child's line turns right into the row it ends at",
+                twig_rails[-1]["tickWidth"] > 2 and twig_rails[-1]["tickHeight"] > 0,
+                f"tick={twig_rails[-1]['tickWidth']}x{twig_rails[-1]['tickHeight']}",
+            )
+            # Ink, not boxes. The DOM reported a level-2 rail at x=40.9 standing 34px tall, and the
+            # screen showed nothing there: a 1px rule that lands between device pixels is smeared
+            # away at scale 1, and which depths land between them is an accident of the rem values.
+            # So the picture the browser painted is sampled, at the x each rail claims.
+            from PIL import Image  # a dependency of the app itself (miniatures), not a new one
+
+            pane_pixels = Image.open(io.BytesIO(page.locator("#side").screenshot())).convert("L")
+            ink_samples = pane_pixels.load()
+
+            def ink(rail: dict) -> float:
+                col = round(rail["x"])
+                top = int(rail["top"]) + 1
+                bottom = int(rail["top"] + rail["height"]) - 1
+                if bottom <= top or col < 1 or col >= pane_pixels.width - 1:
+                    return -1.0
+                def darker(y: int) -> int:
+                    beside = min(ink_samples[col - 4, y], ink_samples[col + 4, y])
+                    return 1 if ink_samples[col, y] < beside - 10 else 0
+
+                lit = sum(darker(y) for y in range(top, bottom))
+                return lit / (bottom - top)
+
+            drawn = [
+                {"level": rail["level"], "x": round(rail["x"], 1), "ink": round(ink(rail), 2)}
+                for rail in rails(twig_uuid)
+            ] + [
+                {"level": rail["level"], "x": round(rail["x"], 1), "ink": round(ink(rail), 2)}
+                for rail in rails(branch_uuid)
+            ]
+            checks.check(
+                "every guide line is painted, at every depth it claims",
+                len(drawn) == 3 and all(sample["ink"] > 0.9 for sample in drawn),
+                drawn,
+            )
+            checks.check(
+                "the parent's line runs unbroken down the whole level",
+                all(
+                    ink(rail) > 0.9
+                    for rail in rails(twig_uuid)
+                    if rail["level"] == "1" and rail["height"] > 20
+                ),
+                [round(ink(rail), 2) for rail in rails(twig_uuid)],
+            )
+            checks.check(
+                "the type chip stays small, grey and against the right edge",
+                house_cols["kindSize"] < house_cols["rowSize"]
+                and abs(house_cols["kindRight"] - house_cols["rowRight"]) < 14
+                and house_cols["kindRight"] > house_cols["name"],
+                f"kind {house_cols['kindSize']}px in a {house_cols['rowSize']}px row, right"
+                f"={house_cols['kindRight']:.1f} of {house_cols['rowRight']:.1f}",
+            )
+            checks.check(
+                "the pane is wide enough for the tree to still show names",
+                page.locator("#side").bounding_box()["width"] >= 290
+                and page.locator(
+                    f'#box-list li[data-uuid="{twig_uuid}"] .box-name'
+                ).evaluate("element => element.scrollWidth <= element.clientWidth + 1"),
+                f"pane={round(page.locator('#side').bounding_box()['width'])}px",
             )
             page.locator("#pane-view-list").click()
             page.wait_for_timeout(300)
@@ -1269,8 +1466,10 @@ def _run(base: str, executable: str | None) -> int:
             checks.check(
                 "and the folder is still open, with its child where it was left",
                 page.locator(f'#box-list li[data-uuid="{kept[1]}"]').count() == 1
-                and page.locator(f'#box-list li[data-uuid="{kept[0]}"] .fold').inner_text()
-                == "[-]",
+                and page.locator(
+                    f'#box-list li[data-uuid="{kept[0]}"] .fold'
+                ).get_attribute("aria-expanded")
+                == "true",
             )
             page.locator("#pane-view-list").click()
             page.wait_for_timeout(300)

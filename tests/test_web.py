@@ -2346,6 +2346,13 @@ def test_a_folder_takes_a_box_dropped_from_the_panel(client: TestClient) -> None
     assert ".children-view.drop-target" in css
 
 
+def _row_handler(script: str, kind: str) -> str:
+    """The body of the left-pane row's own `kind` handler, and nothing around it."""
+    start = script.index(f'item.addEventListener("{kind}", (event) => {{')
+    end = script.index("\n    });", start)
+    return script[start:end]
+
+
 def test_a_box_opened_out_of_a_search_opens_in_that_search(client: TestClient) -> None:
     """The result came out of a question, and opening it should not lose the question.
 
@@ -2364,9 +2371,18 @@ def test_a_box_opened_out_of_a_search_opens_in_that_search(client: TestClient) -
     )
     assert "if (term)" in carrier, "no term, no handoff: an ordinary open stays ordinary"
 
-    # both doors into a box carry it — the row and its menu
-    assert 'item.addEventListener("click", () => openBoxWithSearchTerm(box));' in script
-    assert 'item.addEventListener("dblclick", () => openBoxWithSearchTerm(box));' in script
+    # Both doors into a box carry it — the row's click, the row's double click, and the menu entry.
+    # The row's two handlers take the event now, and decline it when it came from the fold square:
+    # that control is bound on the list, which the click reaches only AFTER the row's own handler,
+    # so `stopPropagation` at the list cannot protect the row from itself. Read as slices rather
+    # than as one literal line, because the guard is a statement and a pinned line would freeze the
+    # formatting of a three-line body.
+    for kind in ("click", "dblclick"):
+        handler = _row_handler(script, kind)
+        assert "openBoxWithSearchTerm(box)" in handler, f"the row {kind} no longer carries the term"
+        assert 'event.target.closest(".fold")' in handler, (
+            f"the row {kind} opens a box when the fold square is pressed"
+        )
     assert '{ label: "Open", run: () => openBoxWithSearchTerm(box) }' in script, (
         "a menu entry that calls instead of describing opens the box while the menu is being built"
     )
