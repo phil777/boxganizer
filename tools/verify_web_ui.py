@@ -102,6 +102,16 @@ def api_delete(base: str, path: str) -> None:
 #: Row geometry, read in the page and returned as plain numbers. Single-quoted JS on purpose: these
 #: live inside Python double-quoted strings, and a nested double quote is how a check ends up
 #: measuring nothing.
+def mean_luminance(png: bytes) -> float:
+    """Average brightness of what the browser painted, 0-255. Pillow ships with the app."""
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(png)).convert("L")
+    pixels = image.load()
+    total = sum(pixels[x, y] for y in range(image.height) for x in range(image.width))
+    return total / (image.width * image.height)
+
+
 COLUMN_READ = (
     "(sel) => {"
     " const row = document.querySelector(sel);"
@@ -829,6 +839,56 @@ def _run(base: str, executable: str | None) -> int:
                 f"{page.locator('#pending-reindex').inner_text()}",
             )
 
+            # Where the actions sit, and whether they look like their own thing. Measured: the band
+            # has to end above the first name it can act on, and it has to be separated from the
+            # counts above it and the list below it — a control that touches a list reads as a
+            # caption of that list, which is the mistake this row is here to stop making.
+            band = page.locator("#index-actions").bounding_box()
+            tally_box = page.locator("#index-tally").bounding_box()
+            first_row = page.locator("#index-pending-list li").first.bounding_box()
+            band_paint = page.locator("#index-actions").evaluate(
+                "element => getComputedStyle(element).backgroundColor"
+            )
+            dialog_paint = page.locator("#index-modal").evaluate(
+                "element => getComputedStyle(element).backgroundColor"
+            )
+            checks.check(
+                "the actions sit above the files they act on",
+                band is not None
+                and first_row is not None
+                and band["y"] + band["height"] <= first_row["y"] + 0.5,
+                f"band ends {band and round(band['y'] + band['height'])}"
+                f" first file starts {first_row and round(first_row['y'])}",
+            )
+            checks.check(
+                "and the band is separated from both its neighbours",
+                band is not None
+                and tally_box is not None
+                and first_row is not None
+                and band["y"] - (tally_box["y"] + tally_box["height"]) > 1
+                and first_row["y"] - (band["y"] + band["height"]) > 1,
+                f"gap above {band and round(band['y'] - tally_box['y'] - tally_box['height'], 1)}"
+                f" gap below "
+                f"{first_row and round(first_row['y'] - band['y'] - band['height'], 1)}",
+            )
+            checks.check(
+                "it is drawn as its own surface, not as more dialog",
+                band_paint != dialog_paint,
+                f"band {band_paint} on dialog {dialog_paint}",
+            )
+            # The computed colour proved only that two strings differ: the band is a 7% tint with an
+            # alpha of 0.11, which is technically not the same as white and, on a screen, might as
+            # well be. So measure what the browser painted. Mean luminance of the band against the
+            # counts above it has to differ by more than a rounding artefact, or the separation is a
+            # line in a stylesheet and nothing a person can see.
+            band_lum = mean_luminance(page.locator("#index-actions").screenshot())
+            tally_lum = mean_luminance(page.locator("#index-tally").screenshot())
+            checks.check(
+                "the band is visible, not merely declared",
+                abs(band_lum - tally_lum) >= 4.0,
+                f"band mean luminance {band_lum:.1f} against counts {tally_lum:.1f}",
+            )
+
             look_box = page.locator("#pending-look").bounding_box()
             close_box = page.locator("#index-close").bounding_box()
             checks.check(
@@ -1024,6 +1084,23 @@ def _run(base: str, executable: str | None) -> int:
                 "asking again leaves it where it was left",
                 after["missing"]["work"] == 0 and after["wanted"] == before["wanted"],
                 f"work={after['missing']['work']} wanted={after['wanted']}",
+            )
+            # Same dialog, after a pass: the counts changed and the list may have emptied, but the
+            # actions must not have drifted back under whatever names are left.
+            band_after = page.locator("#index-actions").bounding_box()
+            tally_after = page.locator("#index-tally").bounding_box()
+            summary_after = page.locator("#index-pending-summary").bounding_box()
+            checks.check(
+                "after the pass the actions still sit between the counts and the names",
+                band_after is not None
+                and tally_after is not None
+                and summary_after is not None
+                and band_after["y"] >= tally_after["y"] + tally_after["height"] - 0.5
+                and summary_after["y"] >= band_after["y"] + band_after["height"] - 0.5,
+                f"counts end {tally_after and round(tally_after['y'] + tally_after['height'])}"
+                f" band {band_after and round(band_after['y'])}-"
+                f"{band_after and round(band_after['y'] + band_after['height'])}"
+                f" names start {summary_after and round(summary_after['y'])}",
             )
             tallied = " ".join(page.locator("#index-tally").inner_text().split())
             checks.check(

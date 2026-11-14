@@ -2553,11 +2553,23 @@ pre.text {
 #check-modal .small { font-size: 0.78rem; margin: 0; }
 #check-modal footer { display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.4rem; }
 
-#index-modal footer {
+/* The band the actions live on: a surface of its own, separated from the counts above it and the
+   names below it, so the line reads as the seam between knowing and doing rather than as a caption
+   of whichever neighbour it drifted next to. */
+.index-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 0.4rem;
-  margin-top: 0.5rem;
+  margin: 0.55rem 0 0.65rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+
+.index-actions:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 
 #index-modal .dialog-close {

@@ -261,13 +261,18 @@
            under it, and a list on its own cannot say how large the library is -- which is the
            question "833 to reindex" was really asking. -->
       <dl id="index-tally" class="index-tally"></dl>
-      <p id="index-pending-summary" class="muted"></p>
-      <ul id="index-pending-list" class="pending-list"></ul>
-      <footer>
+      <!-- The actions sit between the numbers and the names, on a band of their own. Read down the
+           dialog it is: what the index holds, what you can do about it, and then the files. The
+           buttons act on the whole library, not on a listed row, so putting them under the list
+           made them look like a caption of it -- and a person who has started reading names has to
+           scroll back to press anything. -->
+      <div id="index-actions" class="index-actions" role="group" aria-label="What to do about the index">
         <button type="button" id="pending-look">update index status</button>
         <button type="button" id="pending-reindex">Reindex</button>
         <button type="button" id="index-close" class="dialog-close">Close</button>
-      </footer>
+      </div>
+      <p id="index-pending-summary" class="muted"></p>
+      <ul id="index-pending-list" class="pending-list"></ul>
     </dialog>
 
     <dialog id="check-modal" aria-label="Check the library">
