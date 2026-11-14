@@ -3426,12 +3426,10 @@ pre.text {
   background: color-mix(in srgb, #1a7f37 12%, transparent);
 }
 
-/* The left pane's resource landing strip: full width, three lines tall, and a target
-   while a drag is over it. Height is the point — a strip you have to aim at is a strip
-   people stop using, and a file released outside any zone is a file that vanished. */
 /* The whole left pane accepts an arrival from outside the page. The outline is the one the
    labelled strip used, moved onto the region that is now the target; a nearer zone (a row, a
-   folder listing, a viewport) paints its own highlight and the pane stands down for it. */
+   folder listing, a viewport) paints its own highlight and the pane stands down for it. A zone
+   that takes a drop without showing one is the failure ADR 45 is written against. */
 #side.drop-target {
   outline: 2px dashed var(--accent);
   outline-offset: -3px;

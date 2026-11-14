@@ -69,3 +69,8 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0038   | A drop zone promises only what it can finish, and an address is never a filing instruction | accepted |
 | 0039   | A search field with a list under it narrows the list; the window is only for when there is none | accepted |
 | 0040   | A drag announces its kind in the type list, because values arrive only at the drop | accepted |
+| 0041   | A folder that is not here is not an empty folder | accepted |
+| 0042   | Looking at the files is an action, not a page load | accepted |
+| 0043   | WAL so a reader cannot refuse a writer, and not one word about speed | accepted |
+| 0044   | A resource that is gone is counted as gone, not as work | accepted |
+| 0045   | The left pane folds on filing choices, not on containers — and every drop target paints | accepted |

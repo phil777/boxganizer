@@ -82,10 +82,47 @@ def post(base: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
 
 
 def headline(body: dict) -> str:
-    """What the left pane would say, following `indexWords`/`indexWaiting` in app.js."""
+    """What the left pane says at this tree: the offer is the server's work count (ADR 44).
+
+    Mirrors `indexWords`/`indexWaiting` in app.js line for line, including the two nouns: "reindex"
+    only when something was read and has since changed. It reads `missing` rather than subtracting
+    gone folders here, because the whole point of ADR 44 is that the split is the server's to make —
+    a tool that re-derived it would drift from the page the way the old formula already did.
+    """
+    missing = body.get("missing") or {}
+    waiting = (
+        int(missing["work"]) if isinstance(missing.get("work"), int) else headline_offered(body)
+    )
+    reindex_work = (
+        int(missing["work_stale"])
+        if isinstance(missing.get("work_stale"), int)
+        else int(body.get("stale", 0))
+    )
+    if reindex_work:
+        return f"{waiting} to reindex"
+    if waiting:
+        return f"{waiting} to index"
+    if not int(body.get("wanted", 0)):
+        return "nothing to index"
+    return f"{int(body.get('indexed', 0))} indexed"
+
+
+def headline_offered(body: dict) -> int:
+    """The pre-ADR-44 arithmetic: stale plus untouched, minus what sits under a missing root."""
     waiting = int(body.get("stale", 0)) + int(body.get("untouched", 0))
     gone = sum(int(root.get("waiting", 0)) for root in body.get("missing_roots", []) or [])
-    offered = max(waiting - gone, 0)
+    return max(waiting - gone, 0)
+
+
+def headline_pre44(body: dict) -> str:
+    """The wording the pane used before ADR 44, kept so both are printed and compared.
+
+    On a library whose backlog is mostly folders that are not on this machine, this is the
+    number that never comes down — it counts resources no reindex can reach. It is still the only
+    reading available from `--old-build`, whose status answer has no `missing` at all, and it is
+    what the un-amended tables in `reindex_diagnosis.md` were measured with.
+    """
+    offered = headline_offered(body)
     if int(body.get("stale", 0)):
         return f"{offered} to reindex"
     if offered:
@@ -179,7 +216,10 @@ def main() -> int:
 
         _code, _secs, before = get(base, "/api/index/status")
         say(f"[{args.label}] build={build}  db={db}")
-        say(f"[{args.label}] before: headline={headline(before)!r}  {counts(before)}")
+        say(
+            f"[{args.label}] before: headline={headline(before)!r} (old rule "
+            f"{headline_pre44(before)!r})  {counts(before)}"
+        )
         if "observed" in before:
             say(f"[{args.label}] observed (HEAD only): {before['observed']}")
 
@@ -218,7 +258,10 @@ def main() -> int:
         say(f"[{args.label}] polls={polls} (running true on {running_seen}) "
             f"wall={time.perf_counter() - began:.1f}s")
         say(f"[{args.label}] job.last = {json.dumps(after.get('last'))}")
-        say(f"[{args.label}] after:  headline={headline(after)!r}  {counts(after)}")
+        say(
+            f"[{args.label}] after:  headline={headline(after)!r} (old rule "
+            f"{headline_pre44(after)!r})  {counts(after)}"
+        )
         same = headline(before) == headline(after)
         say(
             f"[{args.label}] VERDICT: {headline(before)!r} -> {headline(after)!r} "

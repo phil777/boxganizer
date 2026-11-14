@@ -108,7 +108,8 @@ the library name holds what belongs to the library rather than to one box, in th
 tags…, Check the library, a line, Index what changed, Re-read the whole library, a line, and About
 last — About is the entry that leaves the work to describe the tool, so it sits at the end rather
 than at the place every click passes through. Along the bottom, in front of the count, the index reports
-itself permanently — `75 indexed`, or `2 out of date`, or `indexing…`.
+itself permanently — `75 indexed`, or `2 to reindex`, or `reading 7 of 12…`. The line is the entry to
+the **Index status** dialog.
 
 **Right: one box, content first.** This note is being *read*, not edited: a note shows an
 `edit` switch, and the sheet itself carries a small `read-only` / `editing` cue, so the note's
@@ -292,13 +293,34 @@ means moving the tag in ☰ **Manage tags…**, not editing the box. Colours are
 place in the hierarchy — one hue per branch, lighter as it goes down — so the tree is visible
 without reading it. ADR 19.
 
-**Files and links can be dropped in.** At the bottom of the left pane, a strip says *drop resources
-here*: release a file on it and a box appears, typed by inference, named after the file, with a copy
-captured into the library. Drop it on a folder, a grid cell, the desktop, a viewport pane or the
-library list and you get the same box *plus* the filing or placement you aimed at. A browser never
+**Files and links can be dropped anywhere in the whole left pane.** There is no strip to aim at any
+more: release a file over the pane and a box appears, typed by inference, named after the file, with
+a copy captured into the library. Drop it on a folder, a grid cell, the desktop, a viewport pane or
+the library list and you get the same box *plus* the filing or placement you aimed at — the nearer
+zone answers the drop and the pane stands down for it. The pane lights up for what it can finish, and
+only because it lights up: a region that takes a file without showing that it will is the failure
+ADR 45 is written against. A browser never
 tells the page where a file is, so the bytes go up and the server decides what the box is (ADR 37);
 the highlight is read from the drag's type list, because the file itself is withheld until you let go
 (ADR 38).
+
+**The pane reads as a list or as a tree.** Two icon buttons by the search field switch it: the list
+shows every box, and the tree has each box that was
+folded under the folder it was filed in, one `[+]` at a time, however deep. A box filed in two
+folders stays a root, because choosing one of them would be the page inventing a fact about the
+library — and a folder created by `box init` to hold everything is not a place you filed something,
+so containers are not counted as parents (ADR 45). Three buttons set the order — by name, by type
+then name, by how much each box holds — with an arrow at the far right for ascending or descending,
+and the order applies inside each opened level. The view, the order, the direction and which
+folders were open are remembered for the next time you open the page.
+
+**The index line opens a dialog titled `Index status`.** It states four counts — files followed for
+the index, up to date, need reindexing, and not indexed yet — and when there are any, a fifth line
+naming the resources that are gone from this machine: folders deleted out from under the library.
+Those are never offered as work, because pressing Reindex cannot reach a file that is not here; they
+stay inside the count of what the index follows, and nothing is removed to make the numbers look
+calm (ADRs 41 and 44). **update index status** asks the server to look at the files; **Reindex**
+does the work, and hands the watching to the line at the bottom of the pane.
 
 Drag a **link** instead and it becomes a link box — named from the link text you selected, pointing at
 the address, with nothing fetched by the page or the server. A box that downloaded what it was shown

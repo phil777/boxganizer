@@ -36,17 +36,23 @@ panel — the last row of the table.
 
 ## How the page is put together
 
-**At the bottom of the left pane is a landing strip: drop resources here.** A file dragged onto it —
-from the desktop, a file manager, or out of a directory box — becomes a box: the type is guessed from the
-file, it is named after the object, and a copy is captured into the library (ADR 35), because a file
-dropped into a *library* is being filed, not merely shown. The strip is full width and about three lines
-tall on purpose: a target you have to aim at is one you stop using.
+**Drop a file anywhere in the whole left pane.** There is no strip to aim at any more — the labelled
+rectangle at the bottom of the list is gone, and the pane took its place. A file released over the
+pane — from the desktop, a file manager, or out of a directory box — becomes a box: the type is
+guessed from the file, it is named after the object, and a copy is captured into the library (ADR 35),
+because a file dropped into a *library* is being filed, not merely shown. Nothing has to be aimed at:
+a target you have to find is one you stop using, and a bigger target is only honest if it shows that
+it is a target. So the pane draws an outline while the drag is over it, and every zone that can take
+the same class paints its own — a region that swallows a file while the page says nothing is the
+failure ADR 45 is written against.
 
 It lights up for what it can finish, and that is not the same as what a drag looks like halfway
 through. A file dragged from another window exposes `Files` in its type list while **the file itself
 is still withheld until you let go**, so the highlight is decided from the type list, not from the
 file list — which is empty at exactly the moment you are deciding whether to drop (ADR 38). Drag a
-**box** over the strip and it stays plain, because that is the list's business, not the strip's.
+**box** over the pane and it stays plain, because that is the list's business. A drop that lands on a
+row, a folder listing or a viewport is answered by that zone and the pane stands down — one gesture,
+one parent.
 
 **Three payloads, three outcomes.** A **file** becomes a captured box, as above; drop it on a folder,
 a grid cell, the desktop, a viewport pane, a mindmap (the bare picture files it as a branch, a node
@@ -118,12 +124,38 @@ an unrelated edit can't copy a file by accident. ☰ beside the name at the top 
 to one box, in this order: **Manage tags…**, **Check the library**, a line, **Index what changed**,
 **Re-read the whole library**, a line, and **About** last — About is the entry that leaves the work to
 describe the tool, so it sits at the end rather than at the place every click passes through.
+
+**The list beside it reads either way, and remembers which.** Two icon buttons at the top of the pane
+switch between the flat list and a tree: in the tree, each box that was filed in exactly one folder is
+folded under the folder it was filed in, with a `[+]` before the name, one level at a time however
+deep it goes. A box filed in two folders stays at the top — it has no single place to hide, and picking
+one would be the page inventing a fact about the library — and the folders `box init` makes to hold
+everything (the root, and the cabinet) are not counted as places you filed something, or the top level
+would be the thing that disappeared (ADR 45). Three buttons set the order: by name, by type then name,
+by how much each box holds; an arrow at the far right turns it around, ascending or descending, and the
+order applies *inside* each opened level, because that is the question a folded level asks. The root
+stays first whatever the order says. With a search term in the field the hits are shown flat: a tree
+that folded away the boxes the search just found is a search nobody trusts. The view, the order, the
+direction and which folders were open are kept for the next visit, on this browser and not in the
+library — a database that travels should not carry one person's window shape with it.
 Along the bottom,
-in front of the box count, the index reports itself all the time — `75 indexed`, or `2 out
-of date`, or `reading 12 of 80…` — with the detail on hover, including which files hold nothing to
+in front of the box count, the index reports itself all the time — `75 indexed`, or `2 to
+reindex`, or `reading 7 of 12…` — with the detail on hover, including which files hold nothing to
 read. **Saving a box does not wait for its file to be read**: the rows are written, the answer comes
 back, and the reading happens behind that line with a bar that counts **files**, so you can see how
-much of the folder you just pointed at has been gone through. Taking a box *out* of the index is
+much of the folder you just pointed at has been gone through. The bar's numbers are the sentence's
+numbers — `7 / 12` beside `reading 7 of 12…` — and a total that has not been worked out yet is not
+presented as one: while the count is unknown the line reads `reading…` and the bar says `0 read`, so a
+pass that turned out to have nothing to do cannot look like a pass that is stuck. Pressing the line opens a dialog titled **Index status**: four
+counts (files followed for the index, up to date, need reindexing, not indexed yet), and when there
+are any, a line saying how many watched resources are **gone from this machine**, with the folders
+they were in named. Gone is not work. Those files are not on this computer, so `Reindex` cannot reach
+them; counting them as work is how a library ends up offering 833 things to do forever, and removing
+them from the index to quiet the number would be losing the record that you once had them. They stay
+in the count of what is followed, the dialog says what is missing, and `update index status` is the
+button that looks at the files — a check is an action, so it is no longer something a page load does
+(ADRs 41, 42 and 44). Put the folder back and ask again: nothing had to be un-set.
+ Taking a box *out* of the index is
 immediate — a stale document staying findable is a wrong answer, not a slow one. A file the index
 refuses is named there rather than left as a stalled bar (ADR 32). A **box** dropped where no view
 claimed it files into the box you are looking at, so the whole pane takes it; a **file** dropped where

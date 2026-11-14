@@ -206,3 +206,102 @@ def test_the_docs_answer_the_five_questions_this_round_asked() -> None:
     ):
         assert (ROOT / "doc" / "adr" / f"{slug}.md").exists(), f"ADR {number} is missing"
         assert number in index, f"ADR {number} is not in the index"
+
+
+def test_no_document_still_points_at_a_control_that_was_deleted() -> None:
+    """A guide that describes a removed control is worse than no guide, because it is trusted.
+
+    The "drop resources here" strip is gone (ADR 45): the whole left pane took its place. Two
+    shipped documents told the reader to aim at the strip, in its own words, and nothing failed.
+    That is the rot this catches — not the phrasing of a sentence, but a sentence that sends a
+    person looking for something that is not on the screen.
+    """
+    for rel in ("README.md", "doc/web-app.md"):
+        text = (ROOT / rel).read_text(encoding="utf-8").lower()
+        assert "drop resources here" not in text, f"{rel} still advertises the deleted strip"
+        assert "landing strip" not in text, f"{rel} still describes the pane as having a strip"
+
+
+def test_the_pane_and_its_index_dialog_are_readable_in_both_documents() -> None:
+    """Three behaviours changed this round; each must be findable in the tour *and* the reference.
+
+    Same rule as the round before it: these are the sentences a person needs before trying the
+    gesture, and they rot by paraphrase, not by deletion. Compared with whitespace runs collapsed
+    and markdown emphasis stripped, because a sentence that wraps mid-phrase is the same sentence.
+    """
+
+    def flat(text: str) -> str:
+        return " ".join(text.replace("*", "").split())
+
+    readme = flat(README.read_text(encoding="utf-8"))
+    web_app = flat((ROOT / "doc" / "web-app.md").read_text(encoding="utf-8"))
+
+    checks = {
+        # the strip is gone and the pane is the target
+        "whole-pane drop": ("whole left pane", "no strip to aim at"),
+        # the dialog is named, and gone resources are named separately from work
+        "Index status, with gone kept out of the offer": (
+            "Index status",
+            "gone from this machine",
+        ),
+        # the tree folds on filing, not on containers
+        "a tree that folds": ("folded under the folder it was filed in",),
+        # and the pane keeps the person's own shape
+        "the pane remembers": ("which folders were open",),
+    }
+    for label, needles in checks.items():
+        for text, name in ((readme, "README.md"), (web_app, "doc/web-app.md")):
+            for needle in needles:
+                assert needle in text, f"{name} says nothing about {label} (looked for {needle!r})"
+
+
+def test_every_adr_written_is_in_the_index() -> None:
+    """An ADR nobody can find is a decision nobody follows.
+
+    The index stopped at 0040 while five more were written, and the only guard was a list of
+    numbers this round happened to mention. This reads the directory instead: a new record must be
+    indexed, whoever wrote it and whatever it is about.
+    """
+    index = (ROOT / "doc" / "adr" / "README.md").read_text(encoding="utf-8")
+    numbers = sorted(path.name[:4] for path in (ROOT / "doc" / "adr").glob("0*.md"))
+    assert len(numbers) >= 45, f"the ADR directory looks truncated: {len(numbers)} files"
+    missing = [number for number in numbers if number not in index]
+    assert not missing, f"ADR {', '.join(missing)} is written but not in doc/adr/README.md"
+
+
+#: Wording the tour and the reference put in code spans, quoted as what the page says, with the
+#: template in app.js that produces it. A document that quotes wording the page no longer emits is
+#: the failure this exists for: `2 out of date` sat in both files after the code stopped saying it,
+#: and the only copy that still did was an untracked `build/` directory nobody reads.
+QUOTED_PAGE_WORDING = {
+    "`75 indexed`": "} indexed",
+    "`2 to reindex`": " to reindex",
+    "`reading 7 of 12…`": "reading ${queue.done} of ${queue.total}",
+    "`7 / 12`": "${queue.done} / ${queue.total}",
+    "`0 read`": "${queue.done} read",
+    "`reading…`": '"reading…"',
+    "`2 of 4 inside`": "of ${children.length} inside",
+    "`1 match inside`": "1 match inside",
+}
+
+
+def test_wording_quoted_as_the_pages_own_comes_from_the_page() -> None:
+    """Every code-spanned sentence fragment in the docs has to be reachable in app.js."""
+    script = (ROOT / "src" / "boxganizer" / "web" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    docs = {
+        "README.md": " ".join(README.read_text(encoding="utf-8").replace("*", "").split()),
+        "doc/web-app.md": " ".join(
+            (ROOT / "doc" / "web-app.md").read_text(encoding="utf-8").replace("*", "").split()
+        ),
+    }
+    for quoted, template in QUOTED_PAGE_WORDING.items():
+        assert template in script, f"app.js no longer produces {quoted} ({template!r} is gone)"
+        somewhere = any(quoted in text for text in docs.values())
+        assert somewhere, f"nothing quotes {quoted} any more; retire it from this list"
+
+    # the stale wording, named so it cannot come back through a document
+    assert "out of date`" not in script, "app.js emits `out of date` again — check the docs"
+    for name, text in docs.items():
+        assert "out of date`" not in text, f"{name} quotes wording the page does not produce"
