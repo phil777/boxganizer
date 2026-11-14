@@ -884,6 +884,111 @@ def _run(base: str, executable: str | None) -> int:
             api_delete(base, f"/api/boxes/{shelf['uuid']}")
             shutil.rmtree(gone_dir.parent, ignore_errors=True)
 
+        print("pressing Reindex moves the number, and it stays moved")
+        # The complaint in its positive form. "I have 833 to reindex" was one half; the other half
+        # was that the number did not move when the button was pressed, then came back. So this
+        # makes exactly one piece of honest work — a file whose contents change under an indexed
+        # folder — presses the button in the dialog, and requires the count to fall and to still be
+        # fallen after a second look. Nothing is deleted here: `wanted` must not move, because a
+        # reindex that lowers its own number by forgetting resources would pass this test and still
+        # be a data-loss bug (ADR 44).
+        again_dir = Path(tempfile.mkdtemp(prefix="verify-reindex-dir-")) / "boiler"
+        again_dir.mkdir(parents=True)
+        log_file = again_dir / "log.md"
+        log_file.write_text("pressure 1.1 bar\n", encoding="utf-8")
+        try:
+            api(
+                base,
+                "/api/boxes",
+                {
+                    "name": "Reindexable",
+                    "box_type": "indexed-directory",
+                    "resource_uri": str(again_dir),
+                    "index_resource": True,
+                },
+            )
+            api(base, "/api/index/run", {"scope": "everything"})
+            for _ in range(60):
+                page.wait_for_timeout(200)
+                if not api(base, "/api/index/status")["running"]:
+                    break
+            log_file.write_text("pressure 1.1 bar\nread again at 2.4 bar\n", encoding="utf-8")
+            api(base, "/api/index/check", {})
+            before = api(base, "/api/index/status")
+            checks.check(
+                "one changed file is offered as exactly one piece of work",
+                before["missing"]["work"] == 1,
+                f"work={before['missing']['work']} wanted={before['wanted']}",
+            )
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(500)
+            page.locator("#index-status").click()
+            page.wait_for_timeout(400)
+            page.locator("#pending-reindex").click()
+            for _ in range(90):
+                page.wait_for_timeout(200)
+                if not api(base, "/api/index/status")["running"]:
+                    break
+            page.wait_for_timeout(600)
+            during = api(base, "/api/index/status")
+            checks.check(
+                "the work is gone from the offer",
+                during["missing"]["work"] == 0,
+                f"work={during['missing']['work']}",
+            )
+            checks.check(
+                "and nothing was dropped to make the number look better",
+                during["wanted"] == before["wanted"],
+                f"wanted {before['wanted']} -> {during['wanted']}",
+            )
+            # A second look, and a second ask: the number must not come back. This is the sentence
+            # "then it stops and says 833 again" turned into a check. The button asked is
+            # `update index status`, not Reindex — with the work done the dialog hides Reindex,
+            # which is the correct answer to a request for work that does not exist (found by
+            # trying to click it: the element was there and simply not shown).
+            # Pressing Reindex closes the dialog on purpose (app.js: `close()` then
+            # `runIndexation`) so the person watches the bar carry the pass instead of staring at a
+            # panel frozen at the moment they asked. What has to survive that is the answer, so the
+            # pane is reopened and read, not assumed still open.
+            checks.check(
+                "Reindex hands the watching to the bar",
+                not page.locator("#index-modal").is_visible(),
+                "dialog closed by the press",
+            )
+            page.locator("#index-status").click()
+            page.wait_for_timeout(400)
+            page.locator("#pending-look").click()
+            page.wait_for_timeout(1500)
+            after = api(base, "/api/index/status")
+            checks.check(
+                "asking again leaves it where it was left",
+                after["missing"]["work"] == 0 and after["wanted"] == before["wanted"],
+                f"work={after['missing']['work']} wanted={after['wanted']}",
+            )
+            tallied = " ".join(page.locator("#index-tally").inner_text().split())
+            checks.check(
+                "the dialog the person is reading says the same",
+                "need reindexing 0" in tallied,
+                tallied,
+            )
+            # `stale` is the raw count and ADR 44 leaves it alone, so it still holds the gone file
+            # the previous scenario deleted on purpose and this build refuses to forget. The claim
+            # that matters is the partition: everything still stale is gone, none of it is work.
+            gone = after["missing"]["resources"]
+            checks.check(
+                "what is still stale is gone, and none of it is offered as work",
+                after["stale"] == gone and after["missing"]["work"] == 0,
+                f"stale={after['stale']} gone={gone} work={after['missing']['work']}",
+            )
+            page.locator("#index-close").click()
+        finally:
+            stray = next(
+                (b for b in api(base, "/api/boxes") if b["name"] == "Reindexable"), None
+            )
+            if stray is not None:
+                api_delete(base, f"/api/boxes/{stray['uuid']}")
+            shutil.rmtree(again_dir.parent, ignore_errors=True)
+
         print("the left pane folds each box under its single parent")
         # Three levels deep, plus one box filed twice: the recursion and the exception are the
         # two things a tree view gets wrong. A box with two parents has no single place to hide,
