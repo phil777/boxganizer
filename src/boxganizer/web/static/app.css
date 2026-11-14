@@ -3429,44 +3429,15 @@ pre.text {
 /* The left pane's resource landing strip: full width, three lines tall, and a target
    while a drag is over it. Height is the point — a strip you have to aim at is a strip
    people stop using, and a file released outside any zone is a file that vanished. */
-.drop-resources {
-  flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: auto 1fr;
-  grid-template-areas:
-    "glyph words"
-    "glyph hint";
-  align-items: center;
-  gap: 0.1rem 0.5rem;
-  min-height: calc(3 * 1.35em + 1.1rem);
-  padding: 0.45rem 0.6rem;
-  border: 1px dashed var(--line);
-  border-radius: 6px;
-  color: var(--muted);
-  background: transparent;
-  transition: border-color 120ms ease, background 120ms ease;
+/* The whole left pane accepts an arrival from outside the page. The outline is the one the
+   labelled strip used, moved onto the region that is now the target; a nearer zone (a row, a
+   folder listing, a viewport) paints its own highlight and the pane stands down for it. */
+#side.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -3px;
 }
-.drop-resources .drop-resources-glyph {
-  grid-area: glyph;
-  font-size: 1.3rem;
-  opacity: 0.75;
-}
-.drop-resources .drop-resources-words { grid-area: words; font-weight: 600; color: var(--ink); }
-.drop-resources .drop-resources-hint {
-  grid-area: hint;
-  grid-column: 1 / -1;
-  font-size: 0.72rem;
-}
-.drop-resources.drop-target {
-  border-color: var(--accent);
-  border-style: solid;
-  background: var(--panel);
-  color: var(--ink);
-}
-/* The refusal a dynamic folder answers with is said before the round trip; the strip says it too,
-   so a person hovering over a zone that will not take it knows while they are still holding. */
-.drop-resources.drop-refused {
-  border-color: var(--danger, #b3261e);
-  border-style: solid;
+
+#side.drop-refused {
+  outline-style: solid;
   color: var(--danger, #b3261e);
 }

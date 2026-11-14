@@ -60,20 +60,9 @@
         <!-- What the words were widened to: stems, synonyms, near-miss spellings. -->
         <p id="search-note" class="muted" hidden></p>
         <ul id="box-list" role="listbox" aria-label="Boxes"></ul>
-        <!-- Files from outside the page land here. A box is made, the type is guessed, and the
-             bytes are captured into the library, because a file dropped into a *library* is being
-             filed, not merely shown. Full width and three lines tall: it has to be a target a
-             pointer can hit while it is still moving, not a 12-pixel strip. -->
-        <div
-          id="drop-resources"
-          class="drop-resources"
-          role="region"
-          aria-label="Drop resources here"
-        >
-          <span class="drop-resources-glyph" aria-hidden="true">⤓</span>
-          <span class="drop-resources-words">drop resources here</span>
-          <span class="drop-resources-hint muted">a box is made, the type guessed, a copy kept</span>
-        </div>
+        <!-- Files from outside the page land anywhere in this pane: see setupResourceDropZone,
+             which binds the aside itself now that the labelled strip is gone. -->
+
         <!-- The index is reported on every draw, in front of the count it sits beside. -->
         <p id="side-status" class="muted">
           <span id="box-count"></span>

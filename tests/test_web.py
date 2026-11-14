@@ -5217,22 +5217,24 @@ def test_the_box_search_widget_is_one_function_mounted_per_line(client: TestClie
 def test_the_left_pane_lands_dropped_files_and_nobody_else_claims_them(
     client: TestClient,
 ) -> None:
-    """`drop resources here`: a strip at the bottom of the library list that makes boxes.
+    """Arrivals from outside the page land anywhere in the left pane.
 
-    Two rules are what make the strip trustworthy rather than decoration, and both are pinned here
-    because both are invisible until they are broken:
+    There used to be a labelled strip for this, and three of its rules survived its removal, so
+    they are still pinned:
 
-    * it claims a drag **only when the drag carries files**. A strip that lights up for a box being
-      moved promises a capture it will not perform, and the answer to a box dropped there is the
-      list above it;
-    * when it does claim, it **stops propagation**, so the pane behind does not answer the same drop
-      a second time — one gesture, one parent.
+    * a drop is claimed **only when it carries files or links**. A zone that lights up for a box
+      being moved promises a capture it will not perform;
+    * when the pane claims, the nearer zone still wins — rows, folder listings and viewports are
+      bound first in the bubble and the pane stands down on `defaultPrevented`, so one gesture
+      produces one parent;
+    * the highlight is the page's to clear, on drop, on dragend and on a cancelled drag.
+
+    The two assertions that used to live here grepped the served page for the strip's id and its
+    words; they are retired with the strip rather than rewritten to grep the pane's id, which
+    would prove the same nothing. That the pane really takes a file dropped on empty space — and
+    that a row keeps taking the ones aimed at it — is checked in a browser by `make uitest`.
     """
     script = client.get("/static/app.js").text
-    page = client.get("/").text
-
-    assert 'id="drop-resources"' in page
-    assert "drop resources here" in page
 
     gate = script[script.index("function carriesResources(event) {") :]
     gate = gate[: gate.index("async function ingestDroppedResources(")]
@@ -5264,10 +5266,7 @@ def test_the_left_pane_lands_dropped_files_and_nobody_else_claims_them(
 
     # raw bytes, not multipart: the server would need another parser for one opaque body
     css = client.get("/static/app.css").text
-    assert ".drop-resources {" in css
-    assert ".drop-resources.drop-target {" in css
-    # three lines tall: a landing area you must aim at is one people stop using
-    assert "min-height: calc(3 * 1.35em + 1.1rem);" in css
+    assert "#side.drop-target {" in css, "the pane must look like the target it now is"
 
 
 def test_a_file_drag_is_recognised_before_the_browser_hands_over_the_bytes(
@@ -5693,16 +5692,19 @@ def test_a_cell_outside_the_grid_is_refused_before_any_box_exists(client: TestCl
     assert {b["name"] for b in client.get("/api/boxes").json()} == before
 
 
-def test_only_the_strip_and_the_list_claim_a_dropped_file(client: TestClient) -> None:
-    """A region that captures without painting anything is the dishonest target, inverted.
+def test_every_zone_that_claims_a_dropped_file_paints_one(client: TestClient) -> None:
+    """A region that captures without painting anything is the dishonest target. That rule stands.
 
-    The strip is the named place a file goes and the list is what a person aims at; both light. The
-    pane around them is roughly the height of the screen and covers the brand, the search field, the
-    buttons and the index line. Widening its gate to every file drag made all of that swallow files
-    silently -- the class went on `#side`, the CSS rule was written for `#box-list`, and the page
-    captured a file it had never advertised taking. The measurement that missed it looked for
-    `.drop-target` with `closest()`, which is satisfied by an ancestor: it proved the class existed
-    and said nothing about whether anything changed on screen.
+    What changed is which regions claim: the labelled strip is gone (work_to_do, third item) and the
+    pane took its place, so the pane now lights for an arrival — with a rule of its own, written at
+    the same time as the class. The failure this test was written for was never "the pane is a drop
+    target"; it was a `drop-target` class landing on `#side` while the only CSS rule was written for
+    `#box-list`, so the page swallowed a file it had never advertised taking. The measurement that
+    missed it asked for `.drop-target` with `closest()`, which an ancestor satisfies: it proved a
+    class existed and said nothing about whether anything on screen changed.
+
+    So both halves are pinned now: a nearer zone still wins and stops propagation, and every element
+    that can take the class has a rule that shows it.
     """
     script = client.get("/static/app.js").text
 
@@ -5728,8 +5730,9 @@ def test_only_the_strip_and_the_list_claim_a_dropped_file(client: TestClient) ->
     # and the rule that paints it has to be written for the element that gets the class
     css = client.get("/static/app.css").text
     assert "#box-list.drop-target" in css
-    assert "#side.drop-target" not in css.replace("#box-list", ""), (
-        "a class on the pane with no rule behind it is the failure this test exists for"
+    assert "#side.drop-target" in css, (
+        "the pane claims file drags, so it must show one: a class with no rule behind it is the"
+        " invisible target this test was written to catch"
     )
 
 

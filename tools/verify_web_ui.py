@@ -1176,6 +1176,59 @@ def _run(base: str, executable: str | None) -> int:
             page.locator("#pane-view-list").click()
             page.wait_for_timeout(200)
 
+        print("a file dropped anywhere in the left pane is filed, and a row still wins")
+        # Synthetic DataTransfer rather than an OS-level drag: a browser cannot conjure a file
+        # from outside the page at the pointer, and what is under test is the page's own claiming
+        # rules — does the pane take a file, and does it stand down for a nearer zone.
+        try:
+            pane_take = page.evaluate(
+                "() => { const dt = new DataTransfer();"
+                " dt.items.add(new File(['hi'], 'outside-note.md', {type: 'text/markdown'}));"
+                " const pane = document.getElementById('side');"
+                " const blank = document.getElementById('search-note') || pane;"
+                " blank.dispatchEvent(new DragEvent('dragover',"
+                "   {bubbles: true, cancelable: true, dataTransfer: dt}));"
+                " const lit = pane.classList.contains('drop-target');"
+                " blank.dispatchEvent(new DragEvent('drop',"
+                "   {bubbles: true, cancelable: true, dataTransfer: dt}));"
+                " return { lit, cleared: !pane.classList.contains('drop-target') }; }"
+            )
+            page.wait_for_timeout(2500)
+            checks.check(
+                "the pane lights for a file over empty space", pane_take["lit"], pane_take
+            )
+            checks.check(
+                "the file became a box",
+                any(b["name"] == "outside-note" for b in api(base, "/api/boxes")),
+                [b["name"] for b in api(base, "/api/boxes")][-3:],
+            )
+            row = page.locator("#box-list li").nth(1)
+            row_uuid = row.get_attribute("data-uuid")
+            claimed_elsewhere = page.evaluate(
+                "(uuid) => { const dt = new DataTransfer();"
+                " dt.items.add(new File(['yo'], 'row-target.md', {type: 'text/markdown'}));"
+                " const sel = '#box-list li[data-uuid=' + JSON.stringify(uuid) + ']';"
+                " const li = document.querySelector(sel);"
+                " const over = new DragEvent('dragover',"
+                "   {bubbles: true, cancelable: true, dataTransfer: dt});"
+                " li.dispatchEvent(over);"
+                " const paneLit = document.getElementById('side')"
+                "   .classList.contains('drop-target');"
+                " const rowLit = li.classList.contains('drop-target') || over.defaultPrevented;"
+                " li.dispatchEvent(new DragEvent('dragleave',"
+                "   {bubbles: true, cancelable: true, dataTransfer: dt}));"
+                " return { paneLit, rowLit }; }",
+                row_uuid,
+            )
+            checks.check(
+                "a row takes the drop aimed at it before the pane does",
+                claimed_elsewhere["rowLit"] and not claimed_elsewhere["paneLit"],
+                claimed_elsewhere,
+            )
+        finally:
+            for stray in [b for b in api(base, "/api/boxes") if b["name"] == "outside-note"]:
+                api_delete(base, f"/api/boxes/{stray['uuid']}")
+
         checks.check("no console errors", not errors, "; ".join(errors[:3]))
         page.screenshot(path="/tmp/verify-web-ui.png")
         browser.close()

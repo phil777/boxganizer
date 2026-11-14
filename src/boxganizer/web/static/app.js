@@ -670,25 +670,36 @@ async function dropBox(event, ctx, targetUuid, { after = null, label = null } = 
 }
 
 /**
- * The landing strip at the bottom of the left pane, where files from outside the page are filed.
+ * The whole left pane is where files from outside the page land.
  *
- * It claims a drag only when the drag actually carries files (ADR 27's rule that a claimed drop is
- * answered, and not answered twice, depends on zones being honest about what they take). Dropping a
- * *box* here is deliberately not claimed: the list above is where boxes are filed, and a strip that
- * said "drop resources here" and then did something else would be a lie with a highlight on it.
+ * It used to be a strip at the bottom of the list, labelled "drop resources here" — a rectangle
+ * the size of a toast in a pane a person is already aiming at. The strip is gone and the pane
+ * took its place, which means the question is no longer "did they hit the strip" but "did they
+ * mean the pane", and the answer is the same event order the page already relies on.
  *
- * The highlight itself is the page's to clear, not this element's — `clearDropZones()` runs on drop,
- * dragend and a cancelled drag, so the outline cannot strand here when a drag dies halfway.
+ * Two rules keep it honest:
+ *
+ * - It claims a drag only when the drag actually carries files or links (ADR 27: a claimed drop
+ *   must be answered, and not answered twice, which depends on zones being honest about what
+ *   they take). A dragged *box* is the list's business, not the pane's.
+ * - A nearer zone wins. Rows, folder listings and viewports sit inside the pane and are bound
+ *   first in the bubble, so if any of them has already called `preventDefault()` this handler
+ *   stands down (ADR 38: a zone may promise only what it can finish, and the pane must not
+ *   steal a drop a row was highlighting).
+ *
+ * The highlight is still the page's to clear — `clearDropZones()` runs on drop, dragend and a
+ * cancelled drag — so the outline cannot strand on the pane when a drag dies halfway.
  */
 function setupResourceDropZone() {
-  const zone = el("drop-resources");
+  const zone = el("side");
   if (!zone) return;
   zone.addEventListener("dragover", (event) => {
     // `dragIsResource`, not `carriesResources`: while the pointer is still moving a browser will not
     // hand over any value, so the only honest test is the type list. With the value-based check a
     // link dragged out of a browser carried `text/uri-list` and an empty `getData`, and the one
     // zone built for arrivals stayed dark for it.
-    if (!dragIsResource(event)) return; // not ours: let the strip stay plain and the list take it
+    if (event.defaultPrevented) return; // a row, a listing or a viewport claimed it first
+    if (!dragIsResource(event)) return; // not ours: the list is where boxes are filed
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
     zone.classList.add("drop-target");
@@ -697,6 +708,7 @@ function setupResourceDropZone() {
   zone.addEventListener("dragleave", () => zone.classList.remove("drop-target", "drop-refused"));
   zone.addEventListener("drop", async (event) => {
     zone.classList.remove("drop-target", "drop-refused");
+    if (event.defaultPrevented) return; // the nearer zone is already filing it
     if (!carriesResources(event)) return;
     // Claimed: the pane behind must not also answer it, which is how one gesture used to make two
     // parents. A box filed once is a box; a box filed twice is a bug report.
