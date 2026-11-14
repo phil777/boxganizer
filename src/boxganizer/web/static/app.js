@@ -4206,6 +4206,7 @@ function indexWords(status_) {
   if (queue.reading || queue.waiting) {
     // The denominator is the point. "indexing…" says something is happening; "reading 3 of 12" says
     // whether to wait for it, and a bar with no total is a promise nobody can check.
+    if (!queue.total) return queue.done ? `${queue.done} read…` : "reading…";
     return `reading ${queue.done} of ${queue.total}…`;
   }
   if (status_.running) return "indexing…";
@@ -4296,6 +4297,10 @@ function observedSentence(status_) {
 }
 
 let indexTimer = null;
+// Whether the last answer said work is happening in there. Kept apart from the answer itself
+// because the answer is exactly what is missing when a read fails -- and a failed read must not
+// be what ends the watching.
+let indexBusy = false;
 
 /**
  * The bar beside the words: how much of the reading this save caused is done.
@@ -4307,15 +4312,23 @@ let indexTimer = null;
  */
 function drawIndexProgress(status_) {
   const bar = el("index-progress");
+  const shell = el("index-bar");
+  const numbers = el("index-bar-text");
   const queue = indexQueue(status_);
   const busy = queue.reading || queue.waiting;
+  shell.hidden = !busy;
   bar.hidden = !busy;
   if (!busy) {
     bar.removeAttribute("value");
+    numbers.textContent = "";
     return;
   }
   bar.max = String(Math.max(queue.total, 1));
   bar.value = String(queue.done);
+  // The two figures the sentence just said, on the bar itself. A strip with no total on it is a
+  // promise nobody can check, which is what a seven-minute pass looked like when it was an empty
+  // `queue` of 0/0 and a bar that never moved.
+  numbers.textContent = queue.total ? `${queue.done} / ${queue.total}` : `${queue.done} read`;
   bar.setAttribute("aria-label", `reading ${queue.done} of ${queue.total} files for the index`);
 }
 
@@ -4327,10 +4340,18 @@ async function refreshIndexStatus() {
     // at the files is the button in the dialog, never something a draw does by itself.
     status_ = await api.indexStatus();
   } catch (error) {
+    // A read that failed is not a pass that finished. This used to `return` here, before the
+    // block that schedules the next look -- so if the first poll after pressing Reindex failed,
+    // nothing was ever scheduled again and the pane went on showing the number from before the
+    // press. That is the report: "about 10 calls, then it stops, and it says 833 again". Keep
+    // the timer alive while the last answer said work was happening, and say what is unknown.
     spot.textContent = "index: unknown";
-    spot.title = error.message;
+    spot.title = `${error.message} — asking again in a moment`;
+    if (indexBusy && !indexTimer) indexTimer = setInterval(() => refreshIndexStatus(), 1200);
     return;
   }
+  const queue = indexQueue(status_);
+  indexBusy = !!status_.running || queue.reading || queue.waiting;
   spot.textContent = indexWords(status_);
   spot.title = indexDetail(status_);
   drawIndexProgress(status_);
@@ -4342,7 +4363,7 @@ async function refreshIndexStatus() {
   else spot.setAttribute("aria-haspopup", "dialog");
   spot.classList.toggle("is-running", !!status_.running);
   spot.classList.toggle("has-stale", !status_.running && (status_.stale > 0 || status_.outstanding > 0));
-  if (status_.running) {
+  if (indexBusy) {
     if (!indexTimer) indexTimer = setInterval(() => refreshIndexStatus(), 1200);
   } else if (indexTimer) {
     clearInterval(indexTimer);
@@ -4350,6 +4371,10 @@ async function refreshIndexStatus() {
     // Files were read while the timer ran, so what the search finds has changed underneath
     // the panel. The counts and the list are re-read rather than left as they were.
     refreshSide();
+    // And one more look at the numbers themselves: the answer that reported the end was read
+    // while the last file was still being written, and a headline that lags the pass it just
+    // finished is the one people do not believe.
+    refreshIndexStatus();
   }
 }
 

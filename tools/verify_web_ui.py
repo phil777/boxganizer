@@ -605,6 +605,88 @@ def _run(base: str, executable: str | None) -> int:
             for key in ("doodle", "cubby", "shelf", "filter"):
                 api_delete(base, f"/api/boxes/{made[key]['uuid']}")
 
+        print("the index bar counts the files, and keeps watching through a failed read")
+        # A stubbed status answer rather than a real long pass: the numbers on the bar are what is
+        # under test, and a pass that finishes in 300 ms cannot be photographed mid-flight. The
+        # server half is covered by tests/test_search.py (the callback) and by the repro tool
+        # (`queue=2/839` against a real library copy), so each layer is proved at its own speed.
+        busy_body = {
+            "wanted": 40, "indexed": 12, "outstanding": 28, "stale": 3, "untouched": 25,
+            "folders": 1, "unreadable": 0, "running": True, "scope": "everything", "last": None,
+            "observed": {"checked_at": None, "age_seconds": None},
+            "missing": {
+                "resources": 0, "boxes": 0, "roots": [], "stray": 0,
+                "candidates": 28, "work": 28,
+            },
+            "missing_roots": [],
+            "queue": {"waiting": 0, "reading": True, "done": 7, "total": 12, "errors": []},
+        }
+        mode = {"kind": "busy"}
+
+        def fake_status(route, _request):
+            if mode["kind"] == "busy":
+                route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(busy_body)
+                )
+            elif mode["kind"] == "junk":
+                # 200 with a body that is not JSON: the read then throws the way a dropped
+                # connection throws, without the browser logging a network error that the
+                # console check below would (rightly) count as a failure.
+                route.fulfill(status=200, content_type="application/json", body="not json")
+            else:
+                route.fallback()  # let the real server answer
+
+        page.route("**/api/index/status", fake_status)
+        said = ""
+        try:
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(400)
+            checks.check(
+                "the bar is there while work is running", page.locator("#index-bar").is_visible()
+            )
+            bar_text = page.locator("#index-bar-text").inner_text()
+            checks.check("the bar carries its own numbers", bar_text == "7 / 12", bar_text)
+            sentence = page.locator("#index-status").inner_text()
+            checks.check(
+                "the sentence says the same pair, in words",
+                "reading 7 of 12" in sentence,
+                sentence,
+            )
+            checks.check(
+                "the bar's value and max follow the same two numbers",
+                page.locator("#index-progress").get_attribute("value") == "7"
+                and page.locator("#index-progress").get_attribute("max") == "12",
+                f"{page.locator('#index-progress').get_attribute('value')} of "
+                f"{page.locator('#index-progress').get_attribute('max')}",
+            )
+
+            mode["kind"] = "junk"
+            page.wait_for_timeout(1800)
+            said = page.locator("#index-status").inner_text()
+            checks.check(
+                "a failed read admits it instead of freezing the old number",
+                said == "index: unknown",
+                said,
+            )
+
+            mode["kind"] = "real"
+            recovered = False
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                page.wait_for_timeout(300)
+                said = page.locator("#index-status").inner_text()
+                if said and said != "index: unknown":
+                    recovered = True
+                    break
+            checks.check(
+                "and the polling survived the failure", recovered, said
+            )
+            checks.check(
+                "the bar is gone once nothing is running", page.locator("#index-bar").is_hidden()
+            )
+        finally:
+            page.unroute("**/api/index/status")
+
         checks.check("no console errors", not errors, "; ".join(errors[:3]))
         page.screenshot(path="/tmp/verify-web-ui.png")
         browser.close()

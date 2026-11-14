@@ -1794,7 +1794,16 @@ def create_app(
         """
         job = getattr(request.app.state, "index_job", None)
         if job is None:
-            job = {"running": False, "scope": "", "started": "", "last": None, "task": None}
+            job = {
+                "running": False,
+                "scope": "",
+                "started": "",
+                "last": None,
+                "task": None,
+                # (files read, files expected) as one value: the worker thread writes it and a
+                # panel draw reads it, and a single assignment cannot show half an update.
+                "progress": (0, 0),
+            }
             request.app.state.index_job = job
         return job
 
@@ -1847,6 +1856,15 @@ def create_app(
                 "total": queue["total"],
                 "errors": list(queue["errors"]),
             }
+        if job["running"]:
+            # A pass over the library is work too, and the page has one bar: the two are added
+            # rather than chosen between, because a save can land while a pass is reading and
+            # both files are then really on their way. This is why the manual pass used to look
+            # frozen — it published nothing at all, so `queue` stayed 0/0 for seven minutes.
+            pass_done, pass_total = job["progress"]
+            progress["reading"] = True
+            progress["done"] = int(progress["done"]) + int(pass_done)
+            progress["total"] = max(int(progress["total"]) + int(pass_total), progress["done"])
         return {
             **body,
             # "running" means either kind of work: a pass over the library, or the queue reading
@@ -1930,15 +1948,26 @@ def create_app(
             job["running"] = True
             job["scope"] = scope
             job["started"] = datetime.now(UTC).isoformat(timespec="seconds")
+            job["progress"] = (0, 0)
             began = monotonic()
             try:
                 if scope == "outstanding":
                     # Look first, then read what that noticed: a file edited outside
                     # Boxganizer is invisible until something stats it.
                     await asyncio.to_thread(store.check_observations)
+                def publish(done: int, total: int) -> None:
+                    # Files, not list items: a folder is one item and eighty files (ADR 32), so
+                    # this is the same denominator the save queue publishes and the bar below
+                    # never has two meanings.
+                    job["progress"] = (int(done), int(total))
+
                 before = store.index_counts()
                 report = await asyncio.to_thread(
-                    text_search.rebuild, store, root=root, only_stale=(scope == "outstanding")
+                    text_search.rebuild,
+                    store,
+                    root=root,
+                    only_stale=(scope == "outstanding"),
+                    on_progress=publish,
                 )
                 after = store.index_counts()
                 # What the pass changed is read back from the index rather than added up as

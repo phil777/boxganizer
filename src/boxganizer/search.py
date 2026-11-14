@@ -841,7 +841,13 @@ def sync(store: Any, box: Box, *, root: Path | str | None = None) -> str:
     return sync_resource(store, int(box.resource_id), root=root)
 
 
-def rebuild(store: Any, *, root: Path | str | None = None, only_stale: bool = False) -> Report:
+def rebuild(
+    store: Any,
+    *,
+    root: Path | str | None = None,
+    only_stale: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> Report:
     """Read every resource the index is wanted for. What `box index` does.
 
     Needed because the index lives in the database and the files do not: a library
@@ -851,6 +857,13 @@ def rebuild(store: Any, *, root: Path | str | None = None, only_stale: bool = Fa
     `only_stale` is the same pass narrowed to the files something has been noticed
     about, which is what a scheduled reindex wants rather than a whole library read on a
     timer.
+
+    `on_progress(done, total)` counts **files**, not list items — the same denominator the
+    page's save queue publishes (ADR 32), because a folder is one item and eighty files and a
+    bar that finished at "3" while 83 files were read would be a bar that lies. The total is
+    the pass's best current guess: each item starts as one file, and a folder's walk replaces
+    that estimate with what it actually holds, so the number only moves when something learned
+    the count. Without a callback the pass behaves exactly as before.
     """
     if only_stale:
         watched = list(store.check_observations())
@@ -870,7 +883,25 @@ def rebuild(store: Any, *, root: Path | str | None = None, only_stale: bool = Fa
     skipped: list[tuple[str, str]] = []
     indexed = 0
     unchanged = 0
+    # Each item is one file until its walk says otherwise, so the bar has a denominator before
+    # the first read rather than an empty one — and the total a person sees is the work as far
+    # as the pass knows it, which is the honest version of a number that cannot be known first.
+    # Held in a dict rather than in two locals: the callback below is built inside the loop, and
+    # a closure that reads rebound loop variables picks up whatever they became by the time it
+    # runs, which is a bug waiting for someone to reorder this function.
+    tally = {"done": 0, "total": len(watched)}
     for resource in watched:
+        walk = {"walked": 0, "files": 0}
+
+        def report(
+            done: int, total: int, _walk: dict[str, int] = walk, _tally: dict[str, int] = tally
+        ) -> None:
+            _walk["walked"] = 1
+            _walk["files"] = total
+            if on_progress is not None:
+                read = int(_tally["done"]) + done
+                on_progress(read, max(int(_tally["total"]) - 1 + total, read))
+
         before = resource.indexed and resource.stale() is False
         # One commit per file. Recording one resource used to be five statements and five
         # fsyncs, which is how a pass over a library of hundreds of files spends most of its
@@ -880,7 +911,18 @@ def rebuild(store: Any, *, root: Path | str | None = None, only_stale: bool = Fa
             # A pass over the library is the deliberate one, so a folder is walked rather
             # than trusted to its mtime: a file added two levels down does not change the
             # mtime of the folder above, and discovery is what this pass is for.
-            note = sync_resource(store, resource.id, root=root, walk_always=True)
+            note = sync_resource(
+                store,
+                resource.id,
+                root=root,
+                walk_always=True,
+                on_progress=report if on_progress is not None else None,
+            )
+        counted = int(walk["files"]) if walk["walked"] else 1
+        tally["done"] = int(tally["done"]) + counted
+        tally["total"] = int(tally["total"]) - 1 + counted
+        if on_progress is not None:
+            on_progress(int(tally["done"]), int(tally["total"]))
         if note:
             skipped.append((address.display(resource.reference), note))
         elif before:

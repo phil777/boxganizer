@@ -58,7 +58,13 @@
                behind it are the answer. -->
           <!-- Read in the background now, so the bar is the save's own progress: how many of the
                files this write put in the index's way have been read. Hidden when nothing is reading. -->
-          <progress id="index-progress" max="1" value="0" hidden></progress>
+          <!-- The bar carries its own numbers: "reading 7 of 12" in the sentence and 7 / 12 on
+               the bar are the same two figures from the same answer, so a person mid-pass can
+               see how far the work is instead of watching an anonymous strip creep along. -->
+          <span class="index-bar" id="index-bar" hidden>
+            <progress id="index-progress" max="1" value="0" hidden></progress>
+            <span class="index-bar-text" id="index-bar-text" aria-hidden="true"></span>
+          </span>
           <button type="button" id="index-status" class="index-status"></button>
         </p>
       </aside>

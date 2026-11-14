@@ -621,3 +621,60 @@ def test_a_named_confine_still_declines_to_read_outside_it(
         assert "out.md" in named, named
         # the file the confine declined is still pointed at, and still called what it is not
         assert named["out.md"]["boxes"][0]["name"] == "Out"
+
+
+def test_a_pass_reports_progress_in_files_not_in_list_items(tmp_path: Path) -> None:
+    """The denominator a bar needs, in the unit a person counts: files (ADR 32).
+
+    The manual pass used to publish nothing at all — the page polled `queue` and got 0/0 for
+    seven minutes, which is what made a long index look like a freeze (and, with the panel's
+    number rising mid-pass, look like a failure). So the contract here is not "a callback is
+    called" but that the two numbers it carries can be drawn as `N / M`: done never ahead of
+    total, neither going backwards, and a folder of two files contributing two — not one.
+    """
+    shelf = tmp_path / "shelf"
+    shelf.mkdir()
+    (shelf / "a.md").write_text("the boiler pressure gauge leaks in a\n", encoding="utf-8")
+    (shelf / "b.md").write_text("an order for cement mixer parts in b\n", encoding="utf-8")
+    loose = tmp_path / "loose.md"
+    loose.write_text("the anode needs replacing soon\n", encoding="utf-8")
+
+    store = BoxStore(tmp_path / "progress.db", content_root=tmp_path)
+    try:
+        folder = store.add(
+            Box(name="Shelf", box_type="indexed-directory", resource_uri=str(shelf))
+        )
+        store.set_index_flag(folder.resource_id, True)
+        store.add(Box(name="Loose", box_type="markdown", resource_uri=str(loose)))
+
+        events: list[tuple[int, int]] = []
+        search.rebuild(
+            store, root=tmp_path, on_progress=lambda done, total: events.append((done, total))
+        )
+
+        assert events, "a pass that publishes nothing is the bug this test exists for"
+        assert events[-1] == (3, 3), events
+        assert max(total for _done, total in events) == 3, (
+            f"a folder of two files plus one loose file is three, not two items: {events}"
+        )
+        assert all(done <= total for done, total in events), events
+        assert [done for done, _ in events] == sorted(done for done, _ in events), events
+        assert [total for _done, total in events] == sorted(total for _done, total in events), (
+            "the total may grow when a walk reveals what a folder holds; it must not shrink"
+        )
+    finally:
+        store.close()
+
+
+def test_a_pass_without_a_listener_behaves_exactly_as_before(tmp_path: Path) -> None:
+    """`box index` does not pass a callback; the pass must not need one."""
+    note = tmp_path / "note.md"
+    note.write_text("the boiler pressure gauge leaks\n", encoding="utf-8")
+    store = BoxStore(tmp_path / "quiet-pass.db", content_root=tmp_path)
+    try:
+        store.add(Box(name="Note", box_type="markdown", resource_uri=str(note)))
+        report = search.rebuild(store, root=tmp_path)
+        assert report.in_index == 1
+        assert store.check_observations() == []
+    finally:
+        store.close()
