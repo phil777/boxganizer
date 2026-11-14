@@ -127,8 +127,12 @@ describe the tool, so it sits at the end rather than at the place every click pa
 
 **The list beside it reads either way, and remembers which.** Two icon buttons at the top of the pane
 switch between the flat list and a tree: in the tree, each box that was filed in exactly one folder is
-folded under the folder it was filed in, with a `[+]` before the name, one level at a time however
-deep it goes. A box filed in two folders stays at the top — it has no single place to hide, and picking
+folded under the folder it was filed in, behind a drawn square — a plus until you open it, a minus
+after — one level at a time however
+deep it goes. A thin guide line runs down from each square to the rows it holds, and the last child's
+line turns right into its own row, so the nesting is drawn rather than guessed from the indent; a
+folder with nothing in it keeps the same empty column, which is why every icon and name on a level
+starts at one x. A box filed in two folders stays at the top — it has no single place to hide, and picking
 one would be the page inventing a fact about the library — and the folders `box init` makes to hold
 everything (the root, and the cabinet) are not counted as places you filed something, or the top level
 would be the thing that disappeared (ADR 45). Three buttons set the order: by name, by type then name,
@@ -137,7 +141,9 @@ order applies *inside* each opened level, because that is the question a folded 
 stays first whatever the order says. With a search term in the field the hits are shown flat: a tree
 that folded away the boxes the search just found is a search nobody trusts. The view, the order, the
 direction and which folders were open are kept for the next visit, on this browser and not in the
-library — a database that travels should not carry one person's window shape with it.
+library — a database that travels should not carry one person's window shape with it. The square is a
+real button: Tab reaches it, Enter opens the level, and neither chooses the box — the row's own handler
+declines a click that came from the fold.
 Along the bottom,
 in front of the box count, the index reports itself all the time — `75 indexed`, or `2 to
 reindex`, or `reading 7 of 12…` — with the detail on hover, including which files hold nothing to
@@ -154,7 +160,11 @@ them; counting them as work is how a library ends up offering 833 things to do f
 them from the index to quiet the number would be losing the record that you once had them. They stay
 in the count of what is followed, the dialog says what is missing, and `update index status` is the
 button that looks at the files — a check is an action, so it is no longer something a page load does
-(ADRs 41, 42 and 44). Put the folder back and ask again: nothing had to be un-set.
+(ADRs 41, 42 and 44). Put the folder back and ask again: nothing had to be un-set. The gone line names
+the boxes rather than leaving you to find them — `this box still points at them:` and a button per box,
+titled with the address it was pointing at, which closes the dialog and opens that box. The two actions
+sit on a band of their own **between the counts and the list of files**, so they read as what you can do
+about the index instead of as a caption of the names below them.
  Taking a box *out* of the index is
 immediate — a stale document staying findable is a wrong answer, not a slow one. A file the index
 refuses is named there rather than left as a stalled bar (ADR 32). A **box** dropped where no view
@@ -188,7 +198,14 @@ right of centre. It asks the library's existing full-text question restricted to
 is filed below it — same ranking, same passage, same widening, one extra set clause — so nothing is
 re-read to answer it, and a cycle in the graph terminates instead of looping (ADR 33). An
 **indexed-directory** asks that question one step further: its field searches the files in the folder
-and below them, by name and by what they say, and the listing becomes the answer (ADR 46).
+and below them, by name and by what they say, and the listing becomes the answer (ADR 46). The bar says
+`asking the index about` whatever you typed while the question is in the air, the previous rows stay
+where they are until the answer replaces them, and a row that survived because of something *inside* it
+carries the words: a folder shows `1 match inside`, the file itself shows the passage
+(`the words are in this file` when the file's name says nothing about them), and a folder
+whose only claim is its own name is a row too. Names are searched the way you type them, so `mort`
+finds `mortgage.md` — which is the thing a folder listing is mostly used for, and the thing this field
+could not do while it was only filtering what was already on the screen.
 
 **If the box has a list to narrow, that list is the answer, and nothing unrolls over it.** In a folder,
 a directory or a cabinet, typing closes the displayed rows down to what matches —

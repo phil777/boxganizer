@@ -306,21 +306,29 @@ the highlight is read from the drag's type list, because the file itself is with
 
 **The pane reads as a list or as a tree.** Two icon buttons by the search field switch it: the list
 shows every box, and the tree has each box that was
-folded under the folder it was filed in, one `[+]` at a time, however deep. A box filed in two
+folded under the folder it was filed in, behind a drawn square that is a plus until you press it and a
+minus afterwards, one level at a time however deep. A thin line runs down from each square to the rows
+it holds, and the last child's line turns right into its own row, so the nesting can be followed with a
+pointer instead of inferred from the indent. A box filed in two
 folders stays a root, because choosing one of them would be the page inventing a fact about the
 library — and a folder created by `box init` to hold everything is not a place you filed something,
 so containers are not counted as parents (ADR 45). Three buttons set the order — by name, by type
 then name, by how much each box holds — with an arrow at the far right for ascending or descending,
-and the order applies inside each opened level. The view, the order, the direction and which
+and the order applies inside each opened level. The square is a button, so Tab reaches it and Enter
+opens the level without choosing the box. The view, the order, the direction and which
 folders were open are remembered for the next time you open the page.
 
 **The index line opens a dialog titled `Index status`.** It states four counts — files followed for
 the index, up to date, need reindexing, and not indexed yet — and when there are any, a fifth line
 naming the resources that are gone from this machine: folders deleted out from under the library.
-Those are never offered as work, because pressing Reindex cannot reach a file that is not here; they
-stay inside the count of what the index follows, and nothing is removed to make the numbers look
-calm (ADRs 41 and 44). **update index status** asks the server to look at the files; **Reindex**
-does the work, and hands the watching to the line at the bottom of the pane.
+Under that line the boxes that still point at them are named — `this box still points at them:` — each
+one a button that closes the dialog and opens the box, because the box is where the decision is: put
+the folder back, or stop indexing it. Those resources are never offered as work, because pressing
+Reindex cannot reach a file that is not here; they stay inside the count of what the index follows,
+and nothing is removed to make the numbers look calm (ADRs 41 and 44). The two actions sit on a band
+of their own **between the counts and the list of files**, so they read as what you can do rather than
+as a caption of the names below them: **update index status** asks the server to look at the files;
+**Reindex** does the work, and hands the watching to the line at the bottom of the pane.
 
 Drag a **link** instead and it becomes a link box — named from the link text you selected, pointing at
 the address, with nothing fetched by the page or the server. A box that downloaded what it was shown
@@ -364,7 +372,12 @@ the rows on screen close down to the answer in real time and **nothing unrolls
 over them** — a floating copy of the same matches would hide the only place they are shown in order and
 in context (ADR 39). A match deeper than a row is represented by the row that holds it, which says so:
 *1 match inside: Boiler Notes*, or in a directory, *the words are in this file* for a file whose name
-says nothing about the word. An indexed directory quotes the words themselves on the row, because the
+says nothing about the word. In an **indexed directory** the field asks the index instead of narrowing
+the rows: the bar says `asking the index about` the words you typed while it does, the listing comes
+back with the files wherever they are in the tree, and the row that matched quotes them — so a folder
+whose only match is a sentence two levels down shows that folder with `1 match inside`, and walking
+into it shows the file with the passage. Names are searched too, as you type them: `mort` finds
+`mortgage.md`. An indexed directory quotes the words themselves on the row, because the
 index is what answered. In a box with **no list** — a note, an image, a sensor — the results do
 unroll under the field, each row saying *via* which boxes you would reach it, reachable by arrow keys
 and Enter.

@@ -282,6 +282,9 @@ QUOTED_PAGE_WORDING = {
     "`reading…`": '"reading…"',
     "`2 of 4 inside`": "of ${children.length} inside",
     "`1 match inside`": "1 match inside",
+    "`the words are in this file`": "the words are in this file",
+    "`asking the index about`": "asking the index about ${filter.pending}",
+    "`this box still points at them:`": '"this box still points at them:"',
 }
 
 
