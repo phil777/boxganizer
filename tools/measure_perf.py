@@ -472,17 +472,32 @@ def compare(baseline_path: Path, current: dict[str, Any]) -> int:
     for key in MUST_BE_CLEAN:
         if current.get(key):
             problems.append(f"{key} must be 0, measured {current[key]}")
-    for label, key in (
-        ("app.js plain bytes", "app_js_bytes"),
-        ("app.js gzip bytes", "app_js_bytes_offered_gzip"),
-        ("app.css plain bytes", "app_css_bytes"),
-        ("app.css gzip bytes", "app_css_bytes_offered_gzip"),
-        ("api /boxes gzip bytes", "api_boxes_bytes_offered_gzip"),
+    # Ratios are taken *within* each run, never between a run's plain bytes and the other
+    # run's compressed ones: comparing 436,713 plain against 125,472 gzipped reads as a
+    # compression ratio and is actually "the old server never compressed, and the file also
+    # changed size since". Both framings are printed, labelled as what they are.
+    for label, plain_key, gzip_key in (
+        ("app.js", "app_js_bytes", "app_js_bytes_offered_gzip"),
+        ("app.css", "app_css_bytes", "app_css_bytes_offered_gzip"),
     ):
-        was = baseline.get("static", {}).get(key)
-        now = current.get("static", {}).get(key)
-        if was and now:
-            print(f"{label:26s} {was:12d} {now:12d} {now / was:8.2f}x")
+        was_plain = baseline.get("static", {}).get(plain_key)
+        was_gzip = baseline.get("static", {}).get(gzip_key)
+        now_plain = current.get("static", {}).get(plain_key)
+        now_gzip = current.get("static", {}).get(gzip_key)
+        if not (was_plain and now_plain and now_gzip):
+            continue
+        # "1.00x" is what a ratio looks like when nothing was compressed, and it reads like a
+        # measurement of compression rather than its absence.
+        was_encoding = baseline.get("static", {}).get(plain_key.replace("_bytes", "_encoding"))
+        if not was_gzip or was_gzip == was_plain or was_encoding in (None, "none"):
+            before_ratio = "none (not compressed)"
+        else:
+            before_ratio = f"{was_plain / was_gzip:.2f}x"
+        print(f"{label + ' plain bytes':26s} {was_plain:12d} {now_plain:12d}"
+              f" {now_plain / was_plain:8.2f}x")
+        print(f"{label + ' gzip ratio':26s} {before_ratio:>12s} {now_plain / now_gzip:>11.2f}x")
+        print(f"{label + ' bytes on the wire':26s} {was_gzip or was_plain:12d} {now_gzip:12d}"
+              f" {(now_gzip / (was_gzip or was_plain)):8.2f}x")
     if current.get("static", {}).get("pdf_encoding", "none") != "none":
         problems.append(f"the PDF was compressed ({current['static']['pdf_encoding']})")
     if current.get("static", {}).get("warm_reload_status") not in (200, 304):
