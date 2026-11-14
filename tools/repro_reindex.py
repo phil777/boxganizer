@@ -81,6 +81,37 @@ def post(base: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
             return exc.code, {"detail": raw[:200].decode(errors="replace")}
 
 
+def offer(body: dict) -> int:
+    """How much work the pane would put on the button for this status answer."""
+    missing = body.get("missing") or {}
+    if isinstance(missing.get("work"), int):
+        return int(missing["work"])
+    return headline_offered(body)
+
+
+def verdict(before: dict, after: dict) -> str:
+    """Did the pass fail to do the work it offered? That is the symptom, and only that.
+
+    An unchanged number means nothing on its own: press Reindex on a library with no work and the
+    number does not move, and that is correct behaviour, not the bug. The complaint was a number the
+    button could not move — so the test is whether anything was offered before and is still offered
+    after. Conflating the two is how a reproduction tool starts crying wolf, which is exactly the
+    failure this one found on a clean library after a successful pass.
+    """
+    was, now = offer(before), offer(after)
+    moved = headline(before) != headline(after)
+    if was and now:
+        return f"SYMPTOM: {was} offered before the pass, {now} still offered after it"
+    if was:
+        return f"cleared: the pass took {was} offered down to 0"
+    if now:
+        return f"new work appeared during the pass: 0 -> {now}"
+    if moved:
+        return f"changed wording, no work offered either side ({headline(before)!r} -> " \
+               f"{headline(after)!r})"
+    return f"nothing was offered before or after ({headline(after)!r}); not the symptom"
+
+
 def headline(body: dict) -> str:
     """What the left pane says at this tree: the offer is the server's work count (ADR 44).
 
@@ -90,9 +121,7 @@ def headline(body: dict) -> str:
     a tool that re-derived it would drift from the page the way the old formula already did.
     """
     missing = body.get("missing") or {}
-    waiting = (
-        int(missing["work"]) if isinstance(missing.get("work"), int) else headline_offered(body)
-    )
+    waiting = offer(body)
     reindex_work = (
         int(missing["work_stale"])
         if isinstance(missing.get("work_stale"), int)
@@ -181,7 +210,13 @@ def main() -> int:
 
     db = Path(args.db).expanduser().resolve()
     require_scratch(db)
-    env = dict(os.environ, BOXGANIZER_DB=str(db))
+    # The scratch database is not the only thing a run touches: miniatures and captured copies
+    # follow XDG_DATA_HOME, and this tool has been writing them into the machine's real cache
+    # beside the live library. They belong next to the scratch db, which is already marked
+    # PERF-SCRATCH for exactly this reason.
+    scratch_home = db.parent / "xdg"
+    scratch_home.mkdir(exist_ok=True)
+    env = dict(os.environ, BOXGANIZER_DB=str(db), XDG_DATA_HOME=str(scratch_home))
     if args.old_build:
         if not Path(OLD_BUILD_SRC).is_dir():
             sys.exit(
@@ -262,10 +297,9 @@ def main() -> int:
             f"[{args.label}] after:  headline={headline(after)!r} (old rule "
             f"{headline_pre44(after)!r})  {counts(after)}"
         )
-        same = headline(before) == headline(after)
         say(
-            f"[{args.label}] VERDICT: {headline(before)!r} -> {headline(after)!r} "
-            f"({'UNCHANGED — symptom reproduced' if same else 'changed'})"
+            f"[{args.label}] VERDICT: {headline(before)!r} -> {headline(after)!r} — "
+            f"{verdict(before, after)}"
         )
         wanted_before, wanted_after = before.get("wanted"), after.get("wanted")
         if isinstance(wanted_before, int) and isinstance(wanted_after, int):

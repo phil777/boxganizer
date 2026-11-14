@@ -1458,16 +1458,24 @@ def _self_contained(executable: str | None) -> int:
     server: subprocess.Popen[bytes] | None = None
     try:
         db = workdir / "boxes.db"
+        # Miniatures and any captured copy are found through `config.data_dir()`, which follows
+        # XDG_DATA_HOME -- and a harness that serves a throwaway library while writing into the real
+        # machine's cache is not throwaway. Everything the run produces stays under `workdir`.
+        scratch_home = workdir / "xdg"
+        scratch_home.mkdir()
+        child_env = {**os.environ, "XDG_DATA_HOME": str(scratch_home)}
         subprocess.run(
             [sys.executable, "-m", "boxganizer", "--db", str(db), "init"],
             check=True,
             capture_output=True,
+            env=child_env,
         )
         # A child we started and reap ourselves: `nohup cmd & echo $!` in a shell records the
         # wrapper, not the process, which is how this machine collected dozens of servers that
         # nobody could kill by the pid they had written down.
         server = subprocess.Popen(
             [sys.executable, "-m", "boxganizer", "--db", str(db), "serve", "--port", str(port)],
+            env=child_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
