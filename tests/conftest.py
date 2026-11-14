@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -70,3 +70,55 @@ def wait_for_index(client: object, timeout: float = 20.0) -> None:
                     f"index queue never drained: {len(state['todo'])} waiting, live={state['live']}"
                 )
         time.sleep(0.02)
+
+
+class CommitCounter:
+    """Wraps a store's connection and counts the commits that actually reach SQLite.
+
+    The tests that use it are about *how often the process syncs to disk*, which no query
+    result shows. Timing a real fsync would make the suite depend on the machine, so the
+    durability boundary is counted instead: same writes, fewer commits, provably.
+
+    It lives here rather than in `test_store.py` because a helper imported as
+    `from tests.test_store import ...` only resolves when the repository root is on
+    `sys.path` -- true for `python -m pytest`, false for the bare `pytest` that `make test`
+    runs. That mismatch let one invocation report a green suite and the other a broken one.
+    A fixture needs no import at all, and `tests/test_suite_layout.py` now holds the line.
+    """
+
+    def __init__(self, connection: object) -> None:
+        self._connection = connection
+        self.commits = 0
+        self.rollbacks = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+        self._connection.commit()  # type: ignore[attr-defined]
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        self._connection.rollback()  # type: ignore[attr-defined]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._connection, name)
+
+
+@pytest.fixture
+def commit_counter() -> Iterator[Callable[[BoxStore], CommitCounter]]:
+    """Install a :class:`CommitCounter` on a store, and take it back off afterwards.
+
+    Teardown restores the real connection even if the test forgot, or failed on the way out:
+    a store left holding a counter reports commit counts to whatever test borrowed it next.
+    """
+    installed: list[tuple[BoxStore, object]] = []
+
+    def install(box_store: BoxStore) -> CommitCounter:
+        spy = CommitCounter(box_store._conn)
+        installed.append((box_store, box_store._conn))
+        box_store._conn = spy  # type: ignore[assignment]
+        return spy
+
+    yield install
+
+    for box_store, connection in reversed(installed):
+        box_store._conn = connection  # type: ignore[assignment]

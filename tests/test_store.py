@@ -6,8 +6,10 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1264,31 +1266,6 @@ def test_descendants_of_an_empty_box_is_just_the_box(tmp_path: Path) -> None:
 # --- where the writes stop: transactions, refused rows, and waiting for the lock ---
 
 
-class _CommitSpy:
-    """Wraps the connection and counts the commits that actually reach SQLite.
-
-    The point of these tests is how *often the process syncs to disk*, which no query result
-    shows. Timing a real fsync would make the suite depend on the machine, so the boundary is
-    counted instead: same writes, fewer durability points, provably.
-    """
-
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self._connection = connection
-        self.commits = 0
-        self.rollbacks = 0
-
-    def commit(self) -> None:
-        self.commits += 1
-        self._connection.commit()
-
-    def rollback(self) -> None:
-        self.rollbacks += 1
-        self._connection.rollback()
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._connection, name)
-
-
 def _watch(store: BoxStore, name: str, body: str, folder: Path) -> Path:
     """A box pointing at a real file the index is being kept current for."""
     path = folder / name
@@ -1298,7 +1275,9 @@ def _watch(store: BoxStore, name: str, body: str, folder: Path) -> Path:
     return path
 
 
-def test_a_freshness_pass_writes_one_transaction(tmp_path: Path) -> None:
+def test_a_freshness_pass_writes_one_transaction(
+    tmp_path: Path, commit_counter: Callable[[BoxStore], Any]
+) -> None:
     """Five watched files, two changed: one commit, not one per row.
 
     The measurement this encodes is on a copy of a real library: a pass over 829 watched rows
@@ -1311,12 +1290,8 @@ def test_a_freshness_pass_writes_one_transaction(tmp_path: Path) -> None:
         for path in paths[:2]:
             path.write_text("edited outside boxganizer", encoding="utf-8")
             os.utime(path, (path.stat().st_mtime + 30, path.stat().st_mtime + 30))
-        spy = _CommitSpy(store._conn)
-        store._conn = spy  # type: ignore[assignment]
-        try:
-            stale = store.check_observations()
-        finally:
-            store._conn = spy._connection  # type: ignore[assignment]
+        spy = commit_counter(store)
+        stale = store.check_observations()
         assert len(stale) == 2
         assert spy.commits == 1, f"expected one durability point, got {spy.commits}"
         assert [row.marked_stale for row in store.indexed_resources()] == [True] * 2 + [
@@ -1412,18 +1387,16 @@ def test_a_second_writer_waits_instead_of_being_refused(tmp_path: Path) -> None:
         store.close()
 
 
-def test_filing_a_box_is_one_commit(tmp_path: Path) -> None:
+def test_filing_a_box_is_one_commit(
+    tmp_path: Path, commit_counter: Callable[[BoxStore], Any]
+) -> None:
     """A save used to pay three or four fsyncs for about a millisecond of logic."""
     store = BoxStore(tmp_path / "one-save.db", content_root=tmp_path)
     try:
         target = tmp_path / "gate.md"
         target.write_text("Oil the gate.", encoding="utf-8")
-        spy = _CommitSpy(store._conn)
-        store._conn = spy  # type: ignore[assignment]
-        try:
-            store.add(Box(name="Gate", box_type="text", resource_uri=str(target)))
-        finally:
-            store._conn = spy._connection  # type: ignore[assignment]
+        spy = commit_counter(store)
+        store.add(Box(name="Gate", box_type="text", resource_uri=str(target)))
         assert spy.commits == 1, f"expected one durability point, got {spy.commits}"
     finally:
         store.close()

@@ -6,7 +6,7 @@ import ast
 import os
 import re
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3300,7 +3300,7 @@ def test_the_status_read_reports_what_was_last_observed_and_says_so(
 
 
 def test_reading_the_index_status_writes_nothing(
-    client: TestClient, tmp_path: Path
+    client: TestClient, tmp_path: Path, commit_counter: Callable[[BoxStore], Any]
 ) -> None:
     """A page load leaves no trace in the database -- not one commit, not one row.
 
@@ -3309,8 +3309,6 @@ def test_reading_the_index_status_writes_nothing(
     every watched file, which is why a review of this code found it had been run against the
     real library by someone merely opening the page.
     """
-    from tests.test_store import _CommitSpy
-
     from boxganizer import search as text_search
     from boxganizer.models import Box as _Box
     from boxganizer.store import BoxStore as _BoxStore
@@ -3331,16 +3329,12 @@ def test_reading_the_index_status_writes_nothing(
             )
         text_search.rebuild(store, root=root)
         store.check_observations()  # so the read has something to be tempted to refresh
-        spy = _CommitSpy(store._conn)
-        store._conn = spy  # type: ignore[assignment]
-        try:
-            with TestClient(create_app(store, content_root=root)) as quiet:
-                for _ in range(4):
-                    assert quiet.get("/api/index/status").status_code == 200
-                assert quiet.get("/api/index/pending").status_code == 200
-                assert quiet.get("/api/search?q=boiler").status_code == 200
-        finally:
-            store._conn = spy._connection  # type: ignore[assignment]
+        spy = commit_counter(store)
+        with TestClient(create_app(store, content_root=root)) as quiet:
+            for _ in range(4):
+                assert quiet.get("/api/index/status").status_code == 200
+            assert quiet.get("/api/index/pending").status_code == 200
+            assert quiet.get("/api/search?q=boiler").status_code == 200
         assert spy.commits == 0, f"a read committed {spy.commits} times"
     finally:
         store.close()
