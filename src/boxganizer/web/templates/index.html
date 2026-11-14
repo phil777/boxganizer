@@ -31,6 +31,29 @@
           <button id="go-root" type="button" title="Show the root box">🌲 Root</button>
           <button id="new-box" type="button" title="Create a new box">＋ New box</button>
         </div>
+        <!-- How the list below is drawn and ordered. Two groups of two-state buttons: the left
+             group is about the shape of the list, the right group about its order, and the arrow
+             at the far right turns whichever order is chosen around. Icons, because the pane is
+             narrow and the words would be taller than the row; every one of them carries a label
+             for the screen reader and a title for the rest of us. -->
+        <div class="pane-controls" id="pane-controls">
+          <span class="pane-group" role="group" aria-label="How the boxes are shown">
+            <button type="button" id="pane-view-list" class="pane-toggle" data-mode="list"
+              aria-pressed="true" title="Show every box in one list">&#8801;</button>
+            <button type="button" id="pane-view-tree" class="pane-toggle" data-mode="tree"
+              aria-pressed="false" title="Fold each box under its single parent">&#8627;</button>
+          </span>
+          <span class="pane-group pane-group-sort" role="group" aria-label="How the boxes are sorted">
+            <button type="button" id="pane-sort-name" class="pane-toggle" data-sort="name"
+              aria-pressed="true" title="Sort alphabetically">Aa</button>
+            <button type="button" id="pane-sort-type" class="pane-toggle" data-sort="type"
+              aria-pressed="false" title="Group by box type, alphabetical inside each group">&#9670;</button>
+            <button type="button" id="pane-sort-children" class="pane-toggle" data-sort="children"
+              aria-pressed="false" title="Sort by how many boxes each one holds">&#9636;</button>
+            <button type="button" id="pane-direction" class="pane-toggle pane-direction"
+              aria-pressed="false" title="Reverse the order (now ascending)">&#8593;</button>
+          </span>
+        </div>
         <form id="search-form" autocomplete="off">
           <input id="search" type="search" placeholder="search boxes and their files" />
         </form>

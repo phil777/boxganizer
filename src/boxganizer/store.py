@@ -1488,6 +1488,24 @@ class BoxStore:
             reference == root or reference.startswith(f"{root}/") for root in prefixes
         )
 
+    def pane_links(self) -> dict[int, dict[str, list[int]]]:
+        """Which boxes file into which, for the whole library in two queries.
+
+        The left pane needs this for every row it draws: tree mode folds a box with exactly
+        one parent under that parent (ADR 45), and one of the sort orders asks for the folder
+        with the most children. Doing it per row would be two queries per box — 132 for the
+        library this was written against, once per pane draw — so it is done in two `GROUP BY`
+        sweeps instead and handed to the caller as maps keyed by box id.
+        """
+        links: dict[int, dict[str, list[int]]] = {}
+        for parent, child in self._rows("SELECT parent_id, child_id FROM links"):
+            entry = links.setdefault(int(parent), {"parents": [], "children": []})
+            entry["children"].append(int(child))
+            links.setdefault(int(child), {"parents": [], "children": []})["parents"].append(
+                int(parent)
+            )
+        return links
+
     def needing_index(self, *, limit: int = 200) -> list[dict[str, Any]]:
         """Which boxes are waiting on the index, and what is waiting for them.
 

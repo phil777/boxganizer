@@ -6752,3 +6752,56 @@ def test_a_small_answer_is_left_uncompressed(client: TestClient) -> None:
     assert answer.status_code == 200
     assert "content-encoding" not in answer.headers
     assert len(answer.content) < _MINIMUM_COMPRESSIBLE_BYTES
+
+
+def test_the_box_list_carries_where_each_box_is_filed(client: TestClient, tmp_path: Path) -> None:
+    """The pane cannot fold or sort by contents it is not told about.
+
+    Two counts, deliberately: `parent_count` is every parent a box has, and `filing_count`
+    leaves out the containers `box init` creates (the root box and the cabinet every new box
+    lands in). Folding on the first would hide the top level of the library and show the leaves
+    instead — measured on a live library, where 65 of 66 boxes have a container as a parent.
+    """
+    from boxganizer import bootstrap as seeding
+    from boxganizer.store import BoxStore as _BoxStore
+
+    store = _BoxStore(tmp_path / "links.db", content_root=tmp_path)
+    seeding.bootstrap(store)  # the root box and the cabinet, as `box init` makes them
+    try:
+        with TestClient(create_app(store, content_root=tmp_path)) as api:
+            rack_made = api.post(
+                "/api/boxes", json={"name": "Rack", "box_type": "folder"}
+            ).json()
+            second = api.post("/api/boxes", json={"name": "Hook", "box_type": "folder"}).json()
+            api.post(
+                "/api/boxes",
+                json={
+                    "name": "In One",
+                    "box_type": "note",
+                    "text": "one home\n",
+                    "parent": "Rack",
+                },
+            )
+            shared = api.post(
+                "/api/boxes", json={"name": "In Both", "box_type": "note", "text": "two\n"}
+            ).json()
+            api.post(
+                f"/api/boxes/{rack_made['uuid']}/children", json={"child": shared["uuid"]}
+            )
+            api.post(f"/api/boxes/{second['uuid']}/children", json={"child": shared["uuid"]})
+
+            rows = {row["name"]: row for row in api.get("/api/boxes").json()}
+            fields = {"parents", "parent_count", "child_count", "filing_parents", "filing_count"}
+            assert fields <= set(rows["Rack"])
+            rack, one, both = rows["Rack"], rows["In One"], rows["In Both"]
+            folder = rack_made
+            # a new box lands in the cabinet: a container, so it is not "filed somewhere"
+            assert rack["parent_count"] >= 1 and rack["filing_count"] == 0, rack
+            assert one["filing_count"] == 1, one
+            assert one["filing_parents"] == [folder["uuid"]]
+            assert both["filing_count"] == 2, both
+            assert rack["child_count"] == 2, rack  # In One and In Both
+            cabinet = rows["cabinet"]
+            assert cabinet["filing_count"] == 0, "the cabinet is a container, not a filing choice"
+    finally:
+        store.close()

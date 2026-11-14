@@ -2557,6 +2557,52 @@ pre.text {
   margin-left: auto;
 }
 
+.pane-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin: 0.2rem 0 0.35rem;
+}
+
+.pane-group { display: flex; gap: 0.15rem; }
+
+.pane-toggle {
+  appearance: none;
+  min-width: 1.55rem;
+  height: 1.55rem;
+  padding: 0 0.25rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  line-height: 1.35rem;
+  cursor: pointer;
+}
+
+.pane-toggle:hover { background: var(--panel); }
+
+.pane-toggle[aria-pressed="true"] {
+  /* stays pushed until another of its group is clicked, which is what makes the current
+     choice readable from across the room rather than only from the tooltip */
+  border-color: color-mix(in srgb, currentColor 35%, transparent);
+  background: var(--panel);
+}
+
+.pane-direction { margin-left: 0.3rem; }
+
+/* Tree mode: one level of indentation per fold, and the [+/−] affordance before the icon. */
+#box-list li .fold {
+  width: 1.1rem;
+  margin-left: -0.2rem;
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+#box-list li .fold-empty { display: inline-block; width: 1.1rem; }
+
 .index-tally {
   display: grid;
   grid-template-columns: auto auto;

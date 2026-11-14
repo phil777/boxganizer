@@ -28,6 +28,7 @@ from uuid import uuid4
 
 from boxganizer import (
     __version__,
+    bootstrap,
     boxtypes,
     capture,
     desktop,
@@ -688,6 +689,11 @@ def _stamp_age_seconds(stamp: str) -> float:
     return max(0.0, (datetime.now(UTC) - when).total_seconds())
 
 
+def boxtipes_is_root(box: object) -> bool:
+    """Whether a box's type is the library's root. Spelled out once so the list route stays flat."""
+    return bool(boxtypes.get(str(getattr(box, "box_type", ""))).is_root)
+
+
 def create_app(
     store: BoxStore | None = None,
     *,
@@ -950,7 +956,43 @@ def create_app(
     def list_boxes(
         store: StoreDep, limit: Annotated[int, Query(ge=1, le=1000)] = 200
     ) -> list[dict[str, object]]:
-        return _dump(store.list_boxes(limit=limit))
+        boxes = store.list_boxes(limit=limit)
+        rows = _dump(boxes)
+        # Where each box sits in the filing tree, on the way out: the pane cannot fold a box
+        # under its parent or sort by how much a folder holds without knowing both, and asking
+        # per row would be two queries per box on every draw. `parents` are uuids because that
+        # is the handle the page has for a box; `child_count` is a number because nothing on
+        # the page needs the list of children to draw one level — it filters by parent instead.
+        links = store.pane_links()
+        uuid_of = {box.id: box.uuid for box in boxes if box.id is not None}
+        # The root box is the library's container, not a filing decision somebody made, and an
+        # initialized library files *everything* in it: measured on a live one, 65 of 66 boxes
+        # have Root as a parent. Counting it would hand every box at least one parent, so "hide
+        # the boxes with exactly one parent" would hide the top level and show the leaves -- the
+        # tree upside down, and the pane no shorter, which is the one thing it was asked to be.
+        # So `filing_parents` is the list the tree folds on: the folders a person put it in.
+        # Two boxes are containers rather than filing decisions: the root, which is the way in,
+        # and the cabinet, which `box init` creates and which every new box lands in unless
+        # somewhere else is named (bootstrap). Counting either would give every box a parent it
+        # never chose, so "boxes with exactly one parent fold under it" would fold the top of the
+        # tree and show the leaves instead -- and the pane, which is what the report asked for,
+        # would not get any shorter.
+        container_types = {bootstrap.CABINET_BOX_TYPE}
+        container_ids = {
+            box.id
+            for box in boxes
+            if box.id is not None
+            and (boxtipes_is_root(box) or box.box_type in container_types)
+        }
+        for box, row in zip(boxes, rows, strict=True):
+            entry = links.get(int(box.id or 0), {"parents": [], "children": []})
+            row["parents"] = [uuid_of[i] for i in entry["parents"] if i in uuid_of]
+            row["parent_count"] = len(entry["parents"])
+            row["child_count"] = len(entry["children"])
+            filing = [i for i in entry["parents"] if i not in container_ids]
+            row["filing_parents"] = [uuid_of[i] for i in filing if i in uuid_of]
+            row["filing_count"] = len(filing)
+        return rows
 
     @app.get("/api/boxes/{ref}")
     def read_box(ref: str, store: StoreDep) -> dict[str, object]:

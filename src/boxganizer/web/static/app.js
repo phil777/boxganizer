@@ -3040,6 +3040,98 @@ async function refreshSide() {
   renderSide();
 }
 
+// How the left pane is drawn and ordered. Deliberately not derived from the boxes themselves:
+// a pane that "auto-detected" the useful view would change under a person who was reading it.
+const pane = { mode: "list", sort: "name", up: true, open: new Set() };
+
+function pinRootFirst(boxes) {
+  // The way in stays at the top whatever the order below it is. Sorting was added to this pane
+  // after that rule, and a plain alphabetical sort silently broke it: the pane that used to
+  // begin with Root began with "Board", and the row the context-menu check reaches for first
+  // stopped being the one with no delete entry.
+  const root = boxes.filter((box) => (state.types.get(box.box_type) || {}).is_root);
+  return [...root, ...boxes.filter((box) => !root.includes(box))];
+}
+
+function sortForSide(boxes) {
+  const sign = pane.up ? 1 : -1;
+  const byName = (a, b) => sign * a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  if (pane.sort === "type") {
+    // Grouped by type, alphabetical inside each group: "where are all the images" is a shape
+    // question, and the order inside the group is still the one a name is found by.
+    return [...boxes].sort((a, b) => sign * (a.box_type.localeCompare(b.box_type) || byName(a, b)));
+  }
+  if (pane.sort === "children") {
+    // A folder holding 65 boxes and a folder holding one are not the same thing to open, and
+    // the count is on the row already, so sorting by it costs nothing new.
+    return [...boxes].sort(
+      (a, b) => sign * ((b.child_count || 0) - (a.child_count || 0)) || byName(a, b)
+    );
+  }
+  return [...boxes].sort(byName);
+}
+
+/** The rows the pane shows, in order, each with how deep it sits. */
+function paneRows(boxes) {
+  if (pane.mode !== "tree" || el("search").value.trim()) {
+    // A tree that folded away the boxes the search just found would be a search nobody trusts:
+    // with a term in the field the answers are shown flat, whatever the view is set to.
+    return pinRootFirst(sortForSide(boxes)).map((box) => ({
+      box, depth: 0, foldable: false, open: false,
+    }));
+  }
+  const present = new Set(boxes.map((box) => box.uuid));
+  const children = new Map();
+  boxes.forEach((box) => {
+    // Only a single-parent box folds. A box filed in two folders belongs to both, and choosing
+    // one of them to hide it under would be the pane inventing a fact about the library.
+    if ((box.filing_count || 0) === 1 && present.has(box.filing_parents[0])) {
+      const parent = box.filing_parents[0];
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(box);
+    }
+  });
+  const rows = [];
+  const walk = (box, depth) => {
+    const kids = children.get(box.uuid) || [];
+    const open = pane.open.has(box.uuid);
+    rows.push({ box, depth, foldable: kids.length > 0, open });
+    if (open) sortForSide(kids).forEach((kid) => walk(kid, depth + 1));
+  };
+  // Filed nowhere and filed in two or more places are both roots: the first is top level, the
+  // second is shared, and neither has a single parent to disappear into. The root box and the
+  // cabinet are containers, not filing choices, and the server leaves them out of the count.
+  pinRootFirst(sortForSide(boxes.filter((box) => (box.filing_count || 0) !== 1))).forEach(
+    (root) => walk(root, 0)
+  );
+  return rows;
+}
+
+function setPaneView(mode) {
+  pane.mode = mode;
+  ["list", "tree"].forEach((kind) => {
+    el(`pane-view-${kind}`).setAttribute("aria-pressed", String(kind === mode));
+  });
+  renderSide();
+}
+
+function setPaneSort(sort) {
+  pane.sort = sort;
+  ["name", "type", "children"].forEach((kind) => {
+    el(`pane-sort-${kind}`).setAttribute("aria-pressed", String(kind === sort));
+  });
+  renderSide();
+}
+
+function setPaneDirection(up) {
+  pane.up = up;
+  const toggle = el("pane-direction");
+  toggle.setAttribute("aria-pressed", String(!up));
+  toggle.innerHTML = up ? "&#8593;" : "&#8595;";
+  toggle.title = `Reverse the order (now ${up ? "ascending" : "descending"})`;
+  renderSide();
+}
+
 /** Root first, then the rest as the server ordered them. */
 function orderedForSide(boxes) {
   const roots = boxes.filter((box) => (state.types.get(box.box_type) || {}).is_root);
@@ -3051,11 +3143,24 @@ function renderSide() {
   const list = el("box-list");
   clearDropZones(); // the folder's own list is a drop zone that outlives every re-render of it
   list.replaceChildren();
-  orderedForSide(state.boxes).forEach((box) => {
+  paneRows(orderedForSide(state.boxes)).forEach(({ box, depth, foldable, open }) => {
     const item = document.createElement("li");
     item.dataset.uuid = box.uuid;
     item.draggable = true; // a box can be dragged onto a grid cell
     item.setAttribute("role", "option");
+    if (depth) item.style.paddingLeft = `${0.3 + depth * 0.85}rem`;
+    if (foldable) {
+      // "[+]" before the icon and the name, exactly as asked for: it reads as a control on the
+      // row rather than as decoration, and the same sign turns into "[-]" once it is opened.
+      const fold = document.createElement("span");
+      fold.className = "fold";
+      fold.dataset.fold = box.uuid;
+      fold.setAttribute("role", "button");
+      fold.setAttribute("aria-expanded", String(open));
+      fold.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} ${box.name}`);
+      fold.textContent = open ? "[-]" : "[+]";
+      item.append(fold);
+    }
     const glyph = iconElement(box);
     const name = document.createElement("span");
     name.textContent = box.name;
@@ -4898,6 +5003,25 @@ async function init() {
     window.clearTimeout(configSyncTimer);
     configSyncTimer = window.setTimeout(syncConfigGear, 60);
   }).observe(el("canvas"), { childList: true, subtree: true });
+  // The pane's shape and order. Delegated on the list because every row is replaced on each
+  // draw: a listener bound to a row would die with it, and the fold would silently stop
+  // working the first time the box it belonged to was re-rendered.
+  el("box-list").addEventListener("click", (event) => {
+    const fold = event.target.closest(".fold");
+    if (!fold) return;
+    event.stopPropagation(); // opening a folder is not the same act as choosing it
+    const uuid = fold.dataset.fold;
+    if (pane.open.has(uuid)) pane.open.delete(uuid);
+    else pane.open.add(uuid);
+    renderSide();
+  });
+  el("pane-view-list").addEventListener("click", () => setPaneView("list"));
+  el("pane-view-tree").addEventListener("click", () => setPaneView("tree"));
+  el("pane-sort-name").addEventListener("click", () => setPaneSort("name"));
+  el("pane-sort-type").addEventListener("click", () => setPaneSort("type"));
+  el("pane-sort-children").addEventListener("click", () => setPaneSort("children"));
+  el("pane-direction").addEventListener("click", () => setPaneDirection(!pane.up));
+
   el("index-close").addEventListener("click", () => el("index-modal").close());
   el("pending-look").addEventListener("click", () => drawPending({ check: true }));
   el("pending-reindex").addEventListener("click", () => {

@@ -884,6 +884,126 @@ def _run(base: str, executable: str | None) -> int:
             api_delete(base, f"/api/boxes/{shelf['uuid']}")
             shutil.rmtree(gone_dir.parent, ignore_errors=True)
 
+        print("the left pane folds each box under its single parent")
+        # Three levels deep, plus one box filed twice: the recursion and the exception are the
+        # two things a tree view gets wrong. A box with two parents has no single place to hide,
+        # so it stays a root — folding it under whichever parent the code met first would be the
+        # pane inventing a fact about the library.
+        tree_made: list[str] = []
+        try:
+            wall = next(b for b in api(base, "/api/boxes") if b["name"] == "Wall")["uuid"]
+            for name, kind, parent, body in (
+                ("Treehouse", "folder", None, ""),
+                ("Branch", "folder", "Treehouse", ""),
+                ("Twig", "note", "Branch", "a leaf of the branch\n"),
+            ):
+                payload: dict[str, object] = {"name": name, "box_type": kind}
+                if body:
+                    payload["text"] = body
+                if parent:
+                    payload["parent"] = parent
+                made_box = api(base, "/api/boxes", payload)
+                tree_made.append(made_box["uuid"])
+                if name == "Treehouse":
+                    house_uuid = made_box["uuid"]
+                if name == "Branch":
+                    branch_uuid = made_box["uuid"]
+                if name == "Twig":
+                    twig_uuid = made_box["uuid"]
+            shared = api(
+                base,
+                "/api/boxes",
+                {"name": "Shared twice", "box_type": "note", "text": "filed in two folders\n"},
+            )
+            tree_made.append(shared["uuid"])
+            api(base, f"/api/boxes/{wall}/children", {"child": shared["uuid"]})
+            # two filing folders, so it is shared and stays a root of the tree (the cabinet and
+            # the root box are containers, not filing choices, and do not count here)
+            api(base, f"/api/boxes/{house_uuid}/children", {"child": shared["uuid"]})
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(400)
+
+            def row_text(uuid: str) -> str:
+                found = page.locator(f'#box-list li[data-uuid="{uuid}"]')
+                return found.inner_text() if found.count() else ""
+
+            def fold_of(uuid: str):
+                return page.locator(f'#box-list li[data-uuid="{uuid}"] .fold')
+
+            checks.check(
+                "list mode shows every box and offers no folds",
+                page.locator("#box-list li").count() >= 6 and fold_of(house_uuid).count() == 0,
+                f"{page.locator('#box-list li').count()} rows",
+            )
+            page.locator("#pane-view-tree").click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "the tree button stays pushed and the list one does not",
+                page.locator("#pane-view-tree").get_attribute("aria-pressed") == "true"
+                and page.locator("#pane-view-list").get_attribute("aria-pressed") == "false",
+            )
+            checks.check(
+                "a single-parent box is hidden under its parent",
+                row_text(branch_uuid) == "" and row_text(twig_uuid) == "",
+                f"branch={row_text(branch_uuid)!r} twig={row_text(twig_uuid)!r}",
+            )
+            checks.check(
+                "a box with no parent at all is a root, and offers no fold of its own",
+                "Treehouse" in row_text(house_uuid) and fold_of(house_uuid).inner_text() == "[+]",
+                row_text(house_uuid),
+            )
+            fold_of(house_uuid).click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "one [+ unfolds exactly one level",
+                "Branch" in row_text(branch_uuid)
+                and row_text(twig_uuid) == ""
+                and fold_of(branch_uuid).inner_text() == "[+]",
+                f"branch={row_text(branch_uuid)!r} twig={row_text(twig_uuid)!r}",
+            )
+            checks.check("the sign becomes [-] once opened",
+                         fold_of(house_uuid).inner_text() == "[-]")
+
+            page.wait_for_timeout(100)
+            checks.check(
+                "and the child folds in turn, recursively",
+                "Branch" in row_text(branch_uuid)
+                and row_text(twig_uuid) == ""
+                and fold_of(branch_uuid).inner_text() == "[+]",
+                f"branch={row_text(branch_uuid)!r} twig={row_text(twig_uuid)!r}",
+            )
+            checks.check(
+                "a box with two parents stays a root of the tree",
+                "Shared twice" in row_text(shared["uuid"]),
+                row_text(shared["uuid"]),
+            )
+            fold_of(branch_uuid).click()
+            page.wait_for_timeout(300)
+            checks.check("the third level appears under the second", "Twig" in row_text(twig_uuid))
+            def indent_of(uuid: str) -> float:
+                pad = page.locator(f'#box-list li[data-uuid="{uuid}"]').evaluate(
+                    "element => getComputedStyle(element).paddingLeft"
+                )
+                return float(str(pad).replace("px", "").replace("rem", ""))
+
+            checks.check(
+                "the depth is visible, not only implied",
+                indent_of(twig_uuid) > indent_of(house_uuid),
+                f"house={indent_of(house_uuid)} twig={indent_of(twig_uuid)}",
+            )
+            page.locator("#pane-view-list").click()
+            page.wait_for_timeout(300)
+            checks.check(
+                "list mode again behaves exactly as it always did",
+                row_text(twig_uuid) != ""
+                and row_text(house_uuid) != ""
+                and page.locator("#box-list .fold").count() == 0,
+                f"folds left: {page.locator('#box-list .fold').count()}",
+            )
+        finally:
+            for uuid in tree_made:
+                api_delete(base, f"/api/boxes/{uuid}")
+
         checks.check("no console errors", not errors, "; ".join(errors[:3]))
         page.screenshot(path="/tmp/verify-web-ui.png")
         browser.close()
