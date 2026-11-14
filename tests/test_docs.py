@@ -305,3 +305,30 @@ def test_wording_quoted_as_the_pages_own_comes_from_the_page() -> None:
     assert "out of date`" not in script, "app.js emits `out of date` again — check the docs"
     for name, text in docs.items():
         assert "out of date`" not in text, f"{name} quotes wording the page does not produce"
+
+
+def test_the_adrs_cited_by_the_documents_exist() -> None:
+    """A reader who follows `(ADR 46)` from the tour must land on a decision, not on nothing.
+
+    The mechanics tests check links and anchors; they cannot check a parenthetical number written in
+    prose. This one is worth having because the ADR index and the prose are maintained in separate
+    passes, and a renumbered or renamed record leaves the sentence looking entirely serious.
+    """
+    sources = {
+        "README.md": README.read_text(encoding="utf-8"),
+        "doc/web-app.md": (ROOT / "doc" / "web-app.md").read_text(encoding="utf-8"),
+    }
+    available = {int(path.name[:4]) for path in (ROOT / "doc" / "adr").glob("0*.md")}
+    # `ADR 46`, `ADRs 15 and 17`, `ADRs 41, 42 and 44`: one citation word followed by a number list.
+    clause = re.compile(r"ADRs?\s+((?:\d{2,4})(?:\s*(?:,|and|\&)\s*\d{2,4})*)")
+    cited = {
+        (name, int(number))
+        for name, text in sources.items()
+        for found in clause.findall(text)
+        for number in re.findall(r"\d{2,4}", found)
+    }
+    assert cited, "the documents cite no ADRs at all, which is itself suspicious"
+    missing = sorted(
+        f"{name}: ADR {number:04d}" for name, number in cited if number not in available
+    )
+    assert not missing, "documents cite records that do not exist: " + ", ".join(missing)

@@ -74,3 +74,5 @@ What becomes easy, what becomes harder, what we now have to watch.
 | 0043   | WAL so a reader cannot refuse a writer, and not one word about speed | accepted |
 | 0044   | A resource that is gone is counted as gone, not as work | accepted |
 | 0045   | The left pane folds on filing choices, not on containers — and every drop target paints | accepted |
+| 0046   | A directory's search field asks the index, and answers with files | accepted |
+| 0047   | A folder that went away is listed as absent, not answered with a 404 | accepted |

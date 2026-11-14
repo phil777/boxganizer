@@ -186,14 +186,18 @@ at a document still leaves that document exactly where it was.
 **Every box has a search of its own**, on the tag line: the field sits on the left and the tags stay
 right of centre. It asks the library's existing full-text question restricted to that box and whatever
 is filed below it — same ranking, same passage, same widening, one extra set clause — so nothing is
-re-read to answer it, and a cycle in the graph terminates instead of looping (ADR 33).
+re-read to answer it, and a cycle in the graph terminates instead of looping (ADR 33). An
+**indexed-directory** asks that question one step further: its field searches the files in the folder
+and below them, by name and by what they say, and the listing becomes the answer (ADR 46).
 
 **If the box has a list to narrow, that list is the answer, and nothing unrolls over it.** In a folder,
-a directory, an indexed-directory or a cabinet, typing closes the displayed rows down to what matches —
+a directory or a cabinet, typing closes the displayed rows down to what matches —
 list, icons or file listing — and says `2 of 4 inside` while it does. A second copy of those same
 matches floating on top would hide the rows you are about to click, in the only place that shows them
 in order and in context, so the popup is withdrawn wherever a surface is listening (ADR 39). The page
-decides by asking whether anything underneath is filtering, not by consulting a list of types.
+decides by asking whether anything underneath is filtering, not by consulting a list of types. In an
+indexed-directory the list is doing more than narrowing (ADR 46), and it withdraws the popup for the
+hits it drew itself; a hit that is some *other* box, with no file row to sit in, still gets the popup.
 
 **A match deeper than a row is shown by the row that holds it, and the row says so.** A box three levels
 down keeps the drawers above it on screen — a match you cannot reach is not a filter but a dead end — and
