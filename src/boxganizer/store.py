@@ -1367,6 +1367,103 @@ class BoxStore:
             )
         return found
 
+    def missing_watch(self) -> dict[str, Any]:
+        """Watched resources that are not on this machine, split off from the work a pass can do.
+
+        The panel counts a resource as work when it is stale or has never been read. A resource
+        whose path is gone is *always* stale -- `Resource.stale` has to say so, because nothing in
+        the index can match a file that is not there -- so those rows sit in the number for good
+        and no pass will ever move them: on the library this was measured against, 64 of the 67
+        the screen was asking about, which is why pressing the button changed nothing. Counting
+        them as work is what makes a person press it again, which ADR 41 refused to solve by
+        deleting them; ADR 44 is the other half, which is to count them somewhere else instead.
+
+        So `work` is what the headline may offer and `resources` is the fact that stands beside
+        it. `wanted` still counts every one of them, `stale` keeps its meaning, and no row is
+        edited to make the screen look better -- the two numbers come from one read of the same
+        rows, so they cannot drift apart.
+
+        A gone folder is counted as a resource too, because the panel's `stale` counts its row:
+        leaving it out would leave one file unaccounted for in a headline that is supposed to add
+        up. Everything inside a gone folder is unreachable by membership alone, so those are
+        counted with SQL rather than with a `stat` each; only the *stray* case -- one deleted file
+        under a folder that is still here -- is decided by looking, and only among the rows the
+        panel is already offering as work. A stray file nobody has re-checked since it was deleted
+        is not in this count, and says so by being absent until the next look at the files.
+        """
+        gone_roots = self.missing_directories()
+        candidates = self._rows(
+            """
+            SELECT id, reference FROM resources
+             WHERE index_it = 1 AND (stale = 1 OR indexed_at IS NULL)
+            """
+        )
+        binds_for: dict[str, tuple[object, ...]] = {
+            root: (root, len(root) + 1, f"{root}/") for root in gone_roots
+        }
+        roots: list[dict[str, Any]] = []
+        box_ids: set[int] = set()
+        for root, binds in binds_for.items():
+            count = self._rows(
+                "SELECT count(*) AS n FROM resources"
+                " WHERE index_it = 1"
+                "   AND (reference = ? OR substr(reference, 1, ?) = ?)",
+                binds,
+            )
+            roots.append(
+                {
+                    "reference": root,
+                    "display": resources.display(root),
+                    "resources": int(count[0]["n"]) if count else 0,
+                }
+            )
+            box_ids.update(
+                int(row["id"])
+                for row in self._rows(
+                    "SELECT b.id AS id FROM boxes b"
+                    " JOIN resources r ON b.resource_id = r.id"
+                    " WHERE r.reference = ? OR substr(r.reference, 1, ?) = ?",
+                    binds,
+                )
+            )
+
+        def under_a_gone_root(reference: str) -> bool:
+            return any(self._lives_under(reference, [root]) for root in binds_for)
+
+        stray = 0
+        unreachable_candidates = 0
+        for row in candidates:
+            reference = str(row["reference"])
+            if under_a_gone_root(reference):
+                unreachable_candidates += 1
+                continue
+            if resources.origin_of(reference) != resources.LOCAL:
+                continue
+            if Path(resources.normalise(reference)).exists():
+                continue
+            stray += 1
+            unreachable_candidates += 1
+            box_ids.update(
+                int(box["id"])
+                for box in self._rows(
+                    "SELECT b.id AS id FROM boxes b"
+                    " JOIN resources r ON b.resource_id = r.id WHERE r.reference = ?",
+                    (reference,),
+                )
+            )
+        inside = sum(int(entry["resources"]) for entry in roots)
+        return {
+            # Everything this read can show is unreachable. `resources`, not `files`: a folder
+            # that is gone is one of them, and its box is the reason anyone still cares.
+            "resources": inside + stray,
+            "boxes": len(box_ids),
+            "roots": [entry for entry in roots if entry["resources"]],
+            "stray": stray,
+            "candidates": len(candidates),
+            # What the headline may offer: the same rows, minus the ones no pass can read.
+            "work": max(len(candidates) - unreachable_candidates, 0),
+        }
+
     def _gone_prefixes(self) -> list[str]:
         """Directory prefixes whose watched contents cannot be read right now."""
         return self.missing_directories()

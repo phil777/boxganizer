@@ -4189,6 +4189,13 @@ function indexWaiting(status_) {
   // and a headline that counts them is a button that does nothing ("68 to reindex", pressed
   // every morning for a year). They are still in `wanted`, still counted in the detail line,
   // and named there by folder -- this subtracts them from *offered work*, never from the index.
+  // A file that is not on this machine is not waiting: no pass can read it, so a headline that
+  // counts it is a button that does nothing, pressed again and again. The server splits its own
+  // work list for this reason (`missing_watch`, ADR 44) instead of letting the page subtract a
+  // figure it cannot verify -- and it never touches `wanted`, which still counts every one of
+  // those files as something the index is asked to keep up with.
+  const missing = status_.missing;
+  if (missing && typeof missing.work === "number") return missing.work;
   const total = (status_.stale || 0) + (status_.untouched || 0);
   const gone = (status_.missing_roots || []).reduce((sum, root) => sum + (root.waiting || 0), 0);
   return Math.max(total - gone, 0);
@@ -4239,15 +4246,25 @@ function indexDetail(status_) {
     );
   }
   parts.push(observedSentence(status_));
-  for (const gone of status_.missing_roots || []) {
-    // Named, and counted, because the alternative is a headline that offers work no pass can
-    // do -- and because "64 files are missing" without the folder reads as a warning about
-    // the index rather than about a folder that is not on this machine.
+  const unreachable = status_.missing;
+  if (unreachable && unreachable.files) {
+    // Its own number, beside the work, naming where: "64 files are missing" without the folder
+    // reads as a fault in the index rather than a folder that is not on this machine, and a
+    // headline that silently excludes files is what taught people that Reindex does nothing.
+    const where = (unreachable.roots || [])
+      .map((root) => `${root.resources} under ${root.display}`)
+      .concat(
+        unreachable.stray
+          ? [`${unreachable.stray} deleted file${unreachable.stray === 1 ? "" : "s"}`]
+          : []
+      )
+      .join(", ");
     parts.push(
-      `${gone.files} files live under ${gone.display}, which is gone from this machine` +
-        (gone.waiting ? ` (${gone.waiting} of them counted as waiting)` : "") +
-        ` (${gone.boxes} box${gone.boxes === 1 ? "" : "es"}). Nothing was removed from the` +
-        " index: put the folder back and ask again."
+      `${unreachable.resources} watched resource${unreachable.resources === 1 ? "" : "s"} ` +
+        `are gone from this machine (${where}) and ${unreachable.boxes} box${
+          unreachable.boxes === 1 ? "" : "es"
+        } still ${unreachable.boxes === 1 ? "points" : "point"} at them; they are not counted` +
+        " as work. Nothing was removed from the index: put them back and ask again."
     );
   }
   if (last) {
@@ -4448,13 +4465,13 @@ async function drawPending({ check = false } = {}) {
       " no row until something walks the folder. Reindexing does that.";
     list.append(note);
   }
-  const missing = (report.missing_roots || []).map((root) => root.display);
-  if (missing.length) {
+  const missingDisplays = (report.missing_roots || []).map((root) => root.display);
+  if (missingDisplays.length) {
     const note = document.createElement("li");
     note.className = "pending-caveat";
     note.textContent =
       "Some of these live under a folder that is not on this machine: " +
-      missing.join(", ") +
+      missingDisplays.join(", ") +
       ". They are still in the index and still counted as wanted. Restore the folder and" +
       " ask again, or stop watching them from the folder's own box.";
     list.append(note);

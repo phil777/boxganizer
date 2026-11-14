@@ -482,3 +482,160 @@ def test_the_status_endpoint_names_the_gone_folder(tmp_path: Path) -> None:
             assert all(not item["fixable"] for item in pending["items"])
     finally:
         store.close()
+
+
+# --- ADR 44: gone-but-referenced resources are a number of their own, not work ---
+
+
+def _gone_and_a_changed(tmp_path: Path, name: str = "acct.db") -> tuple[BoxStore, Path, Path]:
+    """A library with two files under a folder that will go, and one file that will merely change.
+
+    The two populations have to be told apart by the tests as carefully as the panel tells them
+    apart: one is a fact about this machine, the other is work.
+    """
+    root = tmp_path / "library"
+    gone = root / "archive"
+    live = root / "live"
+    (gone / "deep").mkdir(parents=True)
+    live.mkdir()
+    (gone / "one.md").write_text("the boiler pressure gauge leaks\n", encoding="utf-8")
+    (gone / "deep" / "two.md").write_text("an order for cement mixer parts\n", encoding="utf-8")
+    keep = live / "three.md"
+    keep.write_text("the anode needs replacing soon\n", encoding="utf-8")
+    store = BoxStore(tmp_path / name, content_root=root)
+    folder = store.add(
+        Box(name="Archive", box_type="indexed-directory", resource_uri=str(gone))
+    )
+    store.set_index_flag(folder.resource_id, True)
+    store.add(Box(name="Live", box_type="markdown", resource_uri=str(keep)))
+    text_search.rebuild(store, root=root)
+    return store, gone, keep
+
+
+def test_gone_files_are_counted_separately_and_nothing_else_moves(tmp_path: Path) -> None:
+    """The separate count, and the two numbers it must not disturb.
+
+    `wanted` and `stale` are asserted *unchanged on purpose*: the easy way to make the headline
+    honest is to stop counting the hopeless files, and that is the silent decision ADR 41 refused
+    and ADR 44 keeps refused. Only the offered-work split moves.
+    """
+    import shutil
+
+    store, gone, _keep = _gone_and_a_changed(tmp_path)
+    try:
+        before = store.index_counts()
+        assert store.missing_watch()["resources"] == 0
+
+        shutil.rmtree(gone)
+        store.check_observations()
+
+        missing = store.missing_watch()
+        # 2 files and the folder itself: the panel's `stale` counts all three, so a count that
+        # covered only the files would leave one resource unexplained in the headline.
+        assert missing["resources"] == 3, missing
+        assert missing["stray"] == 0
+        assert [root["resources"] for root in missing["roots"]] == [3], missing
+        # the folder's box depends on what was inside it, so "0 boxes" would be a lie
+        assert missing["boxes"] == 1, missing
+        # both numbers agree about the total they are splitting, and none of it is work
+        assert missing["candidates"] == missing["work"] + 3, missing
+        assert missing["work"] == 0
+
+        after = store.index_counts()
+        assert after["wanted"] == before["wanted"], "the count of what is wanted moved"
+        assert after["stale"] == before["stale"] + 3, (
+            "the gone files were not remembered as stale"
+        )
+        assert after["indexed"] == before["indexed"], "a document was lost by noticing a folder"
+        assert store.doc_index_agreement() == {
+            "claimed_without_words": 0,
+            "words_unclaimed": 0,
+        }
+    finally:
+        store.close()
+
+
+def test_work_and_hopeless_are_split_by_what_a_pass_can_actually_read(tmp_path: Path) -> None:
+    """One changed file and two gone ones: the split is 1 / 2, not 3 / 0.
+
+    This is the arithmetic behind the headline the user sees. On their library the same split came
+    out 3 readable against 64 hopeless, which is why pressing Reindex 21 times changed nothing.
+    """
+    import os
+    import shutil
+
+    store, gone, keep = _gone_and_a_changed(tmp_path, "split.db")
+    try:
+        shutil.rmtree(gone)
+        keep.write_text("the anode needs replacing and the gate too\n", encoding="utf-8")
+        os.utime(keep, (keep.stat().st_atime, keep.stat().st_mtime + 40))
+        store.check_observations()
+
+        missing = store.missing_watch()
+        # 2 gone files + the gone folder = 3 unreachable; the live changed file is the only work
+        assert missing["resources"] == 3, missing
+        assert missing["work"] == 1, missing
+        assert missing["stray"] == 0
+        assert missing["candidates"] == 4
+
+        # and a pass does the work and leaves the hopeless alone
+        text_search.rebuild(store, root=root_of(store), only_stale=True)
+        store.check_observations()
+        after = store.missing_watch()
+        assert after["work"] == 0, after
+        assert after["resources"] == 3, "a pass changed what is on the disk"
+        assert store.index_counts()["wanted"] == 4, "a pass un-indexed something"
+    finally:
+        store.close()
+
+
+def root_of(store: BoxStore) -> Path:
+    return Path(store.content_root)  # type: ignore[arg-type]
+
+
+def test_restoring_the_folder_moves_the_files_back_into_work(tmp_path: Path) -> None:
+    """Re-arming is still just restoring the folder: the count has nothing to un-set.
+
+    Checked in both directions in one test, because the whole reason the population is derived
+    from the disk rather than stored is that a restore has to work without a repair step.
+    """
+    import shutil
+
+    store, gone, _keep = _gone_and_a_changed(tmp_path, "restore.db")
+    try:
+        backup = tmp_path / "backup-archive"
+        shutil.move(str(gone), str(backup))
+        store.check_observations()
+        assert store.missing_watch()["resources"] == 3
+
+        shutil.move(str(backup), str(gone))
+        store.check_observations()
+        back = store.missing_watch()
+        assert back["resources"] == 0, back
+        assert back["roots"] == []
+        assert back["work"] == store.index_counts()["stale"]
+    finally:
+        store.close()
+
+
+def test_both_index_endpoints_carry_the_separate_number(tmp_path: Path) -> None:
+    """Status and pending agree, because both ask the same question of the same store."""
+    import shutil
+
+    store, gone, _keep = _gone_and_a_changed(tmp_path, "api-missing.db")
+    try:
+        with TestClient(create_app(store, content_root=root_of(store))) as client:
+            assert client.get("/api/index/status").json()["missing"]["resources"] == 0
+            shutil.rmtree(gone)
+            client.post("/api/index/check")
+            status = client.get("/api/index/status").json()
+            pending = client.get("/api/index/pending").json()
+            assert status["missing"]["resources"] == 3, status["missing"]
+            assert status["missing"]["boxes"] == 1
+            assert status["missing"]["roots"][0]["display"] == "archive"
+            assert pending["missing"]["resources"] == 3
+            # the headline's source of truth: work excludes them, `wanted` does not
+            assert status["missing"]["work"] == status["stale"] - status["missing"]["resources"]
+            assert status["wanted"] == 4
+    finally:
+        store.close()

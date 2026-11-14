@@ -1800,7 +1800,11 @@ def create_app(
 
     def _status_snapshot(request: Request, store: BoxStore) -> dict[str, Any]:
         """The status body, assembled in one place so `POST /api/index/check` cannot drift."""
-        return {**store.index_counts(), "missing_roots": store.gone_populations()}
+        return {
+            **store.index_counts(),
+            "missing_roots": store.gone_populations(),
+            "missing": store.missing_watch(),
+        }
 
     @app.get("/api/index/status")
     def index_status(request: Request, store: StoreDep) -> dict[str, Any]:
@@ -1830,6 +1834,9 @@ def create_app(
         # the folder named, and acted upon nowhere -- restoring the folder is enough to make
         # the number come back, because nothing about it was ever recorded.
         body["missing_roots"] = store.gone_populations()
+        # Their own number, beside the work rather than inside it: the files a pass can never
+        # read are counted here and stopped from being offered as something to do (ADR 44).
+        body["missing"] = store.missing_watch()
         job = _index_job(request)
         queue = _index_state()
         with queue["lock"]:
@@ -1898,6 +1905,7 @@ def create_app(
             # The dialog offers "Reindex them" for the fixable ones; this is why the other
             # number is not on the button, said once instead of leaving the list short.
             "missing_roots": store.gone_populations(),
+            "missing": store.missing_watch(),
         }
 
     @app.post("/api/index/run")
